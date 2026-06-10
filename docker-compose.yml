@@ -1,0 +1,70 @@
+version: '3.8'
+
+services:
+  app:
+    build: ./backend
+    restart: always
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - FAST_THINKER_MODEL=qwen2.5:8b-instruct
+      - SLOW_THINKER_MODEL=qwen2.5:14b-instruct
+      - VISION_MODEL=llava:7b
+      - EMBEDDING_MODEL=nomic-embed-text
+      - DB_URL=postgresql+psycopg2://postgres:postgres@db:5432/estate
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-g6J29S5P6R4V5mN_W_TEST_KEY_MUST_BE_32_BYTES_BASE64=}
+      - STORAGE_DRIVER=LOCAL
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DB_ECHO=${DB_ECHO:-false}
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - SMTP_FROM=${SMTP_FROM}
+    ports:
+      - "8000:8000"
+    volumes:
+      - uploads_data:/app/static/uploads
+    depends_on:
+      - db
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  db:
+    image: pgvector/pgvector:pg15
+    restart: always
+    command: ["postgres", "-c", "shared_preload_libraries=pgvector"]
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=estate
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  langfuse:
+    image: langfuse/langfuse:2
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/estate
+      - NEXTAUTH_SECRET=my-secret-key-must-be-very-secure
+      - NEXTAUTH_URL=http://localhost:3000
+      - TELEMETRY_ENABLED=false
+
+  nginx:
+    image: nginx:alpine
+    restart: always
+    volumes:
+      - ./frontend/dist:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - uploads_data:/usr/share/nginx/html/static/uploads:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - app
+
+volumes:
+  pgdata:
+  uploads_data:

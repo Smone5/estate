@@ -1,0 +1,1102 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "The Estate Steward API",
+    "version": "1.0.0",
+    "description": "REST API and WebSocket contracts for the Estate Steward estate mediation platform. All endpoints are prefixed with /api unless otherwise noted."
+  },
+  "servers": [
+    { "url": "http://localhost/api", "description": "Local development" }
+  ],
+  "paths": {
+    "/api/auth/login": {
+      "post": {
+        "operationId": "adminLogin",
+        "summary": "Admin login",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/LoginRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Authenticated; sets HTTP-only JWT cookie" },
+          "401": { "description": "Invalid credentials" }
+        }
+      }
+    },
+    "/api/setup/admin": {
+      "post": {
+        "operationId": "setupAdmin",
+        "summary": "First-boot admin creation (idempotent)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UserCreate" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Admin created; returns BIP39 mnemonic" },
+          "400": { "description": "Admin already exists" }
+        }
+      }
+    },
+    "/api/sessions": {
+      "post": {
+        "operationId": "createSession",
+        "summary": "Create a new mediation session",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SessionCreate" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Session created" }
+        }
+      }
+    },
+    "/api/sessions/{session_id}": {
+      "get": {
+        "operationId": "getSession",
+        "summary": "Retrieve session metadata and status flags",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Session details", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionResponse" } } } }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/launch": {
+      "post": {
+        "operationId": "launchSession",
+        "summary": "Launch session: SETUP → ACTIVE, lock inventory",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Session launched" },
+          "400": { "description": "No published assets exist" }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/pause": {
+      "post": {
+        "operationId": "pauseSession",
+        "summary": "Pause session (grief lock)",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Session paused" }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/unpause": {
+      "post": {
+        "operationId": "unpauseSession",
+        "summary": "Unpause session; extends token deadlines",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Session unpaused" }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/announcement": {
+      "put": {
+        "operationId": "updateAnnouncement",
+        "summary": "Set or clear session-wide announcement",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AnnouncementRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Announcement updated" },
+          "400": { "description": "Session is FINALIZED" }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/finalize": {
+      "post": {
+        "operationId": "finalizeSession",
+        "summary": "Run solver, seal audit chain, finalize session",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Session finalized" },
+          "400": { "description": "PROFILE_HOLD heirs exist or notice window not met" }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/override": {
+      "post": {
+        "operationId": "adminOverride",
+        "summary": "HITL: Force-allocate deadlocked assets",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/AdminOverrideRequest" }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Override applied" },
+          "400": { "description": "Session not LOCKED/deadlocked" }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/heirs": {
+      "get": {
+        "operationId": "listHeirs",
+        "summary": "List all heirs in session",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Heir list", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/HeirResponse" } } } } }
+        }
+      },
+      "post": {
+        "operationId": "createHeir",
+        "summary": "Register a new heir",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/HeirCreate" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Heir created; returns invite_token" },
+          "400": { "description": "Session LOCKED or FINALIZED" }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/heirs/{heir_id}": {
+      "delete": {
+        "operationId": "deleteHeir",
+        "summary": "Admin deletes heir; purges PII from audit chain",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "heir_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Heir deleted and audit chain sanitized" },
+          "400": { "description": "Session LOCKED or FINALIZED" }
+        }
+      }
+    },
+    "/api/heirs/{heir_id}/invite-token": {
+      "post": {
+        "operationId": "renewInviteToken",
+        "summary": "Generate fresh invite token for heir",
+        "parameters": [
+          { "name": "heir_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/InviteTokenRenewRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Token regenerated" }
+        }
+      }
+    },
+    "/api/heirs/{heir_id}/send-invite": {
+      "post": {
+        "operationId": "sendInvite",
+        "summary": "Dispatch invitation email asynchronously",
+        "parameters": [
+          { "name": "heir_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Email dispatched" }
+        }
+      }
+    },
+    "/api/heirs/{heir_id}/verify-identity": {
+      "post": {
+        "operationId": "verifyIdentity",
+        "summary": "Executor visual ID inspection: approve/reject",
+        "parameters": [
+          { "name": "heir_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/VerifyIdentityRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Verification processed; scan purged" }
+        }
+      }
+    },
+    "/api/heirs/me": {
+      "get": {
+        "operationId": "getMyProfile",
+        "summary": "Retrieve own profile",
+        "responses": {
+          "200": { "description": "Profile", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HeirResponse" } } } }
+        }
+      },
+      "delete": {
+        "operationId": "deleteMyAccount",
+        "summary": "GDPR soft anonymization",
+        "responses": {
+          "200": { "description": "Account anonymized" },
+          "400": { "description": "Session LOCKED or FINALIZED" }
+        }
+      }
+    },
+    "/api/heirs/me/profile": {
+      "put": {
+        "operationId": "updateMyProfile",
+        "summary": "Self-correction: update legal name/contact; resets ID verification if legal fields change",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/HeirProfileUpdate" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Profile updated" },
+          "400": { "description": "Session locked/finalized, or ABSTAINED/EXPIRED status" }
+        }
+      }
+    },
+    "/api/heirs/me/upload-id": {
+      "post": {
+        "operationId": "uploadIdScan",
+        "summary": "Upload encrypted government ID scan",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": { "type": "string", "format": "binary" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "ID uploaded and encrypted" }
+        }
+      }
+    },
+    "/api/heirs/me/abstain": {
+      "post": {
+        "operationId": "abstain",
+        "summary": "Active abstention / waiver of rights",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AbstainRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Waiver signed; status ABSTAINED" },
+          "400": { "description": "Heir in PROFILE_HOLD, ABSTAINED, or EXPIRED status" }
+        }
+      }
+    },
+    "/api/heirs/me/abstain/receipt": {
+      "get": {
+        "operationId": "downloadAbstainReceipt",
+        "summary": "Download signed waiver PDF receipt",
+        "responses": {
+          "200": { "description": "PDF receipt", "content": { "application/pdf": {} } }
+        }
+      }
+    },
+    "/api/heirs/me/export": {
+      "get": {
+        "operationId": "exportMyData",
+        "summary": "GDPR Article 20 data portability",
+        "responses": {
+          "200": { "description": "Structured JSON export", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DataExport" } } } }
+        }
+      }
+    },
+    "/api/invite/verify": {
+      "post": {
+        "operationId": "verifyInvite",
+        "summary": "Accept invitation; record consent",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/InviteVerifyRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Token verified; sets HTTP-only JWT cookie" },
+          "400": { "description": "Token expired, already used, or consent flags false" }
+        }
+      }
+    },
+    "/api/invite/login": {
+      "post": {
+        "operationId": "inviteLogin",
+        "summary": "Re-issue session cookie for onboarded heir",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/InviteLoginRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Session cookie issued" }
+        }
+      }
+    },
+    "/api/invite/status/{token}": {
+      "get": {
+        "operationId": "checkInviteStatus",
+        "summary": "Check invite token status (NEW/USED/EXPIRED)",
+        "parameters": [
+          { "name": "token", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Token status" }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/assets": {
+      "get": {
+        "operationId": "listAssets",
+        "summary": "List, filter, sort session assets",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "q", "in": "query", "schema": { "type": "string" } },
+          { "name": "category", "in": "query", "schema": { "type": "string" } },
+          { "name": "allocation_status", "in": "query", "schema": { "type": "string", "enum": ["allocated", "unallocated", "pre_allocated", "all"] } },
+          { "name": "sort_by", "in": "query", "schema": { "type": "string", "enum": ["relevance", "points", "title", "category"] } }
+        ],
+        "responses": {
+          "200": { "description": "Asset list", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/AssetSchema" } } } } }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/assets/stage": {
+      "post": {
+        "operationId": "stageAsset",
+        "summary": "Upload and stage asset image; triggers background OCR",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": { "type": "string", "format": "binary" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Asset staged; OCR processing" },
+          "400": { "description": "Session ACTIVE, LOCKED, or FINALIZED" }
+        }
+      }
+    },
+    "/api/assets/{asset_id}/publish": {
+      "post": {
+        "operationId": "publishAsset",
+        "summary": "Publish asset: validate fields, compute embedding, seed valuations",
+        "parameters": [
+          { "name": "asset_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AssetSchema" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Asset published" },
+          "400": { "description": "Missing required fields or inventory locked" }
+        }
+      }
+    },
+    "/api/assets/{asset_id}": {
+      "delete": {
+        "operationId": "deleteAsset",
+        "summary": "Delete asset (SETUP phase only)",
+        "parameters": [
+          { "name": "asset_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Asset deleted" },
+          "400": { "description": "Session ACTIVE, LOCKED, or FINALIZED" }
+        }
+      }
+    },
+    "/api/assets/{asset_id}/audio": {
+      "post": {
+        "operationId": "uploadAudioStory",
+        "summary": "Upload voice story (WebM/MP3/WAV)",
+        "parameters": [
+          { "name": "asset_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": { "type": "string", "format": "binary", "description": "audio/webm, audio/mp3, or audio/wav" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Audio uploaded" },
+          "400": { "description": "Session not in SETUP" }
+        }
+      },
+      "delete": {
+        "operationId": "deleteAudioStory",
+        "summary": "Delete voice story",
+        "parameters": [
+          { "name": "asset_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Audio deleted" }
+        }
+      }
+    },
+    "/api/assets/{asset_id}/pre-allocate": {
+      "post": {
+        "operationId": "preAllocateAsset",
+        "summary": "Pre-allocate asset to heir (SETUP phase only)",
+        "parameters": [
+          { "name": "asset_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AssetPreAllocateRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Pre-allocated" },
+          "400": { "description": "Session ACTIVE, LOCKED, or FINALIZED" }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/valuations/submit": {
+      "post": {
+        "operationId": "submitValuations",
+        "summary": "Submit final points valuations (must sum to 1000)",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ValuationSubmitRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Valuations submitted" },
+          "400": { "description": "Sum != 1000 or session LOCKED/FINALIZED" },
+          "403": { "description": "PROFILE_HOLD or HITL_GUARD suspended" }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/valuations/draft": {
+      "put": {
+        "operationId": "saveDraftValuations",
+        "summary": "Save draft points with concurrency versioning",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "draft_version": { "type": "integer" },
+                  "valuations": { "type": "array", "items": { "$ref": "#/components/schemas/ValuationDraftSchema" } }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Draft saved" },
+          "409": { "description": "Stale draft_version" }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/heirs/{heir_id}/valuations": {
+      "get": {
+        "operationId": "getHeirValuations",
+        "summary": "Get heir's existing valuations",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "heir_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Valuations", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/ValuationSchema" } } } } }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/help": {
+      "post": {
+        "operationId": "createSupportRequest",
+        "summary": "Heir submits help request",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SupportRequestCreate" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Support request created" }
+        }
+      },
+      "get": {
+        "operationId": "listSupportRequests",
+        "summary": "Admin lists all open support requests",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Support request list", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/SupportRequestResponse" } } } } }
+        }
+      }
+    },
+    "/api/help/{ticket_id}/resolve": {
+      "post": {
+        "operationId": "resolveSupportRequest",
+        "summary": "Admin resolves a support ticket",
+        "parameters": [
+          { "name": "ticket_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Ticket resolved" }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/faqs": {
+      "get": {
+        "operationId": "listFaqs",
+        "summary": "List system + custom FAQs",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "FAQ list" }
+        }
+      },
+      "post": {
+        "operationId": "createFaq",
+        "summary": "Admin creates custom FAQ",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/FAQCreate" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "FAQ created" }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/faqs/{faq_id}": {
+      "put": {
+        "operationId": "updateFaq",
+        "summary": "Admin updates custom FAQ",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "faq_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/FAQCreate" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "FAQ updated" }
+        }
+      },
+      "delete": {
+        "operationId": "deleteFaq",
+        "summary": "Admin deletes custom FAQ",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "faq_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "FAQ deleted" }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/keepsake": {
+      "get": {
+        "operationId": "getProbateLedger",
+        "summary": "Download Final Distribution & Probate Audit Ledger PDF",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "PDF ledger", "content": { "application/pdf": {} } }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/heirs/{heir_id}/keepsake": {
+      "get": {
+        "operationId": "getHeirKeepsake",
+        "summary": "Download individual Heir Keepsake Memory Book PDF",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "heir_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "PDF keepsake", "content": { "application/pdf": {} } }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/keepsake/email": {
+      "post": {
+        "operationId": "emailKeepsakes",
+        "summary": "Email keepsake PDFs to heirs",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/KeepsakeEmailRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Email queued" }
+        }
+      }
+    },
+    "/api/sessions/{session_id}/heirs/{heir_id}/chat": {
+      "get": {
+        "operationId": "getChatHistory",
+        "summary": "Retrieve heir's chat history (heir-only; 403 for admin)",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "heir_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Chat history", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/ChatMessageSchema" } } } } },
+          "403": { "description": "Admin access denied" }
+        }
+      }
+    },
+    "/api/sessions/{session_id}?confirm=true": {
+      "delete": {
+        "operationId": "purgeSession",
+        "summary": "Permanent session purge (FINALIZED only)",
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "confirm", "in": "query", "required": true, "schema": { "type": "boolean" } }
+        ],
+        "responses": {
+          "200": { "description": "Session purged" },
+          "400": { "description": "Session not FINALIZED or confirm != true" }
+        }
+      }
+    },
+    "/api/system/models": {
+      "get": {
+        "operationId": "getModelTransparency",
+        "summary": "AB 2013 model transparency",
+        "responses": {
+          "200": { "description": "Model metadata" }
+        }
+      }
+    },
+    "/api/system/backup": {
+      "get": {
+        "operationId": "downloadBackup",
+        "summary": "Download encrypted system backup",
+        "responses": {
+          "200": { "description": "Encrypted .estate.bak archive", "content": { "application/octet-stream": {} } }
+        }
+      }
+    },
+    "/api/system/restore": {
+      "post": {
+        "operationId": "restoreBackup",
+        "summary": "Restore encrypted backup (rate-limited; unauthenticated if no admin exists)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "backup_file": { "type": "string", "format": "binary" },
+                  "recovery_key": { "type": "string", "description": "24-word BIP39 mnemonic (required for unauthenticated restore)" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "System restored" },
+          "429": { "description": "Rate limited" }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "LoginRequest": {
+        "type": "object",
+        "required": ["username", "password"],
+        "properties": {
+          "username": { "type": "string", "minLength": 3, "maxLength": 50 },
+          "password": { "type": "string", "minLength": 8, "maxLength": 100 }
+        }
+      },
+      "UserCreate": { "$ref": "#/components/schemas/LoginRequest" },
+      "SessionCreate": {
+        "type": "object",
+        "required": ["title"],
+        "properties": {
+          "title": { "type": "string" }
+        }
+      },
+      "SessionResponse": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "title": { "type": "string" },
+          "status": { "type": "string", "enum": ["SETUP", "ACTIVE", "LOCKED", "FINALIZED"] },
+          "is_paused": { "type": "boolean" },
+          "paused_at": { "type": "string", "format": "date-time", "nullable": true },
+          "is_deadlocked": { "type": "boolean" },
+          "announcement": { "type": "string", "nullable": true },
+          "announcement_updated_at": { "type": "string", "format": "date-time", "nullable": true },
+          "deadline": { "type": "string", "format": "date-time", "nullable": true },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "HeirCreate": {
+        "type": "object",
+        "required": ["username", "legal_first_name", "legal_last_name"],
+        "properties": {
+          "username": { "type": "string", "minLength": 3, "maxLength": 100 },
+          "legal_first_name": { "type": "string", "minLength": 1, "maxLength": 50 },
+          "legal_middle_name": { "type": "string", "nullable": true },
+          "legal_last_name": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "relationship_to_decedent": { "type": "string", "nullable": true, "maxLength": 50 },
+          "date_of_birth": { "type": "string", "format": "date", "nullable": true },
+          "email": { "type": "string", "format": "email", "nullable": true },
+          "phone": { "type": "string", "nullable": true },
+          "physical_address": { "type": "string", "nullable": true },
+          "expiration_days": { "type": "integer", "default": 14 }
+        }
+      },
+      "HeirResponse": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "username": { "type": "string" },
+          "legal_first_name": { "type": "string", "nullable": true },
+          "legal_middle_name": { "type": "string", "nullable": true },
+          "legal_last_name": { "type": "string", "nullable": true },
+          "relationship_to_decedent": { "type": "string", "nullable": true },
+          "date_of_birth": { "type": "string", "format": "date", "nullable": true },
+          "identity_verified": { "type": "boolean" },
+          "id_scan_uri": { "type": "string", "nullable": true },
+          "role": { "type": "string", "enum": ["HEIR"] },
+          "email": { "type": "string", "nullable": true },
+          "phone": { "type": "string", "nullable": true },
+          "physical_address": { "type": "string", "nullable": true },
+          "invite_token": { "type": "string", "format": "uuid", "nullable": true },
+          "invite_token_expires_at": { "type": "string", "format": "date-time", "nullable": true },
+          "invite_token_used": { "type": "boolean" },
+          "consent_accepted": { "type": "boolean" },
+          "age_verified": { "type": "boolean" },
+          "consent_timestamp": { "type": "string", "format": "date-time", "nullable": true },
+          "is_submitted": { "type": "boolean" },
+          "submitted_at": { "type": "string", "format": "date-time", "nullable": true },
+          "draft_version": { "type": "integer" },
+          "status": { "type": "string", "enum": ["PENDING", "PROFILE_HOLD", "ACTIVE", "SUBMITTED", "ABSTAINED", "EXPIRED_NON_PARTICIPATING"] },
+          "created_at": { "type": "string", "format": "date-time" },
+          "invitation_dispatched_at": { "type": "string", "format": "date-time", "nullable": true }
+        }
+      },
+      "AssetSchema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "session_id": { "type": "string", "format": "uuid" },
+          "title": { "type": "string", "maxLength": 150 },
+          "description": { "type": "string" },
+          "category": { "type": "string", "enum": ["Jewelry", "Furniture", "Art", "Other"] },
+          "valuation_min": { "type": "number" },
+          "valuation_max": { "type": "number" },
+          "valuation_source": { "type": "string", "nullable": true },
+          "sentiment_tag": { "type": "string" },
+          "image_uri": { "type": "string" },
+          "audio_uri": { "type": "string", "nullable": true },
+          "status": { "type": "string", "enum": ["STAGED", "LIVE", "PRE_ALLOCATED", "DISTRIBUTED"] },
+          "ocr_status": { "type": "string", "enum": ["PROCESSING", "COMPLETED", "FAILED"], "nullable": true },
+          "allocated_to_id": { "type": "string", "format": "uuid", "nullable": true },
+          "description_json": { "type": "object", "nullable": true },
+          "shared_memories": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "heir_username": { "type": "string" },
+                "reasoning": { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "ValuationSchema": {
+        "type": "object",
+        "properties": {
+          "asset_id": { "type": "string", "format": "uuid" },
+          "heir_id": { "type": "string", "format": "uuid" },
+          "points": { "type": "integer", "minimum": 0, "maximum": 1000 },
+          "reasoning": { "type": "string", "nullable": true },
+          "is_reasoning_shared": { "type": "boolean", "default": false }
+        }
+      },
+      "ValuationDraftSchema": {
+        "type": "object",
+        "properties": {
+          "asset_id": { "type": "string", "format": "uuid" },
+          "points": { "type": "integer", "minimum": 0, "maximum": 1000 },
+          "reasoning": { "type": "string", "nullable": true },
+          "is_reasoning_shared": { "type": "boolean", "default": false }
+        }
+      },
+      "ValuationSubmitRequest": {
+        "type": "object",
+        "properties": {
+          "valuations": { "type": "array", "items": { "$ref": "#/components/schemas/ValuationDraftSchema" } }
+        }
+      },
+      "AdminOverrideRequest": {
+        "type": "object",
+        "required": ["asset_id", "allocated_to_id", "reason"],
+        "properties": {
+          "asset_id": { "type": "string", "format": "uuid" },
+          "allocated_to_id": { "type": "string", "format": "uuid" },
+          "reason": { "type": "string", "minLength": 5, "maxLength": 250 }
+        }
+      },
+      "AbstainRequest": {
+        "type": "object",
+        "required": ["legal_name_signature"],
+        "properties": {
+          "legal_name_signature": { "type": "string", "minLength": 3, "maxLength": 200 }
+        }
+      },
+      "InviteVerifyRequest": {
+        "type": "object",
+        "required": ["token", "consent_accepted", "age_verified", "legal_first_name", "legal_last_name", "relationship_to_decedent", "date_of_birth"],
+        "properties": {
+          "token": { "type": "string", "format": "uuid" },
+          "consent_accepted": { "type": "boolean" },
+          "age_verified": { "type": "boolean" },
+          "legal_first_name": { "type": "string", "minLength": 1, "maxLength": 50 },
+          "legal_middle_name": { "type": "string", "nullable": true },
+          "legal_last_name": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "relationship_to_decedent": { "type": "string", "minLength": 1, "maxLength": 50 },
+          "date_of_birth": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }
+        }
+      },
+      "InviteLoginRequest": {
+        "type": "object",
+        "required": ["token"],
+        "properties": {
+          "token": { "type": "string", "format": "uuid" }
+        }
+      },
+      "HeirProfileUpdate": {
+        "type": "object",
+        "required": ["legal_first_name", "legal_last_name", "relationship_to_decedent", "date_of_birth"],
+        "properties": {
+          "legal_first_name": { "type": "string", "minLength": 1, "maxLength": 50 },
+          "legal_middle_name": { "type": "string", "nullable": true },
+          "legal_last_name": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "relationship_to_decedent": { "type": "string", "minLength": 1, "maxLength": 50 },
+          "date_of_birth": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+          "email": { "type": "string", "format": "email", "nullable": true },
+          "phone": { "type": "string", "nullable": true },
+          "physical_address": { "type": "string", "nullable": true }
+        }
+      },
+      "VerifyIdentityRequest": {
+        "type": "object",
+        "required": ["action"],
+        "properties": {
+          "action": { "type": "string", "enum": ["approve", "reject"] },
+          "rejection_reason": { "type": "string", "minLength": 3, "maxLength": 250, "nullable": true }
+        }
+      },
+      "SupportRequestCreate": {
+        "type": "object",
+        "required": ["message"],
+        "properties": {
+          "message": { "type": "string", "minLength": 5, "maxLength": 1000 }
+        }
+      },
+      "SupportRequestResponse": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "username": { "type": "string" },
+          "message": { "type": "string" },
+          "status": { "type": "string", "enum": ["OPEN", "RESOLVED"] },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "FAQCreate": {
+        "type": "object",
+        "required": ["question", "answer"],
+        "properties": {
+          "question": { "type": "string", "minLength": 5 },
+          "answer": { "type": "string", "minLength": 5 }
+        }
+      },
+      "AnnouncementRequest": {
+        "type": "object",
+        "properties": {
+          "announcement": { "type": "string", "nullable": true }
+        }
+      },
+      "InviteTokenRenewRequest": {
+        "type": "object",
+        "properties": {
+          "expiration_days": { "type": "integer", "default": 14 }
+        }
+      },
+      "KeepsakeEmailRequest": {
+        "type": "object",
+        "properties": {
+          "heir_id": { "type": "string", "format": "uuid", "nullable": true }
+        }
+      },
+      "AssetPreAllocateRequest": {
+        "type": "object",
+        "required": ["allocated_to_id"],
+        "properties": {
+          "allocated_to_id": { "type": "string", "format": "uuid" }
+        }
+      },
+      "ChatMessageSchema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "session_id": { "type": "string", "format": "uuid" },
+          "heir_id": { "type": "string", "format": "uuid" },
+          "sender": { "type": "string", "enum": ["heir", "agent"] },
+          "message_text": { "type": "string" },
+          "scrubbed_text": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "DataExport": {
+        "type": "object",
+        "properties": {
+          "heir_id": { "type": "string", "format": "uuid" },
+          "username": { "type": "string" },
+          "legal_first_name": { "type": "string" },
+          "legal_middle_name": { "type": "string", "nullable": true },
+          "legal_last_name": { "type": "string" },
+          "relationship_to_decedent": { "type": "string" },
+          "date_of_birth": { "type": "string", "format": "date" },
+          "identity_verified": { "type": "boolean" },
+          "email": { "type": "string" },
+          "phone": { "type": "string" },
+          "physical_address": { "type": "string" },
+          "consent_accepted": { "type": "boolean" },
+          "age_verified": { "type": "boolean" },
+          "consent_timestamp": { "type": "string", "format": "date-time" },
+          "is_submitted": { "type": "boolean" },
+          "valuations": { "type": "array", "items": { "$ref": "#/components/schemas/ValuationSchema" } },
+          "chat_history": { "type": "array", "items": { "type": "object", "properties": { "timestamp": { "type": "string", "format": "date-time" }, "sender": { "type": "string" }, "text": { "type": "string" } } } },
+          "support_tickets": { "type": "array", "items": { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "message": { "type": "string" }, "status": { "type": "string" } } } }
+        }
+      }
+    }
+  }
+}

@@ -21,6 +21,7 @@ from sqlalchemy.sql import text as sa_text
 from pgvector.sqlalchemy import Vector
 
 from .database import Base
+from .encryption import EncryptedJSON
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +221,7 @@ class Valuation(Base):
         nullable=False,
     )
     points = Column(Integer, nullable=False)
-    reasoning = Column(Text, nullable=True)
+    reasoning = Column(EncryptedJSON, nullable=True)
     is_reasoning_shared = Column(Boolean, nullable=False, default=False)
 
     __table_args__ = (
@@ -252,7 +253,7 @@ class AuditLog(Base):
         nullable=False,
     )
     event_type = Column(String(50), nullable=False)
-    state_snapshot = Column(Text, nullable=False)
+    state_snapshot = Column(EncryptedJSON, nullable=False)
     prev_hash = Column(String(64), nullable=False)
     sha256_hash = Column(String(64), nullable=False)
     created_at = Column(
@@ -334,7 +335,7 @@ class ChatMessage(Base):
         nullable=False,
     )
     sender = Column(String(10), nullable=False)
-    message_text = Column(Text, nullable=False)
+    message_text = Column(EncryptedJSON, nullable=False)
     scrubbed_text = Column(Text, nullable=False)
     created_at = Column(
         DateTime(timezone=True), nullable=False,
