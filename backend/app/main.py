@@ -34,6 +34,9 @@ from .websocket_manager import manager
 from .services.storage import get_storage_driver, preprocess_image
 from .services.llm_provider import get_provider, reset_provider
 from .services.smtp_service import send_email_background, Attachment
+from .solver import solve_mnw, SolverResult
+from .pdf_builder import build_keepsake_pdf, build_probate_ledger_pdf
+from .notice_log import build_notice_log
 
 logging.basicConfig(
     level=logging.INFO,
@@ -2701,4 +2704,415 @@ async def upload_id_scan(
             "status": "success",
             "message": "ID document uploaded and encrypted successfully",
         }
+    )
+
+
+# ---------------------------------------------------------------------------
+# T16 — Schema
+# ---------------------------------------------------------------------------
+
+import hashlib
+from fastapi.responses import StreamingResponse
+
+
+class KeepsakeEmailRequest(BaseModel):
+    heir_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# T16 — Session Finalization & Keepsake PDF Download Endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/sessions/{session_id}/finalize")
+@limiter.limit("10/minute")
+async def finalize_session(
+    request: Request,
+    session_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Finalize the session — run solver, seal audit chain, commit allocations.
+
+    Per Backend Spec §9.3 (POST /api/sessions/{session_id}/finalize):
+    1. Verifies session is ACTIVE or LOCKED (not SETUP or FINALIZED).
+    2. Auto-transitions non-submitting active heirs to ABSTAINED, expired
+       heirs to EXPIRED_NON_PARTICIPATING.
+    3. Verifies no heirs are PROFILE_HOLD.
+    4. Collects valuations, runs Fairpyx MNW solver.
+    5. Commits allocation results (updates assets.allocated_to_id, status→DISTRIBUTED).
+    6. Writes FINALIZED audit log entry and seals SHA-256 hash chain.
+    7. Transitions session status to FINALIZED.
+    8. Broadcasts WebSocket status update.
+    """
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status not in ("ACTIVE", "LOCKED"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Session cannot be finalized — current status is '{session.status}'.",
+        )
+
+    if session.status == "FINALIZED":
+        raise HTTPException(
+            status_code=400,
+            detail="Session is already finalized.",
+        )
+
+    now_utc = datetime.now(timezone.utc)
+
+    # 2. Auto-transition non-submitting heirs
+    all_heirs = (
+        db.query(User)
+        .filter(User.session_id == session_id, User.role == "HEIR")
+        .all()
+    )
+    for heir in all_heirs:
+        if heir.status == "ACTIVE" and not heir.is_submitted:
+            heir.status = "ABSTAINED"
+        elif (
+            heir.status in ("PENDING", "ACTIVE")
+            and heir.invite_token_used == False
+            and heir.invite_token_expires_at
+            and heir.invite_token_expires_at < now_utc
+        ):
+            heir.status = "EXPIRED_NON_PARTICIPATING"
+
+    db.flush()
+
+    # Refresh after status updates
+    all_heirs = (
+        db.query(User)
+        .filter(User.session_id == session_id, User.role == "HEIR")
+        .all()
+    )
+
+    # 3. Verify no PROFILE_HOLD heirs
+    profile_hold = [h for h in all_heirs if h.status == "PROFILE_HOLD"]
+    if profile_hold:
+        names = [h.username for h in profile_hold]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot finalize — the following heirs are still pending "
+            f"identity verification: {', '.join(names)}.",
+        )
+
+    # 4. Collect assets and valuations
+    assets = (
+        db.query(Asset)
+        .filter(Asset.session_id == session_id)
+        .all()
+    )
+
+    # Participating heirs: SUBMITTED only
+    participating = [h for h in all_heirs if h.status == "SUBMITTED"]
+
+    # Pre-allocated assets
+    pre_allocated: dict[str, str] = {}
+    for a in assets:
+        if a.status == "PRE_ALLOCATED" and a.allocated_to_id:
+            pre_allocated[str(a.id)] = str(a.allocated_to_id)
+
+    # Build valuations matrix
+    heir_ids = [str(h.id) for h in participating]
+    asset_ids = [str(a.id) for a in assets if a.status == "LIVE"]
+    heir_valuations: dict[str, dict[str, int]] = {}
+    submission_times: dict[str, datetime] = {}
+    creation_times: dict[str, datetime] = {}
+
+    for heir in participating:
+        hid = str(heir.id)
+        submission_times[hid] = heir.submitted_at
+        creation_times[hid] = heir.created_at
+        heir_valuations[hid] = {}
+        for a in assets:
+            if a.status == "LIVE":
+                valuation = (
+                    db.query(Valuation)
+                    .filter(
+                        Valuation.asset_id == a.id,
+                        Valuation.heir_id == heir.id,
+                    )
+                    .first()
+                )
+                heir_valuations[hid][str(a.id)] = valuation.points if valuation else 0
+
+    # Run solver
+    try:
+        result = solve_mnw(
+            heir_ids=heir_ids,
+            asset_ids=asset_ids,
+            valuations=heir_valuations,
+            pre_allocated=pre_allocated,
+            submission_times=submission_times,
+            creation_times=creation_times,
+        )
+    except Exception as e:
+        logger.exception("Solver failed for session %s", session_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Fair division solver failed: {str(e)}",
+        )
+
+    # 5. Commit allocation results
+    for hid, allocated_asset_ids in result.allocation.items():
+        for aid in allocated_asset_ids:
+            asset = db.query(Asset).filter(Asset.id == aid).first()
+            if asset and asset.status == "LIVE":
+                asset.allocated_to_id = hid
+                asset.status = "DISTRIBUTED"
+
+    # 6. Write FINALIZED audit log entry and seal hash chain
+    prev_hash = "0" * 64
+    last_log = (
+        db.query(AuditLog)
+        .filter(AuditLog.session_id == session_id)
+        .order_by(AuditLog.id.desc())
+        .first()
+    )
+    if last_log:
+        prev_hash = last_log.sha256_hash
+
+    state_snapshot = {
+        "event": "FINALIZED",
+        "session_id": session_id,
+        "allocations": {
+            hid: aids for hid, aids in result.allocation.items()
+        },
+        "mnw_product_value": result.mnw_product_value,
+        "tie_breaker_events": [
+            e.event_description for e in result.tie_breaker_events
+        ],
+    }
+    snapshot_str = str(sorted(state_snapshot.items()))
+    new_hash = hashlib.sha256(
+        (prev_hash + snapshot_str).encode("utf-8")
+    ).hexdigest()
+
+    audit_entry = AuditLog(
+        session_id=session_id,
+        event_type="FINALIZED",
+        state_snapshot=state_snapshot,
+        prev_hash=prev_hash,
+        sha256_hash=new_hash,
+    )
+    db.add(audit_entry)
+
+    # 7. Transition session to FINALIZED
+    session.status = "FINALIZED"
+
+    db.commit()
+    db.refresh(session)
+
+    # 8. Broadcast WebSocket status update
+    await manager.broadcast_session_status(
+        session_id,
+        {
+            "type": "session_status",
+            "status": session.status,
+            "is_paused": session.is_paused,
+            "is_deadlocked": session.is_deadlocked,
+        },
+    )
+
+    return JSONResponse(
+        content={
+            "status": "finalized",
+            "session_id": str(session.id),
+            "mnw_product_value": result.mnw_product_value,
+            "tie_breaker_count": len(result.tie_breaker_events),
+        }
+    )
+
+
+@app.get("/api/sessions/{session_id}/keepsake")
+@limiter.limit("30/minute")
+async def download_probate_ledger(
+    request: Request,
+    session_id: str,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Download the Final Distribution & Probate Audit Ledger PDF.
+
+    Per Backend Spec §9.3 (GET /api/sessions/{session_id}/keepsake):
+    Generates and returns the full probate audit ledger PDF.
+    Accessible by any authenticated Heir or Admin for this session.
+    """
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status != "FINALIZED":
+        raise HTTPException(
+            status_code=400,
+            detail="Probate ledger is only available after session finalization.",
+        )
+
+    # Load all session data
+    heirs = (
+        db.query(User)
+        .filter(
+            User.session_id == session_id,
+            User.role.in_(["HEIR", "ADMIN"]),
+        )
+        .all()
+    )
+
+    # Only show ADMIN users belonging to this session or admins without a session
+    admin_user = db.query(User).filter(
+        User.role == "ADMIN",
+    ).first()
+    if admin_user and admin_user not in heirs:
+        heirs.append(admin_user)
+
+    assets = (
+        db.query(Asset)
+        .filter(Asset.session_id == session_id)
+        .all()
+    )
+
+    audit_logs = (
+        db.query(AuditLog)
+        .filter(AuditLog.session_id == session_id)
+        .order_by(AuditLog.id.asc())
+        .all()
+    )
+
+    notice_log = build_notice_log(session_id, [h for h in heirs if h.role == "HEIR"])
+
+    # Reconstruct solver result from audit logs or assets
+    solver_result = SolverResult(
+        allocation={},
+        mnw_product_value=0.0,
+        tie_breaker_events=[],
+    )
+
+    # Build allocation from asset records
+    for asset in assets:
+        if asset.allocated_to_id and asset.status == "DISTRIBUTED":
+            hid = str(asset.allocated_to_id)
+            if hid not in solver_result.allocation:
+                solver_result.allocation[hid] = []
+            solver_result.allocation[hid].append(str(asset.id))
+
+    # Generate PDF
+    try:
+        pdf_buf = build_probate_ledger_pdf(
+            session=session,
+            heirs=heirs,
+            assets=assets,
+            solver_result=solver_result,
+            audit_logs=audit_logs,
+            notice_log=notice_log,
+        )
+    except Exception as e:
+        logger.exception("Failed to build probate ledger PDF")
+        raise HTTPException(
+            status_code=500,
+            detail=f"PDF generation failed: {str(e)}",
+        )
+
+    pdf_bytes = pdf_buf.getvalue()
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="probate_ledger_{session_id}.pdf"',
+        },
+    )
+
+
+@app.get("/api/sessions/{session_id}/heirs/{heir_id}/keepsake")
+@limiter.limit("30/minute")
+async def download_heir_keepsake(
+    request: Request,
+    session_id: str,
+    heir_id: str,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Download the individual Heir's Keepsake Memory Book PDF.
+
+    Per Backend Spec §9.3 (GET /api/sessions/{session_id}/heirs/{heir_id}/keepsake):
+    Generates and returns the Heir's keepsake PDF. Accessible by matching
+    Heir JWT or Admin credentials.
+    """
+    role = current_user.get("role")
+    user_id = current_user.get("user_id")
+
+    if role == "HEIR" and user_id != heir_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status != "FINALIZED":
+        raise HTTPException(
+            status_code=400,
+            detail="Keepsake is only available after session finalization.",
+        )
+
+    heir = db.query(User).filter(
+        User.id == heir_id,
+        User.session_id == session_id,
+        User.role == "HEIR",
+    ).first()
+    if not heir:
+        raise HTTPException(status_code=404, detail="Heir not found")
+
+    assets = (
+        db.query(Asset)
+        .filter(Asset.session_id == session_id)
+        .all()
+    )
+
+    audit_logs = (
+        db.query(AuditLog)
+        .filter(AuditLog.session_id == session_id)
+        .order_by(AuditLog.id.asc())
+        .all()
+    )
+
+    # Reconstruct solver result from asset records
+    solver_result = SolverResult(
+        allocation={},
+        mnw_product_value=0.0,
+        tie_breaker_events=[],
+    )
+    for asset in assets:
+        if asset.allocated_to_id and asset.status == "DISTRIBUTED":
+            hid = str(asset.allocated_to_id)
+            if hid not in solver_result.allocation:
+                solver_result.allocation[hid] = []
+            solver_result.allocation[hid].append(str(asset.id))
+
+    try:
+        pdf_buf = build_keepsake_pdf(
+            session=session,
+            heir=heir,
+            assets=assets,
+            solver_result=solver_result,
+            audit_logs=audit_logs,
+        )
+    except Exception as e:
+        logger.exception("Failed to build keepsake PDF")
+        raise HTTPException(
+            status_code=500,
+            detail=f"PDF generation failed: {str(e)}",
+        )
+
+    pdf_bytes = pdf_buf.getvalue()
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="keepsake_{heir_id}.pdf"',
+        },
     )
