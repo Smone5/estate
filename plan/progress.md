@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T68** — Heir "Request Help" Modal (next)
+Phase 6: Audio Speech & Real-Time Communications (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -78,7 +78,16 @@
 [DONE] T59 — GDPR Account Deletion UI Drawer — slide-out warning with GDPR Art 17, case-sensitive username confirmation, soft anonymization trigger, 8 tests — 2026-06-11T15:39
 [DONE] T66 — Family Memories & Stories UI — collapsible shared stories section, edit locked on pause/submit, no reply controls, 8 tests — 2026-06-11T15:41
 [DONE] T67 — Admin Inspect ID Modal — split-pane verification, side-by-side legal details, approve with reason/reject, 11 tests — 2026-06-11T15:43
-[NEXT] T68 — Heir "Request Help" Modal — slide-up modal, text field with char counter, POST to help/support endpoint
+[DONE] T68 — Heir Request Help Modal — slide-up modal, char counter (5–1000), POST help endpoint, confirmation, 6 tests — 2026-06-11T15:44
+[DONE] T69 — Auto-Balance Points Button UI — store proportional scaling to 1000, division-by-zero guard, rounding remainder, 6 tests — 2026-06-11T15:45
+[DONE] T28b — Backend Tests — Phases 4–5 Scope — 480 tests pass covering solver, PDF, finalization, GDPR erasure/portability, abstention waiver, tie-breaker records, notice log — 2026-06-11T15:47
+[DONE] T29 — Frontend Unit & Integration Tests — 141 tests pass (17 test files), all UI components verified — 2026-06-11T15:48
+[DONE] T22 — WebSocket Server Endpoint — JWT cookie auth, HITL_GUARD gate, text-only chat_reply_chunk frames, SB 942 synthetic indicators, 480 tests pass — 2026-06-11T11:58
+[DONE] T23 — WebSocket Client Connection Loop — useWebSocket hook, exponential backoff reconnect, offline queue flush on reconnect, 141 frontend tests pass — 2026-06-11T12:03
+[DONE] T24 — Web Speech Client Hook — useSpeech hook, hold/toggle, HTTPS guard, InvalidStateError handler, AudioContext 'Enable Audio' button, 141 frontend tests pass — 2026-06-11T12:04
+[DONE] T25 — Client Audio Playback Queue — useAudioPlayback hook, sequential playlist, base64 Blob decoder, Blob URL revocation, SB 942 synthetic label, null-audio guard, 141 frontend tests pass — 2026-06-11T12:05
+[DONE] T45 — Admin Voice Recorder Widget — MediaRecorder record/stop/playback/redo, pulsing timer 2:00 max, HTTPS guard, POST /api/assets/{asset_id}/audio upload on save, Sage-Green aesthetics, 141 frontend tests pass — 2026-06-11T12:06
+[NEXT] Phase 6 tasks complete — proceeding to Phase 7 (Backup, Compliance & E2E Validation)
 
 ## Blockers
 None.

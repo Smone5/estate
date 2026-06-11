@@ -4553,10 +4553,27 @@ async def system_restore(
     is_fresh_system = admin_count == 0
 
     if not is_fresh_system:
-        # Require admin credentials
-        admin = db.query(User).filter(User.role == "ADMIN").first()
-        if not admin:
-            raise HTTPException(status_code=401, detail="Admin authentication required.")
+        # T72: Require admin JWT cookie authentication on initialized systems
+        auth_token = request.cookies.get("estate_session")
+        if not auth_token:
+            raise HTTPException(
+                status_code=401,
+                detail="Admin authentication required for restore on an initialized system.",
+            )
+        try:
+            payload = decode_access_token(auth_token)
+            if payload.get("role") != "ADMIN":
+                raise HTTPException(
+                    status_code=401,
+                    detail="Admin authentication required for system restore.",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or expired admin credentials.",
+            )
 
     form = await request.form()
     backup_file = form.get("backup_file")
