@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useMediationStore } from '../store/useMediationStore';
 import AbstentionWaiverModal from './AbstentionWaiverModal';
 import GDPRDataExportButton from './GDPRDataExportButton';
+import GDPRDeleteAccountDrawer from './GDPRDeleteAccountDrawer';
 
 export default function HeirValuationPanel() {
   const unallocatedPoints = useMediationStore((s) => s.unallocatedPoints);
@@ -109,8 +110,9 @@ export default function HeirValuationPanel() {
         <AbstentionWaiverModal onClose={() => setIsWaiverOpen(false)} />
       )}
 
-      <div style={{ marginTop: 'var(--space-lg)', paddingTop: 'var(--space-md)', borderTop: '1px solid var(--color-border)' }}>
+      <div style={{ marginTop: 'var(--space-lg)', paddingTop: 'var(--space-md)', borderTop: '1px solid var(--color-border)', display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)' }}>
         <GDPRDataExportButton />
+        <GDPRDeleteAccountDrawer />
       </div>
     </div>
   );
