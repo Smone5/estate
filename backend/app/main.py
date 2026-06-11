@@ -12,7 +12,7 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 
-from fastapi import FastAPI, Depends, HTTPException, Response, Request
+from fastapi import FastAPI, Depends, HTTPException, Response, Request, UploadFile, File, Form, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session as DBSession
@@ -28,8 +28,10 @@ from .auth import (
     get_current_user,
     get_current_admin,
 )
-from .models import User, Session as SessionModel, Asset
+from .models import User, Session as SessionModel, Asset, Valuation
 from .websocket_manager import manager
+from .services.storage import get_storage_driver, preprocess_image
+from .services.llm_provider import get_provider, reset_provider
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Request schemas (T10 scope — inline per FastAPI convention)
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------
 
 class AdminLoginRequest(BaseModel):
     username: str = Field(..., min_length=1)
@@ -316,6 +318,21 @@ class AnnouncementRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# T11 — Schema
+# ---------------------------------------------------------------------------
+
+
+class AssetPublishRequest(BaseModel):
+    title: str = Field(..., max_length=150)
+    description: str
+    category: str = Field(..., pattern=r"^(Jewelry|Furniture|Art|Other)$")
+    valuation_min: float | None = None
+    valuation_max: float | None = None
+    valuation_source: str | None = None
+    sentiment_tag: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # T37 — Session lifecycle & announcement endpoints
 # ---------------------------------------------------------------------------
 
@@ -572,4 +589,330 @@ async def session_announcement(
             "announcement": session.announcement,
             "announcement_updated_at": updated_at_iso,
         }
+    )
+
+
+# ---------------------------------------------------------------------------
+# T11 — Asset Router: staging, background OCR, publishing, matrix seeding
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/sessions/{session_id}/assets/stage")
+@limiter.limit("30/minute")
+async def asset_stage(
+    request: Request,
+    session_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Stage an asset image for a session.
+
+    Per Backend Spec §9.2 (POST /api/sessions/{session_id}/assets/stage):
+    1. Preprocesses the image (HEIC conversion, WebP scaling) and saves it.
+    2. Creates an asset row with ocr_status='PROCESSING' and status='STAGED'.
+    3. Returns the asset ID for subsequent editing/publishing.
+
+    Returns 400 if session is not in SETUP status (inventory lock).
+    """
+    import uuid as _uuid_mod
+
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status != "SETUP":
+        raise HTTPException(
+            status_code=400,
+            detail="Assets can only be staged during the SETUP phase.",
+        )
+
+    # Parse multipart upload
+    form = await request.form()
+    file_upload = form.get("file")
+    if not file_upload:
+        raise HTTPException(status_code=400, detail="No file uploaded")
+
+    raw_bytes = await file_upload.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    # Preprocess image (HEIC -> WebP, scale, compress)
+    try:
+        processed = preprocess_image(raw_bytes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Save to storage
+    storage = get_storage_driver()
+    asset_id = _uuid_mod.uuid4()
+    filename = f"static/uploads/{asset_id}.webp"
+    storage.save(filename, processed)
+
+    # Create asset record
+    asset = Asset(
+        id=asset_id,
+        session_id=session_id,
+        title=None,
+        description=None,
+        category=None,
+        valuation_min=None,
+        valuation_max=None,
+        valuation_source=None,
+        sentiment_tag=None,
+        image_uri=filename,
+        audio_uri=None,
+        ocr_status="PROCESSING",
+        status="STAGED",
+    )
+    db.add(asset)
+    db.commit()
+    db.refresh(asset)
+
+    return JSONResponse(
+        content={
+            "asset_id": str(asset.id),
+            "status": asset.status,
+            "ocr_status": asset.ocr_status,
+        },
+        status_code=201,
+    )
+
+
+@app.post("/api/assets/{asset_id}/publish")
+@limiter.limit("30/minute")
+async def asset_publish(
+    request: Request,
+    asset_id: str,
+    body: AssetPublishRequest,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Publish a staged asset — transition from STAGED to LIVE.
+
+    Per Backend Spec §9.2 (POST /api/assets/{asset_id}/publish):
+    1. Commits edited metadata (title, description, category, valuations, etc.).
+    2. Generates 768-dim text embedding via embedding provider.
+    3. Shifts status to 'LIVE'.
+    4. Seeds default 0-point valuation rows for all active/verified heirs
+       (excluding PENDING, PROFILE_HOLD, EXPIRED_NON_PARTICIPATING).
+
+    Asset Lifecycle Validation Gate (DB Spec §2.3):
+      Requires title, description, category, valuation_min, valuation_max,
+      valuation_source, and sentiment_tag to all be fully populated.
+      Incomplete assets rejected with 400.
+
+    Returns 400 if session is not in SETUP.
+    """
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    if asset.status != "STAGED":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Asset cannot be published — current status is '{asset.status}'.",
+        )
+
+    # Check session status — only SETUP allows publishing
+    session = db.query(SessionModel).filter(SessionModel.id == asset.session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status != "SETUP":
+        raise HTTPException(
+            status_code=400,
+            detail="Assets can only be published during the SETUP phase.",
+        )
+
+    # --- Asset Lifecycle Validation Gate (DB Spec §2.3) ---
+    missing = []
+    if not body.title:
+        missing.append("title")
+    if not body.description:
+        missing.append("description")
+    if not body.category:
+        missing.append("category")
+    if body.valuation_min is None:
+        missing.append("valuation_min")
+    if body.valuation_max is None:
+        missing.append("valuation_max")
+    if not body.valuation_source:
+        missing.append("valuation_source")
+    if not body.sentiment_tag:
+        missing.append("sentiment_tag")
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Asset cannot be published — missing required fields: {', '.join(missing)}.",
+        )
+
+    # Update metadata
+    asset.title = body.title
+    asset.description = body.description
+    asset.category = body.category
+    asset.valuation_min = body.valuation_min
+    asset.valuation_max = body.valuation_max
+    asset.valuation_source = body.valuation_source
+    asset.sentiment_tag = body.sentiment_tag
+
+    # Compute embedding
+    try:
+        provider = get_provider()
+        text_to_embed = (
+            f"Title: {asset.title}\n"
+            f"Category: {asset.category}\n"
+            f"Description: {asset.description}\n"
+            f"Tags: {asset.sentiment_tag}"
+        )
+        embedding = provider.get_embeddings("embedding", text_to_embed)
+        asset.embedding = embedding
+    except Exception:
+        logger.warning("Failed to compute embedding for asset %s", asset_id)
+
+    asset.status = "LIVE"
+    asset.ocr_status = "COMPLETED"
+
+    # --- Automatic Matrix Seeding (DB Spec §2.4) ---
+    active_heirs = (
+        db.query(User)
+        .filter(
+            User.session_id == asset.session_id,
+            User.role == "HEIR",
+            User.status.in_(["ACTIVE", "SUBMITTED", "ABSTAINED"]),
+        )
+        .all()
+    )
+
+    for heir in active_heirs:
+        existing = (
+            db.query(Valuation)
+            .filter(
+                Valuation.asset_id == asset_id,
+                Valuation.heir_id == heir.id,
+            )
+            .first()
+        )
+        if not existing:
+            valuation = Valuation(
+                asset_id=asset_id,
+                heir_id=heir.id,
+                points=0,
+            )
+            db.add(valuation)
+
+    db.commit()
+
+    return JSONResponse(
+        content={
+            "asset_id": str(asset.id),
+            "status": asset.status,
+        }
+    )
+
+
+@app.get("/api/sessions/{session_id}/assets")
+@limiter.limit("60/minute")
+async def session_assets(
+    request: Request,
+    session_id: str,
+    q: str | None = None,
+    category: str | None = None,
+    has_audio: bool | None = None,
+    allocation_status: str | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Retrieve, filter, and sort the estate assets for a session.
+
+    Per Backend Spec §9.2 (GET /api/sessions/{session_id}/assets):
+    Supports search (q), category filter, audio presence filter,
+    allocation filter, and sorting by title/category.
+    """
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    query = db.query(Asset).filter(
+        Asset.session_id == session_id,
+        Asset.status.in_(["LIVE", "PRE_ALLOCATED", "DISTRIBUTED"]),
+    )
+
+    # Category filter
+    if category:
+        categories = [c.strip() for c in category.split(",") if c.strip()]
+        if categories:
+            query = query.filter(Asset.category.in_(categories))
+
+    # Audio presence filter
+    if has_audio is True:
+        query = query.filter(Asset.audio_uri.isnot(None))
+    elif has_audio is False:
+        query = query.filter(Asset.audio_uri.is_(None))
+
+    # Allocation filter (Heir only)
+    if allocation_status and current_user.get("role") == "HEIR":
+        heir_id = current_user.get("user_id")
+        if heir_id:
+            if allocation_status == "allocated":
+                query = (
+                    query.join(Valuation, Asset.id == Valuation.asset_id)
+                    .filter(Valuation.heir_id == heir_id)
+                    .filter(Valuation.points > 0)
+                )
+            elif allocation_status == "unallocated":
+                subq = (
+                    db.query(Valuation.asset_id)
+                    .filter(Valuation.heir_id == heir_id)
+                    .filter(Valuation.points > 0)
+                    .subquery()
+                )
+                query = query.filter(Asset.id.notin_(subq))
+            elif allocation_status == "pre_allocated":
+                query = query.filter(Asset.status == "PRE_ALLOCATED")
+
+    # Text search
+    if q:
+        search_term = f"%{q}%"
+        query = query.filter(
+            (Asset.title.ilike(search_term)) | (Asset.description.ilike(search_term))
+        )
+
+    # Sorting
+    if sort_by == "title":
+        query = query.order_by(
+            Asset.title.asc() if sort_order != "desc" else Asset.title.desc()
+        )
+    elif sort_by == "category":
+        query = query.order_by(
+            Asset.category.asc() if sort_order != "desc" else Asset.category.desc()
+        )
+    else:
+        query = query.order_by(Asset.id.desc())
+
+    assets = query.all()
+    return JSONResponse(
+        content=[
+            {
+                "id": str(a.id),
+                "session_id": str(a.session_id),
+                "title": a.title,
+                "description": a.description,
+                "category": a.category,
+                "valuation_min": a.valuation_min,
+                "valuation_max": a.valuation_max,
+                "valuation_source": a.valuation_source,
+                "sentiment_tag": a.sentiment_tag,
+                "image_uri": a.image_uri,
+                "audio_uri": a.audio_uri,
+                "status": a.status,
+                "ocr_status": a.ocr_status,
+                "allocated_to_id": str(a.allocated_to_id) if a.allocated_to_id else None,
+            }
+            for a in assets
+        ]
     )
