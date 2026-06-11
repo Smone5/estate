@@ -1,0 +1,10 @@
+# Ignore local python virtual environment
+.venv/
+__pycache__/
+*.pyc
+
+# Ignore testing caches
+.pytest_cache/
+
+# Ignore Kokoro-82M ONNX model files (they are bind-mounted at runtime)
+app/models/

@@ -762,6 +762,7 @@ dependencies = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint-postgres" },
     { name = "langtrace-python-sdk" },
+    { name = "mnemonic" },
     { name = "ollama" },
     { name = "pgvector" },
     { name = "pillow" },
@@ -803,6 +804,7 @@ requires-dist = [
     { name = "langgraph", specifier = ">=0.0.30" },
     { name = "langgraph-checkpoint-postgres", specifier = ">=3.1.0" },
     { name = "langtrace-python-sdk", specifier = ">=2.2.0" },
+    { name = "mnemonic", specifier = ">=0.21" },
     { name = "ollama", specifier = ">=0.6.2" },
     { name = "pgvector", specifier = ">=0.2.5" },
     { name = "pillow", specifier = ">=10.2.0" },
@@ -2000,6 +2002,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/96/15/7496ce00eafc5b99e98bb696588527754d7629f11ac6208fdc9355f6eec6/mip-1.17.6.tar.gz", hash = "sha256:9da8074b80bd3ef788513d5a214ef832916d82aa66487da11a49c7da9f89d270", size = 9443716 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/65/1d/0eb2531e779be687a3249e7f2ba5e465dd34611072390252e5fcf89e7fef/mip-1.17.6-py3-none-any.whl", hash = "sha256:4fb7ff5d7beacbe7d007de172306a76aff8fb36760fa63a5d88a8cb3aa6f4a57", size = 88214 },
+]
+
+[[package]]
+name = "mnemonic"
+version = "0.21"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ff/77/e6232ed59fbd7b90208bb8d4f89ed5aabcf30a524bc2fb8f0dafbe8e7df9/mnemonic-0.21.tar.gz", hash = "sha256:1fe496356820984f45559b1540c80ff10de448368929b9c60a2b55744cc88acf", size = 152462 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/57/48/5abb16ce7f9d97b728e6b97c704ceaa614362e0847651f379ed0511942a0/mnemonic-0.21-py3-none-any.whl", hash = "sha256:72dc9de16ec5ef47287237b9b6943da11647a03fe7cf1f139fc3d7c4a7439288", size = 92701 },
 ]
 
 [[package]]

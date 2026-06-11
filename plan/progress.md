@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T37** — FastAPI Session Lifecycle & Announcement API (next)
+**T39** — Admin Setup & Session Creation API (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -27,8 +27,14 @@
 | T09a | Storage Driver Interface & Mock Driver | [x] |
 | T09b | Image Preprocessing Pipeline & Concrete Storage Drivers | [x] |
 | T10 | FastAPI Core & Onboarding endpoints | [x] |
+| T37 | FastAPI Session Lifecycle & Announcement API | [x] |
+| T11 | FastAPI Asset Router | [x] |
+| T81 | SMTP Service & Retry Infrastructure | [x] |
+| T13 | FastAPI Heir Management & Invitations | [x] |
+| T31 | Government ID Scan Upload API | [x] |
 
-
+[DONE] T31 — Government ID Scan Upload API — 2026-06-11T01:52
+[NEXT] T39 — Admin Setup & Session Creation API — first-boot admin, BIP39 mnemonic, session creation
 
 ## Blockers
 None.

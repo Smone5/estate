@@ -9,6 +9,7 @@ T10: Exposes core auth and onboarding endpoints with rate limiting.
 """
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 
@@ -1226,6 +1227,149 @@ async def send_invite(
 # ---------------------------------------------------------------------------
 # T31 — Government ID Scan Upload API
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# T39 — Schema
+# ---------------------------------------------------------------------------
+
+
+class AdminSetupRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=8, max_length=100)
+
+
+class SessionCreateRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=100)
+
+
+# ---------------------------------------------------------------------------
+# T39 — Admin Setup & Session Creation API
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/setup/admin")
+@limiter.limit("5/minute")
+async def setup_admin(
+    request: Request,
+    body: AdminSetupRequest,
+    response: Response,
+    db: DBSession = Depends(get_db),
+):
+    """
+    First-boot admin account creation with BIP39 paper recovery key.
+
+    Per Backend Spec §9.5 (POST /api/setup/admin):
+    Seed route to initialize the first Administrator account. Reads the
+    system's active ENCRYPTION_KEY, converts it into a 24-word BIP39
+    mnemonic Paper Recovery Key, saves the hashed admin credentials,
+    and returns the mnemonic phrase. Idempotent — returns 409 if an
+    Admin user already exists.
+    """
+    existing_admin = (
+        db.query(User).filter(User.role == "ADMIN").first()
+    )
+    if existing_admin is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Admin account already exists. Setup can only be run once.",
+        )
+
+    import base64 as _base64
+    from mnemonic import Mnemonic as _Mnemonic
+
+    encryption_key = os.environ.get("ENCRYPTION_KEY")
+    if not encryption_key:
+        raise HTTPException(
+            status_code=500,
+            detail="ENCRYPTION_KEY environment variable is not set. "
+            "Cannot generate paper recovery key.",
+        )
+
+    # Derive BIP39 mnemonic from the 32-byte raw AES key
+    try:
+        raw_key_bytes = _base64.urlsafe_b64decode(encryption_key.encode())
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="ENCRYPTION_KEY is not a valid base64-encoded Fernet key.",
+        )
+
+    if len(raw_key_bytes) != 32:
+        raise HTTPException(
+            status_code=500,
+            detail="ENCRYPTION_KEY must decode to exactly 32 bytes.",
+        )
+
+    mnemo = _Mnemonic("english")
+    paper_recovery_key = mnemo.to_mnemonic(raw_key_bytes)
+
+    # Create admin user
+    pw_hashed = hash_password(body.password)
+    admin_user = User(
+        username=body.username,
+        role="ADMIN",
+        pw_hash=pw_hashed,
+        status="ACTIVE",
+    )
+    db.add(admin_user)
+    db.commit()
+    db.refresh(admin_user)
+
+    # Issue JWT cookie so the admin is immediately authenticated
+    jwt_token = create_access_token(
+        user_id=str(admin_user.id),
+        username=admin_user.username,
+        role="ADMIN",
+        session_id=None,
+    )
+    set_auth_cookie(response, jwt_token)
+
+    response.status_code = 201
+    return {
+        "status": "created",
+        "username": admin_user.username,
+        "paper_recovery_key": paper_recovery_key,
+    }
+
+
+@app.post("/api/sessions")
+@limiter.limit("30/minute")
+async def create_session(
+    request: Request,
+    body: SessionCreateRequest,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Create a new mediation session.
+
+    Per Backend Spec §9.1 (POST /api/sessions):
+    Admin credentials required. Creates a new estate mediation session
+    with the given title, defaults to 'SETUP' status.
+    """
+    session = SessionModel(
+        title=body.title,
+        status="SETUP",
+        is_paused=False,
+        is_deadlocked=False,
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+
+    return JSONResponse(
+        content={
+            "session_id": str(session.id),
+            "title": session.title,
+            "status": session.status,
+            "is_paused": session.is_paused,
+            "deadline": (
+                session.deadline.isoformat() if session.deadline else None
+            ),
+        },
+        status_code=201,
+    )
 
 
 @app.post("/api/heirs/me/upload-id")
