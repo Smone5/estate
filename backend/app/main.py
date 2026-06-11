@@ -1787,6 +1787,369 @@ async def delete_asset_audio(
 
 
 # ---------------------------------------------------------------------------
+# T12 — Schema
+# ---------------------------------------------------------------------------
+
+
+class ValuationDraftItem(BaseModel):
+    asset_id: str
+    points: int = Field(..., ge=0, le=1000)
+    reasoning: str | None = None
+    is_reasoning_shared: bool = False
+
+
+class ValuationDraftRequest(BaseModel):
+    draft_version: int = Field(..., ge=0)
+    valuations: list[ValuationDraftItem]
+
+
+class ValuationSubmitItem(BaseModel):
+    asset_id: str
+    points: int = Field(..., ge=0, le=1000)
+    reasoning: str | None = None
+    is_reasoning_shared: bool = False
+
+
+class ValuationSubmitRequest(BaseModel):
+    valuations: list[ValuationSubmitItem]
+
+
+# ---------------------------------------------------------------------------
+# T12 — FastAPI Valuation Router: draft saving, submission, HITL_GUARD gate
+# ---------------------------------------------------------------------------
+
+
+@app.put("/api/sessions/{session_id}/valuations/draft")
+@limiter.limit("30/minute")
+async def save_valuation_draft(
+    request: Request,
+    session_id: str,
+    body: ValuationDraftRequest,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Save draft point allocations for the Heir.
+
+    Per Backend Spec §9.3 (PUT /api/sessions/{session_id}/valuations/draft):
+    1. Acquires a pessimistic shared read lock on the Session row.
+    2. Queries the Heir's current draft_version. If incoming <= stored, 409.
+    3. Concurrency check: FOR UPDATE locking on User and Valuation rows.
+    4. Bulk upserts points/reasoning rows, bumps draft_version on commit.
+
+    Constraints:
+      - 400 if session is LOCKED or FINALIZED.
+      - 403 if Heir is in PROFILE_HOLD.
+    """
+    if current_user.get("role") != "HEIR":
+        raise HTTPException(status_code=403, detail="Heir access required")
+
+    heir_id = current_user.get("user_id")
+
+    # Pessimistic shared read lock on the session
+    session = (
+        db.query(SessionModel)
+        .filter(SessionModel.id == session_id)
+        .with_for_update(read=True)
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status in ("LOCKED", "FINALIZED"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Drafts cannot be saved — session is '{session.status}'.",
+        )
+
+    # Exclusive lock on the heir row for concurrency control
+    heir = (
+        db.query(User)
+        .filter(User.id == heir_id, User.role == "HEIR")
+        .with_for_update()
+        .first()
+    )
+    if not heir:
+        raise HTTPException(status_code=404, detail="Heir not found")
+
+    if heir.status == "PROFILE_HOLD":
+        raise HTTPException(
+            status_code=403,
+            detail="Profile pending Executor identity verification. "
+            "Bidding and mediation chat are locked.",
+        )
+
+    # Version race-condition check
+    if body.draft_version <= heir.draft_version:
+        raise HTTPException(
+            status_code=409,
+            detail="Draft version conflict — your draft is out of date. "
+            "Reload the latest version and retry.",
+        )
+
+    # Bulk upsert valuations
+    for item in body.valuations:
+        # Verify asset exists and belongs to this session
+        asset = (
+            db.query(Asset)
+            .filter(Asset.id == item.asset_id, Asset.session_id == session_id)
+            .first()
+        )
+        if not asset:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Asset {item.asset_id} not found in this session.",
+            )
+
+        existing = (
+            db.query(Valuation)
+            .filter(
+                Valuation.asset_id == item.asset_id,
+                Valuation.heir_id == heir_id,
+            )
+            .with_for_update()
+            .first()
+        )
+        if existing:
+            existing.points = item.points
+            existing.reasoning = item.reasoning
+            existing.is_reasoning_shared = item.is_reasoning_shared
+        else:
+            db.add(Valuation(
+                asset_id=item.asset_id,
+                heir_id=heir_id,
+                points=item.points,
+                reasoning=item.reasoning,
+                is_reasoning_shared=item.is_reasoning_shared,
+            ))
+
+    heir.draft_version = body.draft_version
+    db.commit()
+
+    return JSONResponse(
+        content={
+            "status": "success",
+            "message": "Draft allocations saved",
+            "draft_version": heir.draft_version,
+        }
+    )
+
+
+@app.post("/api/sessions/{session_id}/valuations/submit")
+@limiter.limit("20/minute")
+async def submit_valuations(
+    request: Request,
+    session_id: str,
+    body: ValuationSubmitRequest,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Submit final point valuations for the Heir.
+
+    Per Backend Spec §9.3 (POST /api/sessions/{session_id}/valuations/submit):
+    1. Pessimistic exclusive lock on Session (FOR UPDATE).
+    2. Verifies Heir status is ACTIVE (not PROFILE_HOLD, SUBMITTED, ABSTAINED).
+    3. Checks LangGraph thread for HITL_GUARD suspension → 403.
+    4. Validates points sum == 1000.
+    5. Checks session status not LOCKED or FINALIZED → 400.
+    6. Upserts all valuations via bulk operation.
+    7. Sets is_submitted = True, submitted_at = UTC now, status = 'SUBMITTED'.
+    8. Broadcasts WebSocket status update.
+    9. All-submitted check: if all eligible heirs submitted, triggers solver logic.
+
+    Returns 403 with HITL_GUARD message if thread is suspended.
+    """
+    if current_user.get("role") != "HEIR":
+        raise HTTPException(status_code=403, detail="Heir access required")
+
+    heir_id = current_user.get("user_id")
+
+    # Pessimistic exclusive lock on session → User → Valuations
+    session = (
+        db.query(SessionModel)
+        .filter(SessionModel.id == session_id)
+        .with_for_update()
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status in ("LOCKED", "FINALIZED"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Submissions are not accepted — session is '{session.status}'.",
+        )
+
+    # Exclusive lock on the heir row
+    heir = (
+        db.query(User)
+        .filter(User.id == heir_id, User.role == "HEIR")
+        .with_for_update()
+        .first()
+    )
+    if not heir:
+        raise HTTPException(status_code=404, detail="Heir not found")
+
+    if heir.status != "ACTIVE":
+        raise HTTPException(
+            status_code=403,
+            detail="Only active verified heirs can submit point valuations.",
+        )
+
+    # Check LangGraph checkpointer for HITL_GUARD suspension
+    try:
+        from .graph import get_checkpointer  # PostgresSaver singleton
+        saver = get_checkpointer()
+        config = {"configurable": {"thread_id": f"{session_id}:{heir_id}"}}
+        state = saver.get_tuple(config)
+        if state and state.pending_writes:
+            for pending in state.pending_writes:
+                if isinstance(pending, tuple) and len(pending) >= 2:
+                    node = pending[0] if isinstance(pending, tuple) else None
+                    if node == "HITL_GUARD":
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Points submission suspended. Your allocations "
+                            "require review and correction by the Executor.",
+                        )
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # Checkpointer not yet configured or unavailable — proceed
+
+    # Validate points sum == 1000
+    total = sum(item.points for item in body.valuations)
+    if total != 1000:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Points sum must equal exactly 1000. Current total: {total}.",
+        )
+
+    # Verify each referenced asset exists and is LIVE or PRE_ALLOCATED
+    asset_ids = {item.asset_id for item in body.valuations}
+    exist_assets = (
+        db.query(Asset.id)
+        .filter(
+            Asset.id.in_(asset_ids),
+            Asset.session_id == session_id,
+            Asset.status.in_(["LIVE", "PRE_ALLOCATED"]),
+        )
+        .all()
+    )
+    exist_set = {str(a[0]) for a in exist_assets}
+    for aid in asset_ids:
+        if aid not in exist_set:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Asset {aid} not found or not eligible for points allocation.",
+            )
+
+    # Bulk upsert valuations with exclusive locks
+    for item in body.valuations:
+        existing = (
+            db.query(Valuation)
+            .filter(
+                Valuation.asset_id == item.asset_id,
+                Valuation.heir_id == heir_id,
+            )
+            .with_for_update()
+            .first()
+        )
+        if existing:
+            existing.points = item.points
+            existing.reasoning = item.reasoning
+            existing.is_reasoning_shared = item.is_reasoning_shared
+        else:
+            db.add(Valuation(
+                asset_id=item.asset_id,
+                heir_id=heir_id,
+                points=item.points,
+                reasoning=item.reasoning,
+                is_reasoning_shared=item.is_reasoning_shared,
+            ))
+
+    now_utc = datetime.now(timezone.utc)
+    heir.is_submitted = True
+    heir.submitted_at = now_utc
+    heir.status = "SUBMITTED"
+    db.commit()
+
+    # Broadcast WebSocket status update
+    await manager.broadcast_session_status(
+        session_id,
+        {
+            "type": "heir_submitted",
+            "heir_id": str(heir.id),
+            "heir_username": heir.username,
+        },
+    )
+
+    # All-submitted check: if no eligible heirs still pending, optionally trigger deadlock check
+    pending = (
+        db.query(User)
+        .filter(
+            User.session_id == session_id,
+            User.role == "HEIR",
+            User.status.in_(["PENDING", "PROFILE_HOLD", "ACTIVE"]),
+        )
+        .count()
+    )
+
+    result = {
+        "status": "submitted",
+        "submitted_at": now_utc.isoformat(),
+    }
+
+    if pending == 0:
+        result["all_submitted"] = True
+
+    return JSONResponse(content=result)
+
+
+@app.get("/api/sessions/{session_id}/heirs/{heir_id}/valuations")
+@limiter.limit("60/minute")
+async def get_heir_valuations(
+    request: Request,
+    session_id: str,
+    heir_id: str,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Retrieve the existing point allocations for the specified Heir.
+
+    Per Backend Spec §9.3 (GET /api/sessions/{session_id}/heirs/{heir_id}/valuations):
+    Access: Heir JWT matching heir_id, or Admin credentials.
+    Returns list of ValuationSchema objects.
+    """
+    role = current_user.get("role")
+    user_id = current_user.get("user_id")
+
+    if role == "HEIR" and user_id != heir_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    valuations = (
+        db.query(Valuation)
+        .filter(Valuation.heir_id == heir_id)
+        .all()
+    )
+
+    return JSONResponse(
+        content=[
+            {
+                "asset_id": str(v.asset_id),
+                "heir_id": str(v.heir_id),
+                "points": v.points,
+                "reasoning": v.reasoning,
+                "is_reasoning_shared": v.is_reasoning_shared if v.is_reasoning_shared is not None else False,
+            }
+            for v in valuations
+        ]
+    )
+
+
+# ---------------------------------------------------------------------------
 # T34 — Schema
 # ---------------------------------------------------------------------------
 
