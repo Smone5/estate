@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T47** — FAQ/Help UI Components (next)
+**T48** — Session Announcement UI Components (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -66,7 +66,8 @@
 [DONE] T32 — Government ID Scanner & File Drop UI — HTML5 camera, card-shaped overlay, drag-and-drop, 10MB limit — 2026-06-11T10:17
 [DONE] T46 — Semantic Search UI — gallery search bar, filter panel, sorting controls, confidence badge, zero-match fallback — 2026-06-11T14:27
 [DONE] T35 — Executor Force Allocation Console UI — view deadlocked items, select beneficiaries, override reasons, POST override — 2026-06-11T14:38
-[NEXT] T47 — FAQ/Help UI Components — Heir FAQ drawer, Admin Help Portal, scroll tutorial, inline FAQ editor
+[DONE] T47 — FAQ/Help UI Components — Heir FAQ drawer, Admin Help Portal, scroll tutorial, inline FAQ editor — 2026-06-11T14:43
+[NEXT] T48 — Session Announcement UI Components — Admin Announcement Console, Heir sticky Amber-500 alert banner, Heir login modal acknowledgment gate
 
 ## Blockers
 None.

@@ -100,7 +100,7 @@ Structure the React Vite application shell, Zustand global stores, custom client
 * **Objective**: Build the asset gallery search bar, filter panel (category, allocation, provenance, shared stories toggles), sorting controls, confidence badge rendering, and zero-match fallback state with the "Ask the Mediator" chat injection button.
 * **Verification**: Enter a search query and verify filtered results render with confidence pills. Verify zero results show the fallback card and the "Ask the Mediator" button pre-fills the chat input.
 
-### [ ] Task T47: FAQ/Help UI Components
+### [x] Task T47: FAQ/Help UI Components
 * **Objective**: Build the Heir FAQ drawer accordion drawer (triggered by `(?)` header icon) showing static FAQs plus dynamic estate-specific FAQs from the API. Build the Admin Help Portal full-screen modal with the 5-section scrolling tutorial and inline FAQ editor.
 * **Verification**: Verify FAQ drawer opens, accordion items expand, and estate-specific FAQs load dynamically. Verify Admin can create, edit, and delete FAQ entries from the Help Portal.
 
