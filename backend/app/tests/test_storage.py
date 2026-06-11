@@ -8,6 +8,7 @@ from app.services.storage import (
     MockStorageDriver,
     LocalStorageDriver,
     GCSStorageDriver,
+    S3StorageDriver,
     preprocess_image,
     get_storage_driver,
 )
@@ -185,6 +186,89 @@ class TestGCSStorageDriver:
             pytest.fail(f"GCSStorageDriver.delete() raised an unexpected exception: {e}")
 
 
+class TestS3StorageDriver:
+    """Verify S3StorageDriver functionality using mocks."""
+
+    @patch("boto3.client")
+    def test_save_and_get_roundtrip(self, mock_boto_client):
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        driver = S3StorageDriver(
+            bucket_name="test-bucket",
+            endpoint_url="http://localhost:9000",
+            access_key="fake-key",
+            secret_key="fake-secret"
+        )
+
+        # Test save
+        path = "uploads/file.webp"
+        content = b"fake-webp-data"
+        saved_path = driver.save(path, content)
+
+        assert saved_path == path
+        mock_boto_client.assert_called_with(
+            "s3",
+            endpoint_url="http://localhost:9000",
+            aws_access_key_id="fake-key",
+            aws_secret_access_key="fake-secret"
+        )
+        mock_s3.put_object.assert_called_with(
+            Bucket="test-bucket",
+            Key="uploads/file.webp",
+            Body=content
+        )
+
+        # Test get
+        mock_s3.get_object.return_value = {
+            "Body": MagicMock(read=MagicMock(return_value=content))
+        }
+        retrieved = driver.get(path)
+        assert retrieved == content
+
+    @patch("boto3.client")
+    def test_get_nonexistent_file_raises_error(self, mock_boto_client):
+        from botocore.exceptions import ClientError
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        # Simulate ClientError with NoSuchKey
+        err = ClientError(
+            {"Error": {"Code": "NoSuchKey", "Message": "The specified key does not exist."}},
+            "GetObject"
+        )
+        mock_s3.get_object.side_effect = err
+
+        driver = S3StorageDriver(bucket_name="test-bucket")
+        with pytest.raises(FileNotFoundError):
+            driver.get("nonexistent.txt")
+
+    @patch("boto3.client")
+    def test_delete_existing_file(self, mock_boto_client):
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        driver = S3StorageDriver(bucket_name="test-bucket")
+        driver.delete("uploads/file.webp")
+        mock_s3.delete_object.assert_called_with(
+            Bucket="test-bucket",
+            Key="uploads/file.webp"
+        )
+
+    @patch("boto3.client")
+    def test_delete_nonexistent_file_is_idempotent(self, mock_boto_client):
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+        mock_s3.delete_object.side_effect = Exception("S3 error")
+
+        driver = S3StorageDriver(bucket_name="test-bucket")
+        # Should catch exception and proceed gracefully
+        try:
+            driver.delete("nonexistent.txt")
+        except Exception as e:
+            pytest.fail(f"S3StorageDriver.delete() raised an unexpected exception: {e}")
+
+
 class TestImagePreprocessingPipeline:
     """Verify image preprocessing rules: format conversion, dimension bounds, aspect-ratio preservation, compression."""
 
@@ -258,4 +342,16 @@ class TestGetStorageDriver:
     def test_get_storage_driver_mock(self):
         driver = get_storage_driver()
         assert isinstance(driver, MockStorageDriver)
+
+    @patch.dict(os.environ, {
+        "STORAGE_DRIVER": "S3",
+        "S3_BUCKET_NAME": "s3-bucket",
+        "S3_ENDPOINT_URL": "http://localhost:9000"
+    })
+    @patch("boto3.client")
+    def test_get_storage_driver_s3(self, mock_boto_client):
+        driver = get_storage_driver()
+        assert isinstance(driver, S3StorageDriver)
+        assert driver._bucket_name == "s3-bucket"
+        assert driver._endpoint_url == "http://localhost:9000"
 

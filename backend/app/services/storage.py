@@ -129,6 +129,77 @@ class GCSStorageDriver(StorageDriver):
                 pass
 
 
+class S3StorageDriver(StorageDriver):
+    def __init__(
+        self,
+        bucket_name: str = None,
+        endpoint_url: str = None,
+        access_key: str = None,
+        secret_key: str = None,
+        region_name: str = None,
+    ):
+        self._bucket_name = bucket_name or os.getenv("S3_BUCKET_NAME") or os.getenv("AWS_BUCKET_NAME")
+        self._endpoint_url = endpoint_url or os.getenv("S3_ENDPOINT_URL")
+        self._access_key = access_key or os.getenv("AWS_ACCESS_KEY_ID")
+        self._secret_key = secret_key or os.getenv("AWS_SECRET_ACCESS_KEY")
+        self._region_name = region_name or os.getenv("AWS_REGION_NAME")
+        self._client = None
+
+    @property
+    def client(self):
+        if self._client is None:
+            import boto3
+            kwargs = {}
+            if self._endpoint_url:
+                kwargs["endpoint_url"] = self._endpoint_url
+            if self._access_key and self._secret_key:
+                kwargs["aws_access_key_id"] = self._access_key
+                kwargs["aws_secret_access_key"] = self._secret_key
+            if self._region_name:
+                kwargs["region_name"] = self._region_name
+            self._client = boto3.client("s3", **kwargs)
+        return self._client
+
+    def save(self, path: str, content: bytes) -> str:
+        if not self._bucket_name:
+            raise ValueError("S3_BUCKET_NAME or AWS_BUCKET_NAME is not set")
+        object_name = path.lstrip("/")
+        self.client.put_object(
+            Bucket=self._bucket_name,
+            Key=object_name,
+            Body=content
+        )
+        return path
+
+    def get(self, path: str) -> bytes:
+        if not self._bucket_name:
+            raise ValueError("S3_BUCKET_NAME or AWS_BUCKET_NAME is not set")
+        object_name = path.lstrip("/")
+        try:
+            response = self.client.get_object(
+                Bucket=self._bucket_name,
+                Key=object_name
+            )
+            return response["Body"].read()
+        except Exception as e:
+            # Check for NoSuchKey in standard boto3/botocore ClientError response
+            if hasattr(e, "response") and e.response.get("Error", {}).get("Code") == "NoSuchKey":
+                raise FileNotFoundError(f"File not found in S3 bucket: {path}")
+            raise
+
+    def delete(self, path: str) -> None:
+        if not self._bucket_name:
+            raise ValueError("S3_BUCKET_NAME or AWS_BUCKET_NAME is not set")
+        object_name = path.lstrip("/")
+        try:
+            self.client.delete_object(
+                Bucket=self._bucket_name,
+                Key=object_name
+            )
+        except Exception:
+            pass
+
+
 def preprocess_image(content: bytes) -> bytes:
     """
     Decodes an image from bytes (PNG, JPG, HEIC, WebP, etc.),
@@ -157,6 +228,8 @@ def get_storage_driver() -> StorageDriver:
     driver_type = os.getenv("STORAGE_DRIVER", "LOCAL").upper()
     if driver_type == "GCS":
         return GCSStorageDriver()
+    elif driver_type == "S3":
+        return S3StorageDriver()
     elif driver_type == "MOCK":
         return MockStorageDriver()
     else:
