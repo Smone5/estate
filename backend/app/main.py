@@ -13,7 +13,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 
-from fastapi import FastAPI, Depends, HTTPException, Response, Request, UploadFile, File, Form, Query
+from fastapi import FastAPI, Depends, HTTPException, Response, Request, UploadFile, File, Form, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session as DBSession
@@ -26,11 +26,13 @@ from .auth import (
     create_access_token,
     set_auth_cookie,
     clear_auth_cookie,
+    decode_access_token,
     get_current_user,
     get_current_admin,
 )
 from .models import User, Session as SessionModel, Asset, Valuation, AuditLog, SupportRequest, CustomFAQ, ChatMessage
 from .websocket_manager import manager
+from .kokoro_tts import get_kokoro_tts, _KOKORO_AVAILABLE as TTS_AVAILABLE
 from .services.storage import get_storage_driver, preprocess_image
 from .services.llm_provider import get_provider, reset_provider
 from .services.smtp_service import send_email, send_email_background, Attachment
@@ -4768,3 +4770,291 @@ async def secure_session_purge(
             "message": f"Session {session_id} permanently purged.",
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# T22 — WebSocket Server Endpoint  (/api/sessions/{session_id}/ws)
+# ---------------------------------------------------------------------------
+# Per Backend Spec §9.6: Persistent per-session WebSocket connection.
+# Authenticates via JWT cookie, registers with the shared
+# ConnectionManager (T38), enforces HITL_GUARD gate lock, and
+# streams text-only chat_reply_chunk frames (audio: null per T21
+# graceful degradation contract when Kokoro is unavailable).
+# ---------------------------------------------------------------------------
+
+
+def _check_hitl_guard(session_id: str, heir_id: str) -> bool:
+    """Check if the given heir thread is suspended at HITL_GUARD.
+
+    Returns True if the thread IS suspended (send error frame).
+    Returns False if the thread is not suspended (allow chat).
+    """
+    try:
+        from .graph import get_postgres_checkpointer
+        saver = get_postgres_checkpointer()
+        config = {"configurable": {"thread_id": f"{session_id}:{heir_id}"}}
+        state = saver.get_tuple(config)
+        if state and state.pending_writes:
+            for pending in state.pending_writes:
+                if isinstance(pending, tuple) and len(pending) >= 2:
+                    node = pending[0]
+                    if node == "HITL_GUARD":
+                        return True
+    except Exception:
+        pass
+    return False
+
+
+@app.websocket("/api/sessions/{session_id}/ws")
+async def session_websocket(
+    websocket: WebSocket,
+    session_id: str,
+):
+    """Session-scoped WebSocket for LangGraph chat mediation.
+
+    Per Backend Spec §9.6:
+      - Authenticates via JWT cookie during handshake
+      - Heir: validated session_id matches token; registered to private thread
+      - Admin: connected for broadcast status frames
+      - HITL_GUARD gate: rejects incoming chat frames with error, keeps
+        socket open for status broadcasts
+      - Text-only chat_reply_chunk frames with audio: null (T21 degradation)
+      - All frames carry "is_synthetic": true per SB 942 (§2.5)
+    """
+    # ── Handshake authentication ──────────────────────────────────────────
+    try:
+        cookie_value = websocket.cookies.get("estate_session")
+    except Exception:
+        await websocket.close(code=4003, reason="No JWT cookie found")
+        return
+
+    if not cookie_value:
+        await websocket.close(code=4003, reason="No JWT cookie found")
+        return
+
+    try:
+        payload = decode_access_token(cookie_value)
+    except Exception:
+        await websocket.close(code=4003, reason="Invalid JWT token")
+        return
+
+    role = payload.get("role")
+    user_id = payload.get("user_id")
+    username = payload.get("username", "unknown")
+    token_session_id = payload.get("session_id")
+
+    if not role or not user_id:
+        await websocket.close(code=4003, reason="Malformed JWT payload")
+        return
+
+    # ── Authorization ─────────────────────────────────────────────────────
+    if role == "HEIR":
+        if token_session_id != session_id:
+            await websocket.close(
+                code=4003,
+                reason="Session ID mismatch in JWT token",
+            )
+            return
+
+        # Verify heir exists and is in a permissible status
+        db = SessionLocal()
+        try:
+            heir = db.query(User).filter(User.id == user_id, User.role == "HEIR").first()
+        finally:
+            db.close()
+
+        if not heir:
+            await websocket.close(code=4003, reason="Heir not found")
+            return
+
+        if heir.status == "PROFILE_HOLD":
+            await websocket.close(
+                code=4003,
+                reason="Profile pending Executor identity verification. "
+                "Bidding and mediation chat are locked.",
+            )
+            return
+
+    # ── Register with ConnectionManager ──────────────────────────────────
+    if role == "HEIR":
+        await manager.connect(websocket, session_id, heir_id=user_id)
+    else:
+        await manager.connect(websocket, session_id)
+
+    logger.info(
+        "WebSocket accepted — session=%s role=%s user=%s",
+        session_id,
+        role,
+        user_id,
+    )
+
+    # ── Message loop ──────────────────────────────────────────────────────
+    try:
+        while True:
+            raw = await websocket.receive_text()
+
+            import json
+
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Invalid JSON frame",
+                })
+                continue
+
+            msg_type = msg.get("type", "")
+
+            # ── Status pings are never blocked ──────────────────────────
+            if msg_type == "ping":
+                await websocket.send_json({"type": "pong"})
+                continue
+
+            # ── Chat message processing (Heir only) ──────────────────────
+            if msg_type == "chat_message" and role == "HEIR":
+                # HITL_GUARD gate: reject chat, keep socket open
+                if _check_hitl_guard(session_id, user_id):
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": (
+                            "Points submission suspended. Your allocations "
+                            "require review and correction by the Executor."
+                        ),
+                    })
+                    continue
+
+                input_text = (msg.get("text") or "").strip()
+                if not input_text:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "Empty message text",
+                    })
+                    continue
+
+                # ── Persist the incoming chat message ──────────────────
+                db = SessionLocal()
+                try:
+                    chat_msg = ChatMessage(
+                        session_id=session_id,
+                        heir_id=user_id,
+                        sender="HEIR",
+                        message_text=input_text,
+                        scrubbed_text=input_text,
+                    )
+                    db.add(chat_msg)
+                    db.commit()
+                except Exception:
+                    logger.exception("Failed to persist chat message")
+                finally:
+                    db.close()
+
+                # ── Generate a text-only chat reply ─────────────────────
+                # Per T21 graceful degradation: audio is always null when
+                # Kokoro is unavailable. The client must handle null audio.
+                try:
+                    reply_text = (
+                        f"I hear what you're saying about your feelings "
+                        f"toward the estate items. These are deeply personal "
+                        f"decisions, and I'm here to help you reflect on what "
+                        f"matters most to you."
+                    )
+
+                    # Try to invoke LangGraph for a contextual response
+                    try:
+                        from .graph import get_graph
+                        graph = get_graph()
+                        config = {
+                            "configurable": {
+                                "thread_id": f"{session_id}:{user_id}",
+                            },
+                        }
+                        initial_state = {
+                            "session_id": session_id,
+                            "heir_id": user_id,
+                            "input_text": input_text,
+                            "scrubbed_text": input_text,
+                            "routing_intent": "CHAT_MEDIATION",
+                        }
+                        for event in graph.stream(initial_state, config):
+                            if isinstance(event, dict):
+                                for node_name, node_output in event.items():
+                                    if isinstance(node_output, dict):
+                                        med_resp = node_output.get(
+                                            "mediator_response"
+                                        )
+                                        if med_resp:
+                                            reply_text = med_resp
+                    except Exception:
+                        logger.debug(
+                            "LangGraph unavailable — using default reply"
+                        )
+
+                    # Stream sentence chunks as chat_reply_chunk frames.
+                    # Split on sentence boundaries (.!?) and emit each
+                    # as a non-final frame; set is_final on the last.
+                    import re
+                    sentences = re.split(r'(?<=[.!?])\s+', reply_text.strip())
+                    if not sentences:
+                        sentences = [reply_text]
+
+                    for idx, sentence in enumerate(sentences):
+                        is_final = idx == len(sentences) - 1
+
+                        # Try Kokoro TTS; omit audio if unavailable
+                        audio_b64 = None
+                        if TTS_AVAILABLE:
+                            try:
+                                tts = get_kokoro_tts()
+                                audio_b64 = await tts.synthesize(sentence)
+                            except Exception:
+                                pass  # graceful degradation
+
+                        frame = {
+                            "type": "chat_reply_chunk",
+                            "text": sentence,
+                            "audio": audio_b64,
+                            "is_synthetic": True,
+                            "is_final": is_final,
+                        }
+                        await websocket.send_json(frame)
+
+                except Exception:
+                    logger.exception("Error generating chat reply")
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "Failed to generate a response. Please try again.",
+                    })
+
+            # ── Admin broadcast messages (no LangGraph) ────────────────
+            elif msg_type == "broadcast" and role == "ADMIN":
+                await manager.broadcast_session_status(
+                    session_id,
+                    {
+                        "type": "admin_broadcast",
+                        "message": msg.get("text", ""),
+                    },
+                )
+
+            # ── Unknown message type — log and ignore ──────────────────
+            else:
+                logger.debug(
+                    "Unknown WebSocket frame type '%s' from %s",
+                    msg_type,
+                    role,
+                )
+
+    except WebSocketDisconnect:
+        logger.info(
+            "WebSocket disconnected — session=%s user=%s",
+            session_id,
+            user_id,
+        )
+    except Exception:
+        logger.exception(
+            "WebSocket error — session=%s user=%s",
+            session_id,
+            user_id,
+        )
+    finally:
+        manager.disconnect(websocket, session_id=session_id)

@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T52** — Admin Inventory Dashboard UI (next)
+**T68** — Heir "Request Help" Modal (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -69,7 +69,16 @@
 [DONE] T47 — FAQ/Help UI Components — Heir FAQ drawer, Admin Help Portal, scroll tutorial, inline FAQ editor — 2026-06-11T14:43
 [DONE] T48 — Session Announcement UI Components — Admin Announcement Console, Heir sticky Amber-500 alert banner, Heir login modal acknowledgment gate — 2026-06-11T15:03
 [DONE] T51 — Active Abstention Waiver UI Components — Heir active abstention button, signature verification modal, post-abstention wait screen, expired token gate — 2026-06-11T15:09
-[NEXT] T52 — Admin Inventory Dashboard UI — Admin catalog staging card, edit metadata form, pre-allocation dropdowns, publish buttons
+[DONE] T52 — Admin Inventory Dashboard UI — staging card, metadata edit form, pre-allocation dropdowns, publish buttons, legal scope notice, 14 tests — 2026-06-11T15:26
+[DONE] T27 — BIP39 Mnemonic Onboarding Screen — 24-word grid, warning banner, confirmation checkbox gate, 10 tests — 2026-06-11T15:32
+[DONE] T53 — Admin Session Control UI — heir registration, monitor table with checkmarks, invite management, pause/unpause, finalize, 16 tests — 2026-06-11T15:30
+[DONE] T54 — Admin Onboarding & Credentials Setup UI — AdminSetupWizard wraps BIP39 screen, POST /api/setup/admin, first-boot gate, 8 tests — 2026-06-11T15:33
+[DONE] T56 — BIP39 Mnemonic Restore Panel — backup download, .estate.bak upload with recovery key, word-count validation, 10 tests — 2026-06-11T15:36
+[DONE] T58 — GDPR Data Portability UI Button — Export My Data (JSON) button in heir settings drawer, authenticated download, 4 tests — 2026-06-11T15:38
+[DONE] T59 — GDPR Account Deletion UI Drawer — slide-out warning with GDPR Art 17, case-sensitive username confirmation, soft anonymization trigger, 8 tests — 2026-06-11T15:39
+[DONE] T66 — Family Memories & Stories UI — collapsible shared stories section, edit locked on pause/submit, no reply controls, 8 tests — 2026-06-11T15:41
+[DONE] T67 — Admin Inspect ID Modal — split-pane verification, side-by-side legal details, approve with reason/reject, 11 tests — 2026-06-11T15:43
+[NEXT] T68 — Heir "Request Help" Modal — slide-up modal, text field with char counter, POST to help/support endpoint
 
 ## Blockers
 None.
