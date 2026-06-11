@@ -51,9 +51,9 @@ The `uv sync` command reads `backend/pyproject.toml` and installs all declared d
 To enable seamless switching between open-source local-first compute and cloud LLM APIs, all node prompts, vision extractions, and embedding computations are routed through a unified LLM service factory (`app/services/llm_provider.py`). The active provider is loaded from environment variables on startup:
 
 1.  **Supported Providers**:
-    *   `LLM_PROVIDER`: `'ollama'` (default) | `'openai'` | `'anthropic'` | `'google'` (Vertex AI / Google AI Studio).
-    *   `EMBEDDING_PROVIDER`: `'ollama'` (default) | `'openai'` | `'google'`.
-    *   `VISION_PROVIDER`: `'ollama'` (default) | `'openai'` | `'google'` | `'anthropic'`.
+    *   `LLM_PROVIDER`: `'ollama'` (default) | `'openai'` | `'anthropic'` | `'google'` (Vertex AI / Google AI Studio) | `'openrouter'` | `'nvidia'` (NVIDIA NIM).
+    *   `EMBEDDING_PROVIDER`: `'ollama'` (default) | `'openai'` | `'google'` | `'openrouter'` | `'nvidia'`.
+    *   `VISION_PROVIDER`: `'ollama'` (default) | `'openai'` | `'google'` | `'anthropic'` | `'openrouter'` | `'nvidia'`.
 2.  **Configured Models**:
     *   `FAST_THINKER_MODEL`: e.g. `qwen2.5:8b-instruct` (Ollama), `gpt-4o-mini` (OpenAI), `claude-3-5-haiku` (Anthropic), `gemini-2.5-flash` (Google).
     *   `SLOW_THINKER_MODEL`: e.g. `qwen2.5:14b-instruct` (Ollama), `gpt-4o` (OpenAI), `claude-3-5-sonnet` (Anthropic), `gemini-2.5-pro` (Google).
