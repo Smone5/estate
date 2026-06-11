@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T09b** — Image Preprocessing Pipeline & Concrete Storage Drivers (next)
+**T10** — FastAPI Core & Onboarding endpoints (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -25,6 +25,7 @@
 | T07b | LangGraph Model-Specific Tuning & Concurrency Config | [x] |
 | T28a-2 | Backend Tests — Phase 2 Scope | [x] |
 | T09a | Storage Driver Interface & Mock Driver | [x] |
+| T09b | Image Preprocessing Pipeline & Concrete Storage Drivers | [x] |
 
 
 
