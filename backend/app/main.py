@@ -1225,6 +1225,74 @@ async def send_invite(
 
 
 # ---------------------------------------------------------------------------
+# T40 — Asset Deletion API
+# ---------------------------------------------------------------------------
+
+
+@app.delete("/api/assets/{asset_id}")
+@limiter.limit("30/minute")
+async def delete_asset(
+    request: Request,
+    asset_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Permanently delete an asset and its associated files.
+
+    Per Backend Spec §9.2 (DELETE /api/assets/{asset_id}):
+    Deletes the asset record, removes the associated image file from
+    storage, and cascade-deletes all linked valuation rows.
+    Returns 400 if the session status is ACTIVE, LOCKED, or FINALIZED.
+    """
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    session = (
+        db.query(SessionModel).filter(SessionModel.id == asset.session_id).first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status in ("ACTIVE", "LOCKED", "FINALIZED"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Assets can only be deleted during the SETUP phase. "
+            f"Current session status is '{session.status}'.",
+        )
+
+    # Remove image file from storage
+    if asset.image_uri:
+        try:
+            storage = get_storage_driver()
+            storage.delete(asset.image_uri)
+        except Exception:
+            pass
+
+    # Remove audio file from storage if present
+    if asset.audio_uri:
+        try:
+            storage = get_storage_driver()
+            storage.delete(asset.audio_uri)
+        except Exception:
+            pass
+
+    # Cascade-delete: valuations are handled by the ORM relationship
+    # (cascade="all, delete-orphan"), but we explicitly delete the asset
+    # to trigger the cascade.
+    db.delete(asset)
+    db.commit()
+
+    return JSONResponse(
+        content={
+            "status": "success",
+            "message": "Asset and associated files deleted",
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
 # T31 — Government ID Scan Upload API
 # ---------------------------------------------------------------------------
 

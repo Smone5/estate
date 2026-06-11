@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T39** — Admin Setup & Session Creation API (next)
+**T40** — Asset Deletion API (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -34,7 +34,8 @@
 | T31 | Government ID Scan Upload API | [x] |
 
 [DONE] T31 — Government ID Scan Upload API — 2026-06-11T01:52
-[NEXT] T39 — Admin Setup & Session Creation API — first-boot admin, BIP39 mnemonic, session creation
+[DONE] T39 — Admin Setup & Session Creation API with BIP39 recovery key — 2026-06-11T07:57
+[NEXT] T40 — Asset Deletion API — cascade-delete asset, valuations, image file; session-status gate
 
 ## Blockers
 None.
