@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useMediationStore } from '../store/useMediationStore';
 import DashboardGuard from '../components/DashboardGuard';
 import ForceAllocationConsole from '../components/ForceAllocationConsole';
+import AdminHelpPortal from '../components/AdminHelpPortal';
 
 export default function AdminDashboard() {
   const store = useMediationStore();
@@ -16,6 +17,7 @@ export default function AdminDashboard() {
   const [loggingIn, setLoggingIn] = useState(false);
   const [sessions, setSessions] = useState([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
+  const [isHelpOpen, setIsHelpOpen] = useState(false);
 
   // Load sessions if authenticated as admin
   useEffect(() => {
@@ -153,12 +155,20 @@ export default function AdminDashboard() {
                 </p>
               )}
             </div>
-            <button
-              className="btn btn-secondary btn-sm"
-              onClick={() => store.setSession({ isAuthenticated: false, userRole: null })}
-            >
-              Log Out
-            </button>
+            <div style={{ display: 'flex', gap: 'var(--space-sm)' }}>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => setIsHelpOpen(true)}
+              >
+                Quick-Start & FAQ Guide
+              </button>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => store.setSession({ isAuthenticated: false, userRole: null })}
+              >
+                Log Out
+              </button>
+            </div>
           </div>
 
           {loadingSessions ? (
@@ -178,6 +188,11 @@ export default function AdminDashboard() {
           )}
         </div>
       </div>
+      <AdminHelpPortal
+        isOpen={isHelpOpen}
+        onClose={() => setIsHelpOpen(false)}
+        sessionId={sessionId}
+      />
     </DashboardGuard>
   );
 }
