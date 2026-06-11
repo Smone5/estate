@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T43** — Custom FAQ CRUD API (next)
+**T64** — Asset Pre-Allocation API (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -38,7 +38,8 @@
 [DONE] T40 — Asset Deletion API with file cleanup and session-status gate — 2026-06-11T08:00
 [DONE] T41 — Admin Audio Story Upload & Delete API — 2026-06-11T08:02
 [DONE] T42 — Support Request & Help CRUD API with WebSocket alerts — 2026-06-11T08:06
-[NEXT] T43 — Custom FAQ CRUD API — Admin CRUD + GET Heir read, WebSocket mutations
+[DONE] T43 — Custom FAQ CRUD API with WebSocket mutation broadcasts — 2026-06-11T08:08
+[NEXT] T64 — Asset Pre-Allocation API — pre-allocate asset, delete orphaned valuations, session-status gate
 
 ## Blockers
 None.

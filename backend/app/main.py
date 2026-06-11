@@ -1566,6 +1566,72 @@ async def delete_asset_audio(
 
 
 # ---------------------------------------------------------------------------
+# T64 — Schema
+# ---------------------------------------------------------------------------
+
+
+class AssetPreAllocateRequest(BaseModel):
+    allocated_to_id: str
+
+
+# ---------------------------------------------------------------------------
+# T64 — Asset Pre-Allocation API
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/assets/{asset_id}/pre-allocate")
+@limiter.limit("30/minute")
+async def pre_allocate_asset(
+    request: Request,
+    asset_id: str,
+    body: AssetPreAllocateRequest,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Pre-allocate a staged/live asset to an Heir during setup.
+
+    Per Backend Spec §9.2 (POST /api/assets/{asset_id}/pre-allocate):
+    Updates the asset row: sets allocated_to_id and transitions status
+    to 'PRE_ALLOCATED'. Deletes all existing valuation rows for this
+    asset to prevent orphaned valuations from polluting the solver matrix.
+    Returns 400 if session is ACTIVE, LOCKED, or FINALIZED.
+    """
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    session = (
+        db.query(SessionModel).filter(SessionModel.id == asset.session_id).first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status in ("ACTIVE", "LOCKED", "FINALIZED"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Assets can only be pre-allocated during the SETUP phase. "
+            f"Current session status is '{session.status}'.",
+        )
+
+    # Delete all existing valuation rows for this asset
+    db.query(Valuation).filter(Valuation.asset_id == asset_id).delete()
+
+    # Update asset
+    asset.allocated_to_id = body.allocated_to_id
+    asset.status = "PRE_ALLOCATED"
+    db.commit()
+
+    return JSONResponse(
+        content={
+            "status": "success",
+            "asset_id": str(asset.id),
+            "allocated_to_id": str(asset.allocated_to_id),
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
 # T43 — Custom FAQ CRUD API
 # ---------------------------------------------------------------------------
 
