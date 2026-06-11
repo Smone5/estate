@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T07a** — LangGraph State Schema, Nodes & Prompt Templates (next)
+**T73** — Rate Limiting Middleware (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -18,6 +18,8 @@
 | T21a | Kokoro ONNX Model Download | [x] |
 | T21 | Kokoro-82M TTS & soundfile WAV Encoder | [x] |
 | T50 | LLM Provider Abstraction Layer & Ollama Health-Check | [x] |
+| T07a | LangGraph State Schema, Nodes & Prompt Templates | [x] |
+| T08 | LangGraph PostgresSaver Integration | [x] |
 
 ## Blockers
 None.

@@ -33,15 +33,15 @@ Build the dual-brain LangGraph state machine, Ollama system integrations, Micros
 
 ## Phase Checklist & Tasks
 
-### [ ] Task T05: Microsoft Presidio PII Scrubbing
+### [x] Task T05: Microsoft Presidio PII Scrubbing
 * **Objective**: Initialize Presidio engines, add all six entity recognizers, and implement node scrubbing.
 * **Verification**: Verify that sentences with names, emails, IPs, or location addresses are correctly scrubbed into generic brackets.
 
-### [ ] Task T06a: Ollama Model Downloads (Network-Bound)
+### [x] Task T06a: Ollama Model Downloads (Network-Bound)
 * **Objective**: Pull Ollama model weights from the registry: `qwen2.5:8b-instruct` (~4.7GB), `qwen2.5:14b-instruct` (~8.2GB), `llava:7b` (~3.9GB), and `nomic-embed-text` (~274MB). Estimated wall time: 30 min–4 hours depending on bandwidth. Run this **first** in Phase 2 so it can execute while T05 and T50 are being developed.
 * **Verification**: Run `ollama list` and assert all four models are present.
 
-### [ ] Task T06b: Ollama Configuration & Integration
+### [x] Task T06b: Ollama Configuration & Integration
 * **Objective**: Configure backend `.env` variables pointing to Ollama endpoint, test model reachability via the Ollama Python client, and verify basic inference responses from each model.
 * **Verification**: Send a test prompt to each model and confirm a valid text response is returned within expected timeouts. Depends on T06a.
 
@@ -49,7 +49,7 @@ Build the dual-brain LangGraph state machine, Ollama system integrations, Micros
 * **Objective**: Download the Kokoro-82M ONNX model binary (~2.5GB) and `voices.json` from the Hugging Face repository. Configure Docker volume mount to `/app/models/`. **Note: Depend on T06a to force sequential execution and avoid Pi 5 link saturation.**
 * **Verification**: Verify that model files exist in the mounted models directory. Depends on T06a.
 
-### [ ] Task T21: Kokoro-82M TTS & soundfile WAV Encoder
+### [x] Task T21: Kokoro-82M TTS & soundfile WAV Encoder
 * **Objective**: Configure the ONNX CPU thread-limited speech runner, soundfile base64 WAV encoder, and configure system-level `libsndfile` dependencies in the backend. Add startup validation guard that verifies model files exist and are readable at boot; if missing, emit critical WARNING log and gracefully degrade (WebSocket audio chunks omitted, text-only chat proceeds). **No database dependency.**
 * **Verification**: Verify that calling the helper returns base64-encoded WAV files. Verify that booting with missing model files logs a critical warning and the system starts in text-only degraded mode. Depends on T21a.
 
@@ -61,7 +61,7 @@ Build the dual-brain LangGraph state machine, Ollama system integrations, Micros
 * **Objective**: Implement FastAPI rate limiting middleware (using slowapi or similar) and configure Nginx `limit_req` zones to protect all public endpoints against abuse. Required by T72 (unauthenticated restore gate) in Phase 7 and Backend Spec §12.1.
 * **Verification**: Send rapid requests to a public endpoint and verify that rate limit headers are returned and excess requests receive 429 Too Many Requests responses.
 
-### [ ] Task T07a: LangGraph State Schema, Nodes & Prompt Templates
+### [x] Task T07a: LangGraph State Schema, Nodes & Prompt Templates
 * **Objective**: Define the `MediationState` TypedDict and implement all node classes: smart intent router, Fast System 1 conversational node (with 4-sentence constraint enforced by post-generation truncation/validation), Slow System 2 critique node, RETRIEVE_RAG node, SLOW_REFLECT node, VALIDATE node, COMMIT node, and HITL_GUARD node. Compile the graph with retry policies (3 attempts, backoff). **Each node must emit structured logs at entry and exit following Backend Spec §14.2 format: `[THREAD {thread_id}] [NODE {node_name}] - {Action details}`. Implement PII Leakage Guard per Spec §14.5: only `scrubbed_text` length (never raw text) may be written to log streams. This task is model-agnostic — prompt templates and state schema are defined in the specs and do not depend on which model size is selected by T63. NOTE: Does NOT depend on T63 or T62.** Depends on T03, T04, T05, T06b, and T50.
 * **Verification**: Feed mock chat messages and assert the graph transitions correctly to mediator or critique nodes. Assert that LangGraph node execution traces are successfully emitted and visible in the Langfuse dashboard. Verify that the 4-sentence constraint is enforced by a post-generation validation check (not just a prompt instruction).
 
@@ -69,7 +69,7 @@ Build the dual-brain LangGraph state machine, Ollama system integrations, Micros
 * **Objective**: Apply model-specific tunables (token limits, concurrency ceilings, timeout thresholds) based on T63 profiling results. Inject the validated model profile into LangGraph node configuration. **Depends on T07a and T63.**
 * **Verification**: Run the graph with the T63-validated model profile and verify that all nodes respect configured token limits and timeout thresholds. Verify that concurrent heir sessions operate within the memory envelope.
 
-### [ ] Task T08: LangGraph PostgresSaver Integration
+### [x] Task T08: LangGraph PostgresSaver Integration
 * **Objective**: Configure `PostgresSaver` in `graph.py` to persist active thread states (thread ID: `session_id:heir_id`) in PostgreSQL tables. **Must include a negative test case asserting that SqliteSaver is NOT used — verify that container restarts preserve thread state, per LangGraph Spec §7.3.**
 * **Verification**: Verify that executing graph runs writes checkpoints to PostgreSQL. Verify that after a simulated container restart, thread state is recovered from PostgresSaver without data loss.
 
