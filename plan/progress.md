@@ -88,7 +88,8 @@ Phase 6: Audio Speech & Real-Time Communications (next)
 [DONE] T25 — Client Audio Playback Queue — useAudioPlayback hook, sequential playlist, base64 Blob decoder, Blob URL revocation, SB 942 synthetic label, null-audio guard, 141 frontend tests pass — 2026-06-11T12:05
 [DONE] T45 — Admin Voice Recorder Widget — MediaRecorder record/stop/playback/redo, pulsing timer 2:00 max, HTTPS guard, POST /api/assets/{asset_id}/audio upload on save, Sage-Green aesthetics, 141 frontend tests pass — 2026-06-11T12:06
 [DONE] T72 — Unauthenticated System Restore Gate — JWT cookie auth on initialized restore, fresh-system bypass preserved, 480 tests pass — 2026-06-11T12:12
-[NEXT] T61 — Nginx & Production Build Setup
+[DONE] T61 — Nginx & Production Build Setup — npm run build verified, dist/ populated, nginx static serve configured — 2026-06-11T12:13
+[NEXT] T74 — Cloudflare Tunnel & Public Exposure Setup
 
 ## Blockers
 None.

@@ -68,6 +68,18 @@ services:
     depends_on:
       - app
 
+# T74: Cloudflare Tunnel for secure public exposure (outbound-only, no open ports)
+  # To activate: create a tunnel in Cloudflare Zero Trust dashboard (~5 min)
+  #   https://one.dash.cloudflare.com → Networks → Tunnels → Create Tunnel
+  # Copy the tunnel token and set CLOUDFLARE_TUNNEL_TOKEN in .env
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: always
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    network_mode: "host"
+    profiles:
+      - tunnel
+
 volumes:
   pgdata:
   uploads_data:
