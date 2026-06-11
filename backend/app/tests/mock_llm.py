@@ -111,8 +111,35 @@ class MockLLMProvider:
     ) -> BaseModel:
         self._call_log.append({"method": "generate_structured", "model": model_key})
         import json
-        if "ROUTER" in system_prompt.upper() or "routing" in system_prompt.lower():
+
+        # Detect router calls: the prompt always contains "routing" / "ROUTER"
+        is_router = (
+            "ROUTER" in system_prompt.upper()
+            or "routing" in system_prompt.lower()
+            or "ROUTER" in user_input.upper()
+            or "routing" in user_input.lower()
+        )
+
+        if is_router:
+            # Extract the actual user text from the formatted prompt to avoid
+            # matching keywords inside the prompt template itself
+            actual_text = user_input
+            if "User Input:" in user_input:
+                segment = user_input.split("User Input:")[-1]
+                if "\nClass:" in segment:
+                    segment = segment.split("\nClass:")[0]
+                elif "Class:" in segment:
+                    segment = segment.split("Class:")[0]
+                actual_text = segment.strip()
+
+            lower = actual_text.lower()
+            if "submit" in lower or "allocation" in lower:
+                return response_model(**{"intent": ROUTER_VALUATION})
+            elif "admin" in lower or "override" in lower:
+                return response_model(**{"intent": ROUTER_OVERRIDE})
             return response_model(**{"intent": ROUTER_CHAT})
+
+        # Critique node calls
         if self._scenario == "critique_fail":
             return response_model(**{"violation": True, "reason": "Mock violation"})
         return response_model(**{"violation": False, "reason": ""})
