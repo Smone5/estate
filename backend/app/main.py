@@ -29,7 +29,7 @@ from .auth import (
     get_current_user,
     get_current_admin,
 )
-from .models import User, Session as SessionModel, Asset, Valuation, AuditLog, SupportRequest, CustomFAQ
+from .models import User, Session as SessionModel, Asset, Valuation, AuditLog, SupportRequest, CustomFAQ, ChatMessage
 from .websocket_manager import manager
 from .services.storage import get_storage_driver, preprocess_image
 from .services.llm_provider import get_provider, reset_provider
@@ -2703,6 +2703,181 @@ async def upload_id_scan(
         content={
             "status": "success",
             "message": "ID document uploaded and encrypted successfully",
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# T55 — FastAPI Heir GDPR Erasure Router
+# ---------------------------------------------------------------------------
+
+
+@app.delete("/api/heirs/me")
+@limiter.limit("10/minute")
+async def gdpr_erase_heir(
+    request: Request,
+    response: Response,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    GDPR Right to Erasure — Soft Anonymization for the calling Heir.
+
+    Per Backend Spec §9.5 (DELETE /api/heirs/me):
+    1. Overwrites PII fields (name → "Anonymized", contact → NULL).
+    2. Deletes encrypted ID scan file from storage if present.
+    3. Clears invite tokens.
+    4. Permanently deletes all private chat transcripts for this Heir.
+    5. Permanently deletes all LangGraph checkpointer records for this Heir's thread.
+    6. Submission Status Separation:
+       - Unsubmitted (is_submitted=False): status→ABSTAINED, cascade-delete valuations.
+       - Submitted (is_submitted=True): retains status/points/public memories,
+         overwrites private reasoning text with NULL.
+    7. Anonymizes historical audit_logs state_snapshot for this Heir.
+    """
+    if current_user.get("role") != "HEIR":
+        raise HTTPException(status_code=403, detail="Heir access required")
+
+    heir_id = current_user.get("user_id")
+    heir = (
+        db.query(User)
+        .filter(User.id == heir_id, User.role == "HEIR")
+        .with_for_update()
+        .first()
+    )
+    if not heir:
+        raise HTTPException(status_code=401, detail="Heir not found")
+
+    session = (
+        db.query(SessionModel)
+        .filter(SessionModel.id == heir.session_id)
+        .first()
+    )
+    if session and session.status in ("LOCKED", "FINALIZED"):
+        raise HTTPException(
+            status_code=400,
+            detail="Account erasure is not permitted after session is locked or finalized.",
+        )
+
+    session_id = str(heir.session_id) if heir.session_id else ""
+    heir_id_str = str(heir.id)
+    is_submitted = heir.is_submitted
+
+    # Collect original PII values for audit log sanitization
+    pii_values = [
+        heir.legal_first_name,
+        heir.legal_middle_name,
+        heir.legal_last_name,
+        heir.email,
+        heir.phone,
+        heir.physical_address,
+        heir.username,
+    ]
+    pii_values = [v for v in pii_values if v]
+
+    # 1. Overwrite PII fields
+    heir.username = f"Anonymized Beneficiary {heir_id_str[-12:]}"
+    heir.legal_first_name = "Anonymized"
+    heir.legal_middle_name = None
+    heir.legal_last_name = f"Beneficiary {heir_id_str[-12:]}"
+    heir.relationship_to_decedent = None
+    heir.date_of_birth = None
+    heir.email = None
+    heir.phone = None
+    heir.physical_address = None
+    heir.pw_hash = None
+
+    # 2. Delete encrypted ID scan file from storage if present
+    if heir.id_scan_uri:
+        try:
+            storage = get_storage_driver()
+            storage.delete(heir.id_scan_uri)
+        except Exception:
+            logger.warning(
+                "Failed to delete ID scan file %s for heir %s",
+                heir.id_scan_uri,
+                heir_id,
+            )
+    heir.id_scan_uri = None
+
+    # 3. Clear invite tokens
+    heir.invite_token = None
+    heir.invite_token_expires_at = None
+    heir.invite_token_used = False
+
+    # 4. Permanently delete all private chat transcripts
+    db.query(ChatMessage).filter(ChatMessage.heir_id == heir_id).delete()
+
+    # 5. Permanently delete LangGraph checkpointer records
+    thread_id = f"{session_id}:{heir_id_str}"
+    try:
+        from .database import engine
+        from sqlalchemy import text as sa_text
+        with engine.begin() as conn:
+            for table in ("checkpoints", "checkpoint_writes", "checkpoint_blobs"):
+                conn.execute(
+                    sa_text(f"DELETE FROM {table} WHERE thread_id = :tid"),
+                    {"tid": thread_id},
+                )
+    except Exception:
+        logger.warning(
+            "Failed to clean checkpointer state for thread %s — continuing",
+            thread_id,
+        )
+
+    # 6. Submission Status Separation
+    if not is_submitted:
+        # Unsubmitted: status→ABSTAINED, cascade-delete valuations
+        heir.status = "ABSTAINED"
+        db.query(Valuation).filter(Valuation.heir_id == heir_id).delete()
+    else:
+        # Submitted: retain status/points/public memories, delete private reasoning
+        heir.status = "SUBMITTED"
+        # Overwrite private reasoning with NULL
+        valuations = (
+            db.query(Valuation)
+            .filter(
+                Valuation.heir_id == heir_id,
+                Valuation.is_reasoning_shared == False,
+                Valuation.reasoning.isnot(None),
+            )
+            .all()
+        )
+        for v in valuations:
+            v.reasoning = None
+
+    db.flush()
+
+    # 7. Anonymize historical audit_logs state_snapshot
+    audit_logs = (
+        db.query(AuditLog)
+        .filter(AuditLog.session_id == heir.session_id)
+        .all()
+    )
+    for log_entry in audit_logs:
+        try:
+            snapshot = log_entry.state_snapshot
+            if not isinstance(snapshot, (dict, list)):
+                continue
+            _redact_pii_in_place(snapshot, heir_id_str, pii_values)
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(log_entry, "state_snapshot")
+        except Exception:
+            logger.warning(
+                "Failed to anonymize audit log %d — continuing",
+                log_entry.id,
+            )
+
+    db.commit()
+
+    # Clear auth cookie
+    clear_auth_cookie(response)
+
+    return JSONResponse(
+        content={
+            "status": "success",
+            "message": "Personal identification purged; account records soft-anonymized "
+            "and checkpointer states cleared for probate record-keeping.",
         }
     )
 
