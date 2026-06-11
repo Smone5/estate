@@ -1,13 +1,17 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T02** — SQLAlchemy Models & Relations — [x] COMPLETE
+**T05** — Microsoft Presidio PII Scrubbing (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
 |---------|-------------|--------|
 | T01 | DB Docker Setup & Startup Retry Loop | [x] |
 | T02 | SQLAlchemy Models & Relations | [x] |
+| T03 | AES-Fernet Encryption Decorator | [x] |
+| T04 | Alembic Migrations & pgvector Indexing | [x] |
+| T38 | WebSocket Connection Manager | [x] |
+| T28a-1 | Backend Tests — Phase 1 Scope | [x] |
 
 ## Blockers
 None.
