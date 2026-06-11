@@ -26,7 +26,7 @@ from app.tests.mock_kokoro import MockKokoroTTS
 def test_validate_model_files_both_present(tmp_path):
     """validate_model_files returns True when both files exist."""
     model_file = tmp_path / "kokoro-v1.0.onnx"
-    voices_file = tmp_path / "voices-v1.0.bin"
+    voices_file = tmp_path / "voices.json"
     model_file.write_text("dummy")
     voices_file.write_text("dummy")
 
@@ -39,7 +39,7 @@ def test_validate_model_files_model_missing():
     """validate_model_files returns False when model file is absent."""
     tts = KokoroTTS(
         model_path="/nonexistent/kokoro-v1.0.onnx",
-        voices_path="/nonexistent/voices-v1.0.bin",
+        voices_path="/nonexistent/voices.json",
     )
     result = tts.validate_model_files()
     assert result is False
@@ -52,7 +52,7 @@ def test_validate_model_files_voices_missing(tmp_path):
 
     tts = KokoroTTS(
         model_path=str(model_file),
-        voices_path="/nonexistent/voices-v1.0.bin",
+        voices_path="/nonexistent/voices.json",
     )
     result = tts.validate_model_files()
     assert result is False
@@ -67,12 +67,38 @@ async def test_synthesize_returns_none_when_model_files_missing():
     """synthesize() returns None when model files are absent (degraded mode)."""
     tts = KokoroTTS(
         model_path="/nonexistent/kokoro-v1.0.onnx",
-        voices_path="/nonexistent/voices-v1.0.bin",
+        voices_path="/nonexistent/voices.json",
     )
     assert tts.available is False
 
     result = await tts.synthesize("Hello, I am listening.")
     assert result is None
+
+
+def test_startup_logs_warning_when_model_files_missing(caplog, monkeypatch):
+    """Startup with missing model files emits a WARNING-level log.
+
+    Uses monkeypatch to force _KOKORO_AVAILABLE = True so the code path
+    reaches the model file validation check on macOS (where kokoro-onnx
+    is not installable).
+    """
+    import logging
+    caplog.set_level(logging.WARNING)
+
+    monkeypatch.setattr("app.kokoro_tts._KOKORO_AVAILABLE", True)
+    monkeypatch.setattr("app.kokoro_tts._Kokoro", object)  # non-None sentinel
+    monkeypatch.setattr("app.kokoro_tts._ort", object)
+
+    KokoroTTS(
+        model_path="/nonexistent/kokoro-v1.0.onnx",
+        voices_path="/nonexistent/voices.json",
+    )
+
+    assert any(
+        "Model files missing or unreadable" in record.message
+        or "onnxruntime not available" in record.message
+        for record in caplog.records
+    ), f"Expected WARNING log about missing model files or unavailable runtime, got: {[r.message for r in caplog.records]}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
