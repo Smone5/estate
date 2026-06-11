@@ -43,7 +43,8 @@
 [DONE] T65 — Background Invite Expiration Scheduler — 2026-06-11T08:11
 [DONE] T34 — Executor ID Verification State Transition API — 2026-06-11T08:13
 [DONE] T60 — Admin Heir Deletion API — purge PII, delete scan, unlink pre-allocated assets — 2026-06-11T08:24
-[NEXT] T28a-3 — Backend Tests — Phase 3 Scope — pytest coverage for all Phase 3 APIs (Argon2 auth, image pipeline, onboarding, asset staging/OCR, session lifecycle, heir management, ID upload, support/help, FAQ, admin setup, asset deletion, audio upload, pre-allocation, invite scheduler, admin heir deletion, rate limiting)
+[DONE] T28a-3 — Backend Tests — Phase 3 Scope (426 tests pass, gates Phase 4) — 2026-06-11T08:27
+[NEXT] T12 — FastAPI Valuation Router — valuation draft saving, pessimistic locking, HITL_GUARD suspension
 
 ## Blockers
 None.
