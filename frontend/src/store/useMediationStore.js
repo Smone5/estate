@@ -27,6 +27,9 @@ export const useMediationStore = create((set, get) => ({
   transientMessageQueue: [],
   announcement: null,
   announcement_updated_at: null,
+  legal_first_name: null,
+  legal_middle_name: null,
+  legal_last_name: null,
 
   // ── Invite Actions ───────────────────────────────────────────────────────
   checkInviteStatus: async (token) => {
@@ -233,8 +236,11 @@ export const useMediationStore = create((set, get) => ({
     if (!res.ok) throw new Error(`Load profile failed: ${res.status}`);
     const data = await res.json();
     set({
-      heir_id: data.heir_id,
+      heir_id: data.heir_id || data.id,
       session_id: data.session_id,
+      legal_first_name: data.legal_first_name,
+      legal_middle_name: data.legal_middle_name,
+      legal_last_name: data.legal_last_name,
       userRole: 'HEIR',
       userStatus: data.user_status || data.status,
       isSubmitted: data.is_submitted || false,

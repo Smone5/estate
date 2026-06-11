@@ -7,6 +7,7 @@ import IDScanner from './components/IDScanner';
 import SemanticSearch from './components/SemanticSearch';
 import AdminDashboard from './routes/AdminDashboard';
 import FAQDrawer from './components/FAQDrawer';
+import HeirValuationPanel from './components/HeirValuationPanel';
 
 const PUBLIC_PATHS = ['/invite', '/opt-out'];
 
@@ -14,6 +15,7 @@ function DashboardPlaceholder() {
   return (
     <DashboardGuard variant="heir">
       <IDScanner />
+      <HeirValuationPanel />
       <SemanticSearch />
     </DashboardGuard>
   );

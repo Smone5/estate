@@ -2,6 +2,7 @@ import React, { useEffect } from 'react';
 import { useMediationStore } from '../store/useMediationStore';
 import AnnouncementAlertBanner from './AnnouncementAlertBanner';
 import AnnouncementLoginModal from './AnnouncementLoginModal';
+import AbstentionWaitScreen from './AbstentionWaitScreen';
 
 /**
  * Renders the appropriate status banner and optionally disables controls
@@ -36,21 +37,7 @@ export default function DashboardGuard({ variant = 'heir', children }) {
 
   // ── Abstention / Expiration Gate ──────────────────────────────────────
   if (userStatus === 'ABSTAINED' || userStatus === 'EXPIRED_NON_PARTICIPATING') {
-    return (
-      <div className="app-main flex items-center justify-center" style={{ flex: 1, padding: 'var(--space-lg)' }}>
-        <div className="archival-card text-center" style={{ maxWidth: 520, width: '100%' }}>
-          <h2 style={{ marginBottom: 'var(--space-md)' }}>Non-Participation Status</h2>
-          <p className="text-muted" style={{ marginBottom: 'var(--space-lg)' }}>
-            {userStatus === 'ABSTAINED'
-              ? 'You have formally abstained from the asset allocation process. Your participation in this mediation session is complete.'
-              : 'Your invitation has expired and you have been marked as non-participating in this mediation session.'}
-          </p>
-          <p className="text-sm text-muted">
-            The Executor has been notified. You may download your records from the Executor upon request.
-          </p>
-        </div>
-      </div>
-    );
+    return <AbstentionWaitScreen />;
   }
 
   // ── Finalized Keepsake Layout ─────────────────────────────────────────

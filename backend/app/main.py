@@ -1105,6 +1105,8 @@ def _heir_to_response(heir: User) -> dict:
     """Serialize a User (HEIR) to a dict matching HeirResponse schema."""
     return {
         "id": str(heir.id),
+        "heir_id": str(heir.id),
+        "session_id": str(heir.session_id) if heir.session_id else None,
         "username": heir.username,
         "legal_first_name": heir.legal_first_name,
         "legal_middle_name": heir.legal_middle_name,
