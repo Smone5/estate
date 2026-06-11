@@ -100,6 +100,52 @@ except ImportError:
     _LANGTRACE_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
+# Observability initialisation helpers
+# ---------------------------------------------------------------------------
+
+def create_langfuse_handler() -> Optional[Any]:
+    """Create a Langfuse CallbackHandler for LangGraph tracing.
+
+    Returns None if Langfuse is not installed or key env vars are missing.
+    The caller passes this handler into LangGraph's config.callbacks list.
+    """
+    if not _LANGFUSE_AVAILABLE:
+        return None
+    public_key = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
+    secret_key = os.environ.get("LANGFUSE_SECRET_KEY", "")
+    if not public_key or not secret_key:
+        logger.debug("Langfuse credentials not set — observer disabled")
+        return None
+    try:
+        from langfuse.callback import CallbackHandler
+        return CallbackHandler()
+    except Exception as exc:
+        logger.warning("Failed to create Langfuse handler: %s", exc)
+        return None
+
+
+def init_langtrace() -> None:
+    """Initialise the Langtrace OpenTelemetry SDK.
+
+    Reads LANGTRACE_API_KEY from the environment.  Must be called *before*
+    FastAPI app creation (or any LangGraph/Ollama instrumentation) to
+    correctly auto-instrument langgraph, ollama, and httpx.
+    """
+    api_key = os.environ.get("LANGTRACE_API_KEY", "").strip()
+    if not api_key:
+        return
+    if not _LANGTRACE_AVAILABLE:
+        logger.warning("langtrace-python-sdk not installed — cannot initialise")
+        return
+    try:
+        from langtrace_python_sdk import langtrace
+        langtrace.init(api_key=api_key)
+        logger.info("Langtrace OpenTelemetry initialised")
+    except Exception as exc:
+        logger.warning("Langtrace init failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # Health-check constants
 # ---------------------------------------------------------------------------
 _OLLAMA_HEALTH_TIMEOUT = 5  # seconds per probe attempt

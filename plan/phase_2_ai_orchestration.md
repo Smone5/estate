@@ -45,7 +45,7 @@ Build the dual-brain LangGraph state machine, Ollama system integrations, Micros
 * **Objective**: Configure backend `.env` variables pointing to Ollama endpoint, test model reachability via the Ollama Python client, and verify basic inference responses from each model.
 * **Verification**: Send a test prompt to each model and confirm a valid text response is returned within expected timeouts. Depends on T06a.
 
-### [ ] Task T21a: Kokoro ONNX Model Download
+### [x] Task T21a: Kokoro ONNX Model Download
 * **Objective**: Download the Kokoro-82M ONNX model binary (~2.5GB) and `voices.json` from the Hugging Face repository. Configure Docker volume mount to `/app/models/`. **Note: Depend on T06a to force sequential execution and avoid Pi 5 link saturation.**
 * **Verification**: Verify that model files exist in the mounted models directory. Depends on T06a.
 
@@ -53,7 +53,7 @@ Build the dual-brain LangGraph state machine, Ollama system integrations, Micros
 * **Objective**: Configure the ONNX CPU thread-limited speech runner, soundfile base64 WAV encoder, and configure system-level `libsndfile` dependencies in the backend. Add startup validation guard that verifies model files exist and are readable at boot; if missing, emit critical WARNING log and gracefully degrade (WebSocket audio chunks omitted, text-only chat proceeds). **No database dependency.**
 * **Verification**: Verify that calling the helper returns base64-encoded WAV files. Verify that booting with missing model files logs a critical warning and the system starts in text-only degraded mode. Depends on T21a.
 
-### [ ] Task T50: LLM Provider Abstraction Layer & Ollama Health-Check
+### [x] Task T50: LLM Provider Abstraction Layer & Ollama Health-Check
 * **Objective**: Implement unified LLM factory (`app/services/llm_provider.py`) abstracting LLM calls to support Ollama, OpenAI, Anthropic, and Google Gemini. Includes Ollama health-check polling with automatic connection retry/probe logic to prevent transient Ollama restarts from crashing the LangGraph workflow. Configure Langfuse/Langtrace self-hosted tracing observability. **NOTE: The former T62 (Ollama Health-Startup Probe) has been consolidated into T50 — the health-check is a sub-feature of the provider factory, not a separate sequential task.**
 * **Verification**: Instantiate the service and mock API calls to each provider, verifying text, vision, structured JSON, and embedding outputs under the provider factory. Simulate an Ollama outage and verify that retry logs fire without crashing the provider.
 

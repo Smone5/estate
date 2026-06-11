@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T50** — LLM Provider Abstraction Layer & Ollama Health-Check (next)
+**T07a** — LangGraph State Schema, Nodes & Prompt Templates (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -17,6 +17,7 @@
 | T06b | Ollama Configuration & Integration | [x] |
 | T21a | Kokoro ONNX Model Download | [x] |
 | T21 | Kokoro-82M TTS & soundfile WAV Encoder | [x] |
+| T50 | LLM Provider Abstraction Layer & Ollama Health-Check | [x] |
 
 ## Blockers
 None.
