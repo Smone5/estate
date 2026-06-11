@@ -5,6 +5,7 @@ import ForceAllocationConsole from '../components/ForceAllocationConsole';
 import AdminInventoryDashboard from '../components/AdminInventoryDashboard';
 import AdminSessionControl from '../components/AdminSessionControl';
 import AdminSetupWizard from '../components/AdminSetupWizard';
+import BIP39RestorePanel from '../components/BIP39RestorePanel';
 import AdminHelpPortal from '../components/AdminHelpPortal';
 import AdminAnnouncementConsole from '../components/AdminAnnouncementConsole';
 
@@ -206,6 +207,8 @@ export default function AdminDashboard() {
               <AdminSessionControl sessionId={sessionId} />
 
               {sessionId && <AdminAnnouncementConsole sessionId={sessionId} />}
+
+              <BIP39RestorePanel />
             </>
           )}
         </div>
