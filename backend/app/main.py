@@ -1620,6 +1620,112 @@ async def delete_asset_audio(
 
 
 # ---------------------------------------------------------------------------
+# T34 — Schema
+# ---------------------------------------------------------------------------
+
+
+class VerifyIdentityRequest(BaseModel):
+    action: str = Field(..., pattern=r"^(approve|reject)$")
+    rejection_reason: str | None = Field(None, min_length=3, max_length=250)
+
+
+# ---------------------------------------------------------------------------
+# T34 — Executor ID Verification API
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/heirs/{heir_id}/verify-identity")
+@limiter.limit("10/minute")
+async def verify_heir_identity(
+    request: Request,
+    heir_id: str,
+    body: VerifyIdentityRequest,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Executor visually inspects ID scan and approves or rejects the Heir.
+
+    Per Backend Spec §9.5 (POST /api/heirs/{heir_id}/verify-identity):
+    - Approve: sets identity_verified=True, status→ACTIVE, seeds 0-pt
+      valuations for all LIVE assets, deletes the ID scan file, sets
+      id_scan_uri=NULL.
+    - Reject: deletes the ID scan file, sets id_scan_uri=NULL.
+    """
+    heir = db.query(User).filter(
+        User.id == heir_id,
+        User.role == "HEIR",
+    ).first()
+    if not heir:
+        raise HTTPException(status_code=404, detail="Heir not found")
+
+    if body.action == "approve":
+        heir.identity_verified = True
+        heir.status = "ACTIVE"
+
+        # Seed default 0-point valuations for all LIVE assets in this session
+        live_assets = (
+            db.query(Asset)
+            .filter(
+                Asset.session_id == heir.session_id,
+                Asset.status == "LIVE",
+            )
+            .all()
+        )
+        for asset in live_assets:
+            existing = (
+                db.query(Valuation)
+                .filter(
+                    Valuation.asset_id == asset.id,
+                    Valuation.heir_id == heir_id,
+                )
+                .first()
+            )
+            if not existing:
+                db.add(Valuation(
+                    asset_id=asset.id,
+                    heir_id=heir_id,
+                    points=0,
+                ))
+
+        # Delete ID scan file from storage
+        if heir.id_scan_uri:
+            try:
+                storage = get_storage_driver()
+                storage.delete(heir.id_scan_uri)
+            except Exception:
+                pass
+        heir.id_scan_uri = None
+
+        db.commit()
+
+        return JSONResponse(
+            content={
+                "status": "success",
+                "message": "Verification action processed successfully.",
+            }
+        )
+
+    elif body.action == "reject":
+        # Delete ID scan file, reset id_scan_uri
+        if heir.id_scan_uri:
+            try:
+                storage = get_storage_driver()
+                storage.delete(heir.id_scan_uri)
+            except Exception:
+                pass
+        heir.id_scan_uri = None
+        db.commit()
+
+        return JSONResponse(
+            content={
+                "status": "success",
+                "message": "Verification action processed successfully.",
+            }
+        )
+
+
+# ---------------------------------------------------------------------------
 # T64 — Schema
 # ---------------------------------------------------------------------------
 

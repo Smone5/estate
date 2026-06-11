@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T65** — Background Invite Expiration Scheduler (next)
+**T34** — Executor ID Verification State Transition API (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -40,7 +40,8 @@
 [DONE] T42 — Support Request & Help CRUD API with WebSocket alerts — 2026-06-11T08:06
 [DONE] T43 — Custom FAQ CRUD API with WebSocket mutation broadcasts — 2026-06-11T08:08
 [DONE] T64 — Asset Pre-Allocation API with orphaned valuation cleanup — 2026-06-11T08:10
-[NEXT] T65 — Background Invite Expiration Scheduler — periodic task for expired token transitions
+[DONE] T65 — Background Invite Expiration Scheduler — 2026-06-11T08:11
+[NEXT] T34 — Executor ID Verification State Transition API — approve/reject, matrix seeding, scan purge
 
 ## Blockers
 None.
