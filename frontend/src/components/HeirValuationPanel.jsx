@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useMediationStore } from '../store/useMediationStore';
 import AbstentionWaiverModal from './AbstentionWaiverModal';
+import GDPRDataExportButton from './GDPRDataExportButton';
 
 export default function HeirValuationPanel() {
   const unallocatedPoints = useMediationStore((s) => s.unallocatedPoints);
@@ -25,10 +26,24 @@ export default function HeirValuationPanel() {
     }
   };
 
+  const userRole = useMediationStore((s) => s.userRole);
+  const isHeir = userRole === 'HEIR';
+
   // Only show valuations control panel if session is not finalized/setup
   const showPanel = sessionStatus === 'ACTIVE' || sessionStatus === 'LOCKED';
 
-  if (!showPanel) return null;
+  // Always render the export button for authenticated heirs
+  if (!showPanel) {
+    if (!isHeir) return null;
+    return (
+      <div className="archival-card" style={{ marginBottom: 'var(--space-md)', padding: 'var(--space-md)' }}>
+        <h3 style={{ fontFamily: 'var(--font-serif)', fontSize: '1.25rem', marginBottom: 'var(--space-sm)' }}>
+          Data & Settings
+        </h3>
+        <GDPRDataExportButton />
+      </div>
+    );
+  }
 
   const canSubmit = unallocatedPoints === 0 && !isSubmitted && sessionStatus === 'ACTIVE';
   const canAbstain = sessionStatus === 'ACTIVE'; // active, even if submitted
@@ -93,6 +108,10 @@ export default function HeirValuationPanel() {
       {isWaiverOpen && (
         <AbstentionWaiverModal onClose={() => setIsWaiverOpen(false)} />
       )}
+
+      <div style={{ marginTop: 'var(--space-lg)', paddingTop: 'var(--space-md)', borderTop: '1px solid var(--color-border)' }}>
+        <GDPRDataExportButton />
+      </div>
     </div>
   );
 }
