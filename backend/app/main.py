@@ -29,7 +29,7 @@ from .auth import (
     get_current_user,
     get_current_admin,
 )
-from .models import User, Session as SessionModel, Asset, Valuation, SupportRequest
+from .models import User, Session as SessionModel, Asset, Valuation, SupportRequest, CustomFAQ
 from .websocket_manager import manager
 from .services.storage import get_storage_driver, preprocess_image
 from .services.llm_provider import get_provider, reset_provider
@@ -930,6 +930,16 @@ class SupportRequestCreate(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# T43 — Schema
+# ---------------------------------------------------------------------------
+
+
+class FAQCreate(BaseModel):
+    question: str = Field(..., min_length=5)
+    answer: str = Field(..., min_length=5)
+
+
+# ---------------------------------------------------------------------------
 # T13 — Schema
 # ---------------------------------------------------------------------------
 
@@ -1552,6 +1562,172 @@ async def delete_asset_audio(
             "status": "success",
             "message": "Asset voice recording deleted",
         }
+    )
+
+
+# ---------------------------------------------------------------------------
+# T43 — Custom FAQ CRUD API
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/sessions/{session_id}/faqs")
+@limiter.limit("30/minute")
+async def create_faq(
+    request: Request,
+    session_id: str,
+    body: FAQCreate,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Create a custom FAQ for a session.
+
+    Per Backend Spec §9.4 (POST /api/sessions/{session_id}/faqs):
+    Admin creates a custom FAQ entry (question + answer).
+    Broadcasts a WebSocket event to refresh Heir dashboards.
+    """
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    faq = CustomFAQ(
+        session_id=session_id,
+        question=body.question,
+        answer=body.answer,
+    )
+    db.add(faq)
+    db.commit()
+
+    # Broadcast FAQ mutation event
+    await manager.broadcast_session_status(
+        session_id,
+        {"type": "faq_updated", "action": "created", "faq_id": str(faq.id)},
+    )
+
+    return JSONResponse(
+        content={
+            "id": str(faq.id),
+            "question": faq.question,
+            "answer": faq.answer,
+        },
+        status_code=201,
+    )
+
+
+@app.put("/api/sessions/{session_id}/faqs/{faq_id}")
+@limiter.limit("30/minute")
+async def update_faq(
+    request: Request,
+    session_id: str,
+    faq_id: str,
+    body: FAQCreate,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Update an existing custom FAQ.
+
+    Per Backend Spec §9.4 (PUT /api/sessions/{session_id}/faqs/{faq_id}):
+    Admin edits an existing FAQ. Broadcasts WebSocket event.
+    """
+    faq = db.query(CustomFAQ).filter(
+        CustomFAQ.id == faq_id,
+        CustomFAQ.session_id == session_id,
+    ).first()
+    if not faq:
+        raise HTTPException(status_code=404, detail="FAQ not found")
+
+    faq.question = body.question
+    faq.answer = body.answer
+    db.commit()
+
+    await manager.broadcast_session_status(
+        session_id,
+        {"type": "faq_updated", "action": "updated", "faq_id": faq_id},
+    )
+
+    return JSONResponse(
+        content={
+            "id": faq_id,
+            "question": faq.question,
+            "answer": faq.answer,
+        }
+    )
+
+
+@app.delete("/api/sessions/{session_id}/faqs/{faq_id}")
+@limiter.limit("30/minute")
+async def delete_faq(
+    request: Request,
+    session_id: str,
+    faq_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Delete a custom FAQ.
+
+    Per Backend Spec §9.4 (DELETE /api/sessions/{session_id}/faqs/{faq_id}):
+    Admin permanently deletes a custom FAQ. Broadcasts WebSocket event.
+    """
+    faq = db.query(CustomFAQ).filter(
+        CustomFAQ.id == faq_id,
+        CustomFAQ.session_id == session_id,
+    ).first()
+    if not faq:
+        raise HTTPException(status_code=404, detail="FAQ not found")
+
+    db.delete(faq)
+    db.commit()
+
+    await manager.broadcast_session_status(
+        session_id,
+        {"type": "faq_updated", "action": "deleted", "faq_id": faq_id},
+    )
+
+    return JSONResponse(
+        content={
+            "status": "success",
+            "message": "Custom FAQ deleted",
+        }
+    )
+
+
+@app.get("/api/sessions/{session_id}/faqs")
+@limiter.limit("60/minute")
+async def list_faqs(
+    request: Request,
+    session_id: str,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Retrieve all FAQs for a session.
+
+    Per Backend Spec §9.4 (GET /api/sessions/{session_id}/faqs):
+    Returns all custom FAQs for the session. Accessible to Heirs and Admin.
+    """
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    faqs = (
+        db.query(CustomFAQ)
+        .filter(CustomFAQ.session_id == session_id)
+        .order_by(CustomFAQ.created_at.desc())
+        .all()
+    )
+
+    return JSONResponse(
+        content=[
+            {
+                "id": str(f.id),
+                "question": f.question,
+                "answer": f.answer,
+                "created_at": f.created_at.isoformat() if f.created_at else None,
+            }
+            for f in faqs
+        ]
     )
 
 

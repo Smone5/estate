@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T42** — Support Request & Help CRUD API (next)
+**T43** — Custom FAQ CRUD API (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -37,7 +37,8 @@
 [DONE] T39 — Admin Setup & Session Creation API with BIP39 recovery key — 2026-06-11T07:57
 [DONE] T40 — Asset Deletion API with file cleanup and session-status gate — 2026-06-11T08:00
 [DONE] T41 — Admin Audio Story Upload & Delete API — 2026-06-11T08:02
-[NEXT] T42 — Support Request & Help CRUD API — Heir submit, Admin list/resolve, WebSocket alerts
+[DONE] T42 — Support Request & Help CRUD API with WebSocket alerts — 2026-06-11T08:06
+[NEXT] T43 — Custom FAQ CRUD API — Admin CRUD + GET Heir read, WebSocket mutations
 
 ## Blockers
 None.
