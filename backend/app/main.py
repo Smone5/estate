@@ -1298,6 +1298,140 @@ async def delete_asset(
 
 
 # ---------------------------------------------------------------------------
+# T41 — Admin Audio Story Upload & Delete API
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/assets/{asset_id}/audio")
+@limiter.limit("30/minute")
+async def upload_asset_audio(
+    request: Request,
+    asset_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Upload an audio story for a specific asset.
+
+    Per Backend Spec §9.2 (POST /api/assets/{asset_id}/audio):
+    Accepts multipart/form-data with 'file' key (WebM/MP3/WAV up to 10MB).
+    Saves the audio file to the configured storage driver and updates
+    assets.audio_uri. Returns 400 if session is not in SETUP status.
+    """
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    session = (
+        db.query(SessionModel).filter(SessionModel.id == asset.session_id).first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status != "SETUP":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Audio stories can only be uploaded during the SETUP phase. "
+            f"Current session status is '{session.status}'.",
+        )
+
+    # Parse multipart upload
+    form = await request.form()
+    file_upload = form.get("file")
+    if not file_upload:
+        raise HTTPException(status_code=400, detail="No file uploaded")
+
+    raw_bytes = await file_upload.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    # Size limit: 10MB
+    if len(raw_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File size exceeds 10MB limit")
+
+    # Determine file extension from content type or original filename
+    content_type = file_upload.content_type or ""
+    filename = file_upload.filename or ""
+    if "webm" in content_type.lower() or filename.lower().endswith(".webm"):
+        ext = ".webm"
+    elif "mpeg" in content_type.lower() or "mp3" in content_type.lower() or filename.lower().endswith(".mp3"):
+        ext = ".mp3"
+    elif "wav" in content_type.lower() or filename.lower().endswith(".wav"):
+        ext = ".wav"
+    else:
+        ext = ".webm"  # default fallback
+
+    import uuid as _uuid_mod
+    audio_filename = f"static/uploads/{_uuid_mod.uuid4()}{ext}"
+
+    storage = get_storage_driver()
+    storage.save(audio_filename, raw_bytes)
+
+    asset.audio_uri = audio_filename
+    db.commit()
+
+    return JSONResponse(
+        content={
+            "status": "success",
+            "audio_uri": audio_filename,
+        }
+    )
+
+
+@app.delete("/api/assets/{asset_id}/audio")
+@limiter.limit("30/minute")
+async def delete_asset_audio(
+    request: Request,
+    asset_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Remove the audio story from an asset.
+
+    Per Backend Spec §9.2 (DELETE /api/assets/{asset_id}/audio):
+    Deletes the audio file from storage and nullifies assets.audio_uri.
+    Returns 400 if session is not in SETUP status.
+    """
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    session = (
+        db.query(SessionModel).filter(SessionModel.id == asset.session_id).first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status != "SETUP":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Audio stories can only be deleted during the SETUP phase. "
+            f"Current session status is '{session.status}'.",
+        )
+
+    if not asset.audio_uri:
+        raise HTTPException(status_code=404, detail="No audio file exists for this asset")
+
+    # Delete audio file from storage
+    try:
+        storage = get_storage_driver()
+        storage.delete(asset.audio_uri)
+    except Exception:
+        pass
+
+    asset.audio_uri = None
+    db.commit()
+
+    return JSONResponse(
+        content={
+            "status": "success",
+            "message": "Asset voice recording deleted",
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
 # T39 — Schema
 # ---------------------------------------------------------------------------
 

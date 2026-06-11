@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T40** — Asset Deletion API (next)
+**T41** — Admin Audio Story Upload & Delete API (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -35,7 +35,8 @@
 
 [DONE] T31 — Government ID Scan Upload API — 2026-06-11T01:52
 [DONE] T39 — Admin Setup & Session Creation API with BIP39 recovery key — 2026-06-11T07:57
-[NEXT] T40 — Asset Deletion API — cascade-delete asset, valuations, image file; session-status gate
+[DONE] T40 — Asset Deletion API with file cleanup and session-status gate — 2026-06-11T08:00
+[NEXT] T41 — Admin Audio Story Upload & Delete API — multipart audio, session-status gate
 
 ## Blockers
 None.
