@@ -46,7 +46,8 @@
 [DONE] T28a-3 — Backend Tests — Phase 3 Scope (426 tests pass, gates Phase 4) — 2026-06-11T08:27
 [DONE] T12 — FastAPI Valuation Router with pessimistic locking, draft version control, HITL_GUARD gate — 2026-06-11T08:31
 [DONE] T71 — Proof of Notice Log Data Contract — NoticeLog/NoticeLogEntry/build_notice_log — 2026-06-11T08:34
-[NEXT] T15 — Fairpyx MNW Solver & Tie-Breakers — integrate Fairpyx library, deterministic tie-breaking, zero-utility starvation bypass
+[DONE] T15 — Fairpyx MNW Solver & Tie-Breakers with iterative maximum matching, deterministic tie-breaking — 2026-06-11T08:41
+[NEXT] T14 — ReportLab PDF Builders — Keepsake & Probate Ledger with NumberedCanvas, legal disclaimer, dynamic columns
 
 ## Blockers
 None.
