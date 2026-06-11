@@ -1221,3 +1221,82 @@ async def send_invite(
             "message": "Invitation email dispatched",
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# T31 — Government ID Scan Upload API
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/heirs/me/upload-id")
+@limiter.limit("10/minute")
+async def upload_id_scan(
+    request: Request,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Upload a government ID scan (image or PDF).
+
+    Per Backend Spec §9.5 (POST /api/heirs/me/upload-id):
+    1. Accepts multipart/form-data with file key (up to 10MB).
+    2. Encrypts the uploaded file bytes using AES-Fernet.
+    3. Saves encrypted file to /app/static/uploads/identities/ with UUID filename.
+    4. Updates id_scan_uri and sets identity_verified = False.
+    """
+    if current_user.get("role") != "HEIR":
+        raise HTTPException(status_code=403, detail="Heir access required")
+
+    heir_id = current_user.get("user_id")
+    heir = db.query(User).filter(User.id == heir_id).first()
+    if not heir:
+        raise HTTPException(status_code=401, detail="Heir not found")
+
+    # Parse multipart upload
+    form = await request.form()
+    file_upload = form.get("file")
+    if not file_upload:
+        raise HTTPException(status_code=400, detail="No file uploaded")
+
+    raw_bytes = await file_upload.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    # Size limit: 10MB
+    if len(raw_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File size exceeds 10MB limit")
+
+    # Encrypt the file bytes using AES-Fernet
+    import os as _os
+    from cryptography.fernet import Fernet
+
+    encryption_key = _os.environ.get("ENCRYPTION_KEY")
+    if not encryption_key:
+        raise HTTPException(
+            status_code=500,
+            detail="Server encryption key is not configured.",
+        )
+
+    fernet = Fernet(encryption_key.encode())
+    encrypted_bytes = fernet.encrypt(raw_bytes)
+
+    # Save encrypted file to identities directory
+    import uuid as _uuid_mod
+
+    file_id = _uuid_mod.uuid4()
+    filename = f"static/uploads/identities/{file_id}"
+
+    storage = get_storage_driver()
+    storage.save(filename, encrypted_bytes)
+
+    # Update heir record
+    heir.id_scan_uri = filename
+    heir.identity_verified = False
+    db.commit()
+
+    return JSONResponse(
+        content={
+            "status": "success",
+            "message": "ID document uploaded and encrypted successfully",
+        }
+    )
