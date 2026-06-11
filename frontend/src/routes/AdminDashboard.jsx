@@ -4,6 +4,7 @@ import DashboardGuard from '../components/DashboardGuard';
 import ForceAllocationConsole from '../components/ForceAllocationConsole';
 import AdminInventoryDashboard from '../components/AdminInventoryDashboard';
 import AdminSessionControl from '../components/AdminSessionControl';
+import AdminSetupWizard from '../components/AdminSetupWizard';
 import AdminHelpPortal from '../components/AdminHelpPortal';
 import AdminAnnouncementConsole from '../components/AdminAnnouncementConsole';
 
@@ -21,6 +22,7 @@ export default function AdminDashboard() {
   const [sessions, setSessions] = useState([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
+  const [showSetupWizard, setShowSetupWizard] = useState(true);
 
   // Load sessions if authenticated as admin
   useEffect(() => {
@@ -90,6 +92,13 @@ export default function AdminDashboard() {
   function handleOverrideComplete() {
     // Refresh session details to clear deadlock status in the UI
     fetchSessions();
+  }
+
+  // ── First-Boot Setup Wizard (Gate) ──────────────────────────────────────
+  if (!store.isAuthenticated && showSetupWizard) {
+    return (
+      <AdminSetupWizard onSetupComplete={() => setShowSetupWizard(false)} />
+    );
   }
 
   // ── Login Form (Gate) ──────────────────────────────────────────────────
