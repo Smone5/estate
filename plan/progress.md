@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T05** — Microsoft Presidio PII Scrubbing (next)
+**T06a** — Ollama Model Downloads (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -12,6 +12,7 @@
 | T04 | Alembic Migrations & pgvector Indexing | [x] |
 | T38 | WebSocket Connection Manager | [x] |
 | T28a-1 | Backend Tests — Phase 1 Scope | [x] |
+| T05 | Microsoft Presidio PII Scrubbing | [x] |
 
 ## Blockers
 None.
