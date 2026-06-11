@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T63** — Pi 5 Model Downscaling & Memory Profiling (next)
+**T07b** — LangGraph Model-Specific Tuning & Concurrency Config (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -21,6 +21,7 @@
 | T07a | LangGraph State Schema, Nodes & Prompt Templates | [x] |
 | T08 | LangGraph PostgresSaver Integration | [x] |
 | T73 | Rate Limiting Middleware | [x] |
+| T63 | Pi 5 Model Downscaling & Memory Profiling | [x] |
 
 
 ## Blockers

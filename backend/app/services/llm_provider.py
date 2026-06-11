@@ -73,10 +73,35 @@ _VISION_PROVIDER = os.environ.get("VISION_PROVIDER", PROVIDER_OLLAMA).strip().lo
 
 _OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
-_FAST_MODEL = os.environ.get("FAST_THINKER_MODEL", "qwen2.5:latest")
-_SLOW_MODEL = os.environ.get("SLOW_THINKER_MODEL", "qwen2.5:14b")
-_VISION_MODEL = os.environ.get("VISION_MODEL", "llava:latest")
-_EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "nomic-embed-text")
+# Model profiles (T63)
+_MODEL_PROFILES = {
+    "default": {
+        "fast": "qwen2.5:latest",
+        "slow": "qwen2.5:14b",
+        "vision": "llava:latest",
+        "embedding": "nomic-embed-text",
+    },
+    "pi5": {
+        "fast": "qwen2.5:3b-instruct",
+        "slow": "qwen2.5:8b-instruct",
+        "vision": "moondream:latest",
+        "embedding": "nomic-embed-text",
+    },
+    "pi5_alternative": {
+        "fast": "qwen2.5:1.5b-instruct",
+        "slow": "qwen2.5:8b-instruct",
+        "vision": "llava:7b",
+        "embedding": "nomic-embed-text",
+    },
+}
+
+_MODEL_PROFILE_NAME = os.environ.get("MODEL_PROFILE", "default").strip().lower()
+_PROFILE = _MODEL_PROFILES.get(_MODEL_PROFILE_NAME, _MODEL_PROFILES["default"])
+
+_FAST_MODEL = os.environ.get("FAST_THINKER_MODEL", _PROFILE["fast"])
+_SLOW_MODEL = os.environ.get("SLOW_THINKER_MODEL", _PROFILE["slow"])
+_VISION_MODEL = os.environ.get("VISION_MODEL", _PROFILE["vision"])
+_EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", _PROFILE["embedding"])
 
 _OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 _ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")

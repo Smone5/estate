@@ -46,7 +46,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.uv]
-dev-dependencies = []
+dev-dependencies = [
+    "psutil>=7.2.2",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["app/tests"]
