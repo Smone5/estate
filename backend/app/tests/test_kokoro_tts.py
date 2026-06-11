@@ -23,13 +23,14 @@ from app.tests.mock_kokoro import MockKokoroTTS
 # Model file validation
 # ──────────────────────────────────────────────────────────────────────────────
 
-def test_validate_model_files_both_present():
+def test_validate_model_files_both_present(tmp_path):
     """validate_model_files returns True when both files exist."""
-    model_dir = Path(__file__).resolve().parent.parent / "models"
-    model_path = str(model_dir / "kokoro-v1.0.onnx")
-    voices_path = str(model_dir / "voices-v1.0.bin")
+    model_file = tmp_path / "kokoro-v1.0.onnx"
+    voices_file = tmp_path / "voices-v1.0.bin"
+    model_file.write_text("dummy")
+    voices_file.write_text("dummy")
 
-    tts = KokoroTTS(model_path=model_path, voices_path=voices_path)
+    tts = KokoroTTS(model_path=str(model_file), voices_path=str(voices_file))
     result = tts.validate_model_files()
     assert result is True
 
@@ -44,13 +45,13 @@ def test_validate_model_files_model_missing():
     assert result is False
 
 
-def test_validate_model_files_voices_missing():
+def test_validate_model_files_voices_missing(tmp_path):
     """validate_model_files returns False when voices file is absent."""
-    model_dir = Path(__file__).resolve().parent.parent / "models"
-    model_path = str(model_dir / "kokoro-v1.0.onnx")
+    model_file = tmp_path / "kokoro-v1.0.onnx"
+    model_file.write_text("dummy")
 
     tts = KokoroTTS(
-        model_path=model_path,
+        model_path=str(model_file),
         voices_path="/nonexistent/voices-v1.0.bin",
     )
     result = tts.validate_model_files()
