@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-Phase 7: System Backup, Compliance & E2E Validation — T28c Backend Tests Phase 6-7 Scope
+Phase 7: System Backup, Compliance & E2E Validation — T30 E2E Compliance Validation complete
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -92,7 +92,8 @@ Phase 7: System Backup, Compliance & E2E Validation — T28c Backend Tests Phase
 [DONE] T24 — Web Speech Client Hook — useSpeech hook, hold/toggle, HTTPS guard, InvalidStateError handler, AudioContext 'Enable Audio' button — 2026-06-11T12:55
 [DONE] T25 — Client Audio Playback Queue — useAudioPlayback hook, sequential playlist, base64 Blob decoder, Blob URL revocation, SB 942 synthetic label, null-audio guard — 2026-06-11T12:55
 [DONE] T45 — Admin Voice Recorder Widget — MediaRecorder record/stop/playback/redo, pulsing timer 2:00 max, HTTPS guard, POST audio upload on save, Sage-Green aesthetics — 2026-06-11T12:55
-[NEXT] T28c — Backend Tests — Phase 6–7 Scope
+[DONE] T28c — Backend Tests — Phase 6–7 Scope — 527 tests pass — 2026-06-11T16:16
+[DONE] T30 — E2E Compliance Validation — GDPR export, CCPA/AB 2013 model listings, SB 942 websocket/audio queue propagation, hash-chain verification; 531 backend + 153 frontend tests pass — 2026-06-11T16:26
 
 ## Blockers
 None.

@@ -52,6 +52,7 @@ export function useWebSocket() {
 
   const sessionId = useMediationStore((s) => s.session_id);
   const addMessage = useMediationStore((s) => s.addMessage);
+  const enqueueAudioChunk = useMediationStore((s) => s.enqueueAudioChunk);
   const setNetworkStatus = useMediationStore((s) => s.setNetworkStatus);
   const flushOfflineQueue = useMediationStore((s) => s.flushOfflineQueue);
   const enqueueOfflineMessage = useMediationStore((s) => s.enqueueOfflineMessage);
@@ -127,8 +128,7 @@ export function useWebSocket() {
             if (text) {
               addMessage({ sender: 'agent', text });
             }
-            // Audio playback is handled by T25 (playback queue).
-            // We store the full chunk on the message so T25 can access it.
+            enqueueAudioChunk(frame);
             if (frame.is_final && text) {
               // Mark final chunk — nothing extra to do; audio queue
               // in T25 will detect the final chunk
@@ -209,7 +209,7 @@ export function useWebSocket() {
         setNetworkStatus('Reconnecting...');
       }
     };
-  }, [sessionId, disconnect, setNetworkStatus, flushOfflineQueue, addMessage, setSession]);
+  }, [sessionId, disconnect, setNetworkStatus, flushOfflineQueue, addMessage, enqueueAudioChunk, setSession]);
 
   /**
    * Send a JSON payload over the WebSocket.

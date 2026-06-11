@@ -14,6 +14,7 @@ export const useMediationStore = create((set, get) => ({
   valuations: {},        // Map of asset_id -> { points: int, reasoning: str, is_reasoning_shared: bool }
   unallocatedPoints: 1000,
   messages: [],          // Chat history: { sender: 'heir'|'agent', text: str }
+  audioChunks: [],       // WebSocket chat_reply_chunk frames waiting for playback
   isPaused: false,
   isDeadlocked: false,
   is_hitl_suspended: false,
@@ -215,6 +216,12 @@ export const useMediationStore = create((set, get) => ({
     messages: [...state.messages, msg],
   })),
 
+  enqueueAudioChunk: (chunk) => set((state) => ({
+    audioChunks: [...state.audioChunks, chunk],
+  })),
+
+  clearAudioChunks: () => set({ audioChunks: [] }),
+
   // ── Network Actions ──────────────────────────────────────────────────────
   setNetworkStatus: (status) => set({ networkStatus: status }),
 
@@ -313,6 +320,7 @@ export const useMediationStore = create((set, get) => ({
       assets: [],
       valuations: {},
       messages: [],
+      audioChunks: [],
       isAuthenticated: false,
     });
   },

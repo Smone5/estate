@@ -15,6 +15,7 @@
  */
 
 import { useState, useRef, useCallback, useEffect } from 'react';
+import { useMediationStore } from '../store/useMediationStore';
 
 /**
  * Play a base64-encoded WAV audio string and return a promise that
@@ -63,6 +64,8 @@ function playAudioBlob(base64Audio) {
 export function useAudioPlayback() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isSyntheticPlaying, setIsSyntheticPlaying] = useState(false);
+  const audioChunks = useMediationStore((s) => s.audioChunks);
+  const clearAudioChunks = useMediationStore((s) => s.clearAudioChunks);
 
   const queueRef = useRef([]);
   const isPlayingRef = useRef(false);
@@ -116,6 +119,12 @@ export function useAudioPlayback() {
       playNext();
     }
   }, [playNext]);
+
+  useEffect(() => {
+    if (audioChunks.length === 0) return;
+    enqueueChunks(audioChunks);
+    clearAudioChunks();
+  }, [audioChunks, clearAudioChunks, enqueueChunks]);
 
   /**
    * Stop playback and clear the queue.
