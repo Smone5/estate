@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T07b** — LangGraph Model-Specific Tuning & Concurrency Config (next)
+**T28a-2** — Backend Tests — Phase 2 Scope (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -22,6 +22,7 @@
 | T08 | LangGraph PostgresSaver Integration | [x] |
 | T73 | Rate Limiting Middleware | [x] |
 | T63 | Pi 5 Model Downscaling & Memory Profiling | [x] |
+| T07b | LangGraph Model-Specific Tuning & Concurrency Config | [x] |
 
 
 ## Blockers
