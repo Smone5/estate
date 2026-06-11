@@ -2914,28 +2914,6 @@ async def gdpr_export_heir(
 
     now_utc = datetime.now(timezone.utc)
 
-    # Collect profile details
-    profile = {
-        "heir_id": str(heir.id),
-        "username": heir.username,
-        "legal_first_name": heir.legal_first_name,
-        "legal_middle_name": heir.legal_middle_name,
-        "legal_last_name": heir.legal_last_name,
-        "relationship_to_decedent": heir.relationship_to_decedent,
-        "date_of_birth": heir.date_of_birth.isoformat() if heir.date_of_birth else None,
-        "email": heir.email,
-        "phone": heir.phone,
-        "physical_address": heir.physical_address,
-        "identity_verified": heir.identity_verified,
-        "status": heir.status,
-        "is_submitted": heir.is_submitted,
-        "submitted_at": heir.submitted_at.isoformat() if heir.submitted_at else None,
-        "consent_accepted": heir.consent_accepted,
-        "age_verified": heir.age_verified,
-        "consent_timestamp": heir.consent_timestamp.isoformat() if heir.consent_timestamp else None,
-        "created_at": heir.created_at.isoformat() if heir.created_at else None,
-    }
-
     # Collect valuations
     valuations = (
         db.query(Valuation)
@@ -2944,17 +2922,14 @@ async def gdpr_export_heir(
     )
     valuation_data = []
     for v in valuations:
-        # Load asset title for context
-        asset = db.query(Asset).filter(Asset.id == v.asset_id).first()
         valuation_data.append({
             "asset_id": str(v.asset_id),
-            "asset_title": asset.title if asset else None,
             "points": v.points,
             "reasoning": v.reasoning,
             "is_reasoning_shared": v.is_reasoning_shared if v.is_reasoning_shared is not None else False,
         })
 
-    # Collect decrypted chat history
+    # Collect decrypted chat history (per Compliance Spec §2.2)
     chat_messages = (
         db.query(ChatMessage)
         .filter(ChatMessage.heir_id == heir_id)
@@ -2964,14 +2939,12 @@ async def gdpr_export_heir(
     chat_data = []
     for msg in chat_messages:
         chat_data.append({
-            "id": str(msg.id),
+            "timestamp": msg.created_at.isoformat() if msg.created_at else None,
             "sender": msg.sender,
-            "message_text": msg.message_text,  # EncryptedJSON auto-decrypts
-            "scrubbed_text": msg.scrubbed_text,
-            "created_at": msg.created_at.isoformat() if msg.created_at else None,
+            "text": msg.message_text,
         })
 
-    # Collect support requests
+    # Collect support tickets (per Compliance Spec §2.2 key name)
     support_requests = (
         db.query(SupportRequest)
         .filter(SupportRequest.heir_id == heir_id)
@@ -2984,15 +2957,27 @@ async def gdpr_export_heir(
             "id": str(sr.id),
             "message": sr.message,
             "status": sr.status,
-            "created_at": sr.created_at.isoformat() if sr.created_at else None,
         })
 
     payload = {
-        "export_timestamp_utc": now_utc.isoformat(),
-        "profile": profile,
+        "heir_id": str(heir.id),
+        "username": heir.username,
+        "legal_first_name": heir.legal_first_name,
+        "legal_middle_name": heir.legal_middle_name,
+        "legal_last_name": heir.legal_last_name,
+        "relationship_to_decedent": heir.relationship_to_decedent,
+        "date_of_birth": heir.date_of_birth.isoformat() if heir.date_of_birth else None,
+        "identity_verified": heir.identity_verified,
+        "email": heir.email,
+        "phone": heir.phone,
+        "physical_address": heir.physical_address,
+        "consent_accepted": heir.consent_accepted,
+        "age_verified": heir.age_verified,
+        "consent_timestamp": heir.consent_timestamp.isoformat() if heir.consent_timestamp else None,
+        "is_submitted": heir.is_submitted,
         "valuations": valuation_data,
         "chat_history": chat_data,
-        "support_requests": support_data,
+        "support_tickets": support_data,
     }
 
     return JSONResponse(content=payload)
