@@ -3,6 +3,7 @@ import { useMediationStore } from '../store/useMediationStore';
 import DashboardGuard from '../components/DashboardGuard';
 import ForceAllocationConsole from '../components/ForceAllocationConsole';
 import AdminInventoryDashboard from '../components/AdminInventoryDashboard';
+import AdminSessionControl from '../components/AdminSessionControl';
 import AdminHelpPortal from '../components/AdminHelpPortal';
 import AdminAnnouncementConsole from '../components/AdminAnnouncementConsole';
 
@@ -192,6 +193,8 @@ export default function AdminDashboard() {
                   </p>
                 </div>
               ) : null}
+
+              <AdminSessionControl sessionId={sessionId} />
 
               {sessionId && <AdminAnnouncementConsole sessionId={sessionId} />}
             </>
