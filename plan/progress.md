@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T34** — Executor ID Verification State Transition API (next)
+**T60** — Admin Heir Deletion API (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -41,7 +41,9 @@
 [DONE] T43 — Custom FAQ CRUD API with WebSocket mutation broadcasts — 2026-06-11T08:08
 [DONE] T64 — Asset Pre-Allocation API with orphaned valuation cleanup — 2026-06-11T08:10
 [DONE] T65 — Background Invite Expiration Scheduler — 2026-06-11T08:11
-[NEXT] T34 — Executor ID Verification State Transition API — approve/reject, matrix seeding, scan purge
+[DONE] T34 — Executor ID Verification State Transition API — 2026-06-11T08:13
+[DONE] T60 — Admin Heir Deletion API — purge PII, delete scan, unlink pre-allocated assets — 2026-06-11T08:24
+[NEXT] T28a-3 — Backend Tests — Phase 3 Scope — pytest coverage for all Phase 3 APIs (Argon2 auth, image pipeline, onboarding, asset staging/OCR, session lifecycle, heir management, ID upload, support/help, FAQ, admin setup, asset deletion, audio upload, pre-allocation, invite scheduler, admin heir deletion, rate limiting)
 
 ## Blockers
 None.
