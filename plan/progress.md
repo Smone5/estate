@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T48** — Session Announcement UI Components (next)
+**T52** — Admin Inventory Dashboard UI (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -67,7 +67,9 @@
 [DONE] T46 — Semantic Search UI — gallery search bar, filter panel, sorting controls, confidence badge, zero-match fallback — 2026-06-11T14:27
 [DONE] T35 — Executor Force Allocation Console UI — view deadlocked items, select beneficiaries, override reasons, POST override — 2026-06-11T14:38
 [DONE] T47 — FAQ/Help UI Components — Heir FAQ drawer, Admin Help Portal, scroll tutorial, inline FAQ editor — 2026-06-11T14:43
-[NEXT] T48 — Session Announcement UI Components — Admin Announcement Console, Heir sticky Amber-500 alert banner, Heir login modal acknowledgment gate
+[DONE] T48 — Session Announcement UI Components — Admin Announcement Console, Heir sticky Amber-500 alert banner, Heir login modal acknowledgment gate — 2026-06-11T15:03
+[DONE] T51 — Active Abstention Waiver UI Components — Heir active abstention button, signature verification modal, post-abstention wait screen, expired token gate — 2026-06-11T15:09
+[NEXT] T52 — Admin Inventory Dashboard UI — Admin catalog staging card, edit metadata form, pre-allocation dropdowns, publish buttons
 
 ## Blockers
 None.
