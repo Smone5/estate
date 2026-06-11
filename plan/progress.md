@@ -87,7 +87,8 @@ Phase 6: Audio Speech & Real-Time Communications (next)
 [DONE] T24 — Web Speech Client Hook — useSpeech hook, hold/toggle, HTTPS guard, InvalidStateError handler, AudioContext 'Enable Audio' button, 141 frontend tests pass — 2026-06-11T12:04
 [DONE] T25 — Client Audio Playback Queue — useAudioPlayback hook, sequential playlist, base64 Blob decoder, Blob URL revocation, SB 942 synthetic label, null-audio guard, 141 frontend tests pass — 2026-06-11T12:05
 [DONE] T45 — Admin Voice Recorder Widget — MediaRecorder record/stop/playback/redo, pulsing timer 2:00 max, HTTPS guard, POST /api/assets/{asset_id}/audio upload on save, Sage-Green aesthetics, 141 frontend tests pass — 2026-06-11T12:06
-[NEXT] Phase 6 tasks complete — proceeding to Phase 7 (Backup, Compliance & E2E Validation)
+[DONE] T72 — Unauthenticated System Restore Gate — JWT cookie auth on initialized restore, fresh-system bypass preserved, 480 tests pass — 2026-06-11T12:12
+[NEXT] T61 — Nginx & Production Build Setup
 
 ## Blockers
 None.
