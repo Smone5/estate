@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T28a-2** — Backend Tests — Phase 2 Scope (next)
+**T09b** — Image Preprocessing Pipeline & Concrete Storage Drivers (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -23,6 +23,9 @@
 | T73 | Rate Limiting Middleware | [x] |
 | T63 | Pi 5 Model Downscaling & Memory Profiling | [x] |
 | T07b | LangGraph Model-Specific Tuning & Concurrency Config | [x] |
+| T28a-2 | Backend Tests — Phase 2 Scope | [x] |
+| T09a | Storage Driver Interface & Mock Driver | [x] |
+
 
 
 ## Blockers

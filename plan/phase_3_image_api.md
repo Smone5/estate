@@ -60,7 +60,7 @@ Construct the image scaling/conversion pipelines and expose authenticated FastAP
 
 ## Phase Checklist & Tasks
 
-### [ ] Task T09a: Storage Driver Interface & Mock Driver
+### [x] Task T09a: Storage Driver Interface & Mock Driver
 * **Objective**: Define abstract storage driver base class with `save(path, bytes)`, `get(path)`, and `delete(path)` methods. Implement a Mock driver for unit testing. **This enables all downstream API tasks (T11, T13, T31, T34, T40, T41, T55, T60, T49) to be developed in parallel with concrete storage implementations.**
 * **Verification**: Verify that the abstract interface enforces the `delete()` method contract. Verify that the Mock driver saves, retrieves, and deletes byte payloads correctly, and that deleting a nonexistent file does not raise an error (idempotent).
 
