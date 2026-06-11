@@ -3896,6 +3896,85 @@ async def download_heir_keepsake(
 
 
 # ---------------------------------------------------------------------------
+# T83 — Mediation Chat History API
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/sessions/{session_id}/heirs/{heir_id}/chat")
+async def get_heir_chat(
+    request: Request,
+    session_id: str,
+    heir_id: str,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Retrieve chronologically-sorted chat history for a specific Heir.
+
+    Per Backend Spec §9.3 (GET /api/sessions/{session_id}/heirs/{heir_id}/chat):
+    - Access: Heir JWT cookie matching {heir_id} only.
+    - Admin credentials are rejected with 403 Forbidden to guarantee
+      mediation confidentiality (per Legal Spec §6).
+
+    Returns: List[ChatMessageSchema] sorted by created_at ascending.
+    """
+    role = current_user.get("role")
+    user_id = current_user.get("user_id")
+
+    if role == "ADMIN":
+        raise HTTPException(
+            status_code=403,
+            detail="Admin access to mediation chat history is prohibited "
+            "to preserve confidentiality of active listening transcripts.",
+        )
+
+    if role == "HEIR" and user_id != heir_id:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only view your own mediation chat history.",
+        )
+
+    # Verify the session exists
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Verify the heir exists and belongs to this session
+    heir = db.query(User).filter(
+        User.id == heir_id,
+        User.session_id == session_id,
+        User.role == "HEIR",
+    ).first()
+    if not heir:
+        raise HTTPException(status_code=404, detail="Heir not found in this session")
+
+    messages = (
+        db.query(ChatMessage)
+        .filter(
+            ChatMessage.session_id == session_id,
+            ChatMessage.heir_id == heir_id,
+        )
+        .order_by(ChatMessage.created_at.asc())
+        .all()
+    )
+
+    return JSONResponse(
+        content=[
+            {
+                "id": str(msg.id),
+                "session_id": str(msg.session_id),
+                "heir_id": str(msg.heir_id),
+                "sender": msg.sender,
+                "message_text": msg.message_text,
+                "scrubbed_text": msg.scrubbed_text,
+                "created_at": msg.created_at.isoformat() if msg.created_at else None,
+            }
+            for msg in messages
+        ]
+    )
+
+
+# ---------------------------------------------------------------------------
 # T82 — Hash Chain Verification Tool
 # ---------------------------------------------------------------------------
 
