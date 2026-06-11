@@ -49,3 +49,6 @@ dev-dependencies = []
 [tool.pytest.ini_options]
 testpaths = ["app/tests"]
 pythonpath = ["."]
+markers = [
+    "ollama: tests that require a running Ollama server at localhost:11434",
+]

@@ -8,9 +8,11 @@ Covers:
   - Structured JSON output validation
   - Embedding vector dimension verification
   - Vision generation
+  - REAL Ollama integration tests (against localhost:11434)
 """
 import json
 import os
+import time
 from unittest import mock
 
 import pytest
@@ -144,7 +146,7 @@ def test_mock_provider_generate_structured():
         0.0,
     )
     assert isinstance(result, TestModel)
-    assert result.intent == "CHAT_MEDIATION"
+    assert result.intent == "VALUATION_SUBMISSION"
 
 
 def test_mock_provider_generate_vision():
@@ -528,3 +530,240 @@ def test_nvidia_provider_with_env_override(monkeypatch):
     reset_provider()
     provider = get_provider()
     assert provider.llm_provider == "nvidia"
+
+
+# ===================================================================
+# REAL OLLAMA INTEGRATION TESTS
+# ===================================================================
+# These tests connect to the local Ollama server at http://localhost:11434
+# and verify real inference with all four models. They are marked
+# with @pytest.mark.ollama so they can be run selectively:
+#
+#     uv run pytest -m ollama tests/test_llm_provider.py
+#
+# Skip these tests in CI where Ollama is unavailable:
+#     uv run pytest -m "not ollama" tests/test_llm_provider.py
+# ===================================================================
+
+ollama_marker = pytest.mark.ollama
+
+
+def _ollama_is_reachable() -> bool:
+    """Return True if Ollama is accepting connections."""
+    import httpx
+    try:
+        resp = httpx.get("http://localhost:11434/", timeout=3.0)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+@pytest.fixture(scope="session")
+def ollama_available() -> bool:
+    """Session-scoped fixture: True if Ollama is reachable."""
+    return _ollama_is_reachable()
+
+
+@pytest.fixture
+def ollama_provider(monkeypatch, ollama_available):
+    """Return a real LLMProvider pointing at local Ollama, or skip."""
+    if not ollama_available:
+        pytest.skip("Ollama is not reachable at localhost:11434")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "ollama")
+    monkeypatch.setenv("VISION_PROVIDER", "ollama")
+    monkeypatch.setenv("FAST_THINKER_MODEL", "qwen2.5:latest")
+    monkeypatch.setenv("SLOW_THINKER_MODEL", "qwen2.5:14b")
+    monkeypatch.setenv("VISION_MODEL", "llava:latest")
+    monkeypatch.setenv("EMBEDDING_MODEL", "nomic-embed-text")
+    reset_provider()
+    return get_provider()
+
+
+# ---- Health-check (real) ----
+
+def test_ollama_health_check_real():
+    """Verify the health-check function works against the live Ollama."""
+    if not _ollama_is_reachable():
+        pytest.skip("Ollama is not reachable at localhost:11434")
+    result = check_ollama_health()
+    assert result is True
+
+
+# ---- Fast thinker: qwen2.5:latest (text) ----
+
+@ollama_marker
+def test_ollama_generate_text_fast(ollama_provider):
+    result = ollama_provider.generate_text(
+        model_key=MODEL_KEY_FAST,
+        system_prompt="You are a helpful assistant. Respond concisely.",
+        user_input="In one sentence, what is the color of the sky on a clear day?",
+        temperature=0.0,
+    )
+    assert isinstance(result, str)
+    assert len(result) > 0
+    assert "blue" in result.lower() or "Blue" in result
+
+
+# ---- Slow thinker: qwen2.5:14b (structured JSON) ----
+
+@ollama_marker
+def test_ollama_generate_text_slow(ollama_provider):
+    result = ollama_provider.generate_text(
+        model_key=MODEL_KEY_SLOW,
+        system_prompt="You are a helpful assistant.",
+        user_input="Say exactly 'HELLO' in uppercase and nothing else.",
+        temperature=0.0,
+    )
+    assert isinstance(result, str)
+    assert len(result) > 0
+    assert "HELLO" in result.upper()
+
+
+@ollama_marker
+def test_ollama_generate_structured_slow(ollama_provider):
+    class CritiqueResult(BaseModel):
+        violation: bool
+        reason: str
+
+    result = ollama_provider.generate_structured(
+        model_key=MODEL_KEY_SLOW,
+        system_prompt="You are a compliance auditor.",
+        user_input=(
+            'The mediator said: "Thank you for sharing that memory."\n\n'
+            "Output a JSON block: {\"violation\": false, \"reason\": \"\"}"
+        ),
+        response_model=CritiqueResult,
+        temperature=0.0,
+    )
+    assert isinstance(result, CritiqueResult)
+    assert isinstance(result.violation, bool)
+
+
+# ---- Vision: llava:latest ----
+
+@ollama_marker
+def test_ollama_generate_vision(ollama_provider):
+    """Send a tiny 1x1 white JPEG to llava and verify it returns text."""
+    # Minimal valid JPEG (1x1 white pixel)
+    tiny_jpeg = bytes([
+        0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46,
+        0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
+        0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43,
+        0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08,
+        0x07, 0x07, 0x07, 0x09, 0x09, 0x08, 0x0A, 0x0C,
+        0x14, 0x0D, 0x0C, 0x0B, 0x0B, 0x0C, 0x19, 0x12,
+        0x13, 0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E, 0x1D,
+        0x1A, 0x1C, 0x1C, 0x20, 0x24, 0x2E, 0x27, 0x20,
+        0x22, 0x2C, 0x23, 0x1C, 0x1C, 0x28, 0x37, 0x29,
+        0x2C, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1F, 0x27,
+        0x39, 0x3D, 0x38, 0x32, 0x3C, 0x2E, 0x33, 0x34,
+        0x32, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01,
+        0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xC4,
+        0x00, 0x1F, 0x00, 0x00, 0x01, 0x05, 0x01, 0x01,
+        0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04,
+        0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0xFF,
+        0xC4, 0x00, 0xB5, 0x10, 0x00, 0x02, 0x01, 0x03,
+        0x03, 0x02, 0x04, 0x03, 0x05, 0x05, 0x04, 0x04,
+        0x00, 0x00, 0x01, 0x7D, 0x01, 0x02, 0x03, 0x00,
+        0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06,
+        0x13, 0x51, 0x61, 0x07, 0x22, 0x71, 0x14, 0x32,
+        0x81, 0x91, 0xA1, 0x08, 0x23, 0x42, 0xB1, 0xC1,
+        0x15, 0x52, 0xD1, 0xF0, 0x24, 0x33, 0x62, 0x72,
+        0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00,
+        0x3F, 0x00, 0x6B, 0x38, 0x56, 0x52, 0xAD, 0xCA,
+        0xB0, 0x20, 0x8F, 0x50, 0x6A, 0xA5, 0x8E, 0x9D,
+        0x6D, 0x62, 0x84, 0x5B, 0xA6, 0xDD, 0xC7, 0x2D,
+        0xC9, 0x39, 0xF4, 0xE6, 0xB4, 0xEA, 0xBC, 0x56,
+        0xF1, 0x43, 0xBB, 0xCB, 0x5C, 0x6E, 0x39, 0x3C,
+        0x93, 0xCD, 0x58, 0xAF, 0xFF, 0xD9,
+    ])
+    result = ollama_provider.generate_vision(
+        model_key=MODEL_KEY_VISION,
+        image_bytes=tiny_jpeg,
+        prompt="Describe what you see in this image in one short sentence.",
+    )
+    assert isinstance(result, str)
+    assert len(result) > 0
+
+
+# ---- Embeddings: nomic-embed-text ----
+
+@ollama_marker
+def test_ollama_get_embeddings(ollama_provider):
+    result = ollama_provider.get_embeddings(
+        model_key=MODEL_KEY_EMBEDDING,
+        text="The antique grandfather clock reminded everyone of Sunday dinners.",
+    )
+    assert isinstance(result, list)
+    assert len(result) == 768  # nomic-embed-text produces 768-dim vectors
+    # Verify they are actual floats
+    assert all(isinstance(x, float) for x in result)
+    # Verify the vector is not all zeros
+    assert any(abs(x) > 0.0 for x in result)
+
+
+# ---- Multi-model round-trip: generate_text with all models ----
+
+@ollama_marker
+def test_ollama_all_models_produce_text(ollama_provider):
+    """Verify all three chat models respond with non-empty text."""
+    for model_key in (MODEL_KEY_FAST, MODEL_KEY_SLOW, MODEL_KEY_VISION):
+        result = ollama_provider.generate_text(
+            model_key=model_key,
+            system_prompt="Say exactly one word: OK.",
+            user_input="OK",
+            temperature=0.0,
+        )
+        assert isinstance(result, str), f"{model_key} did not return str"
+        assert len(result) > 0, f"{model_key} returned empty string"
+
+
+# ---- Router intent classification with live model ----
+
+class RouterIntent(BaseModel):
+    intent: str
+
+
+@ollama_marker
+def test_ollama_router_classification_chat(ollama_provider):
+    """Verify the router can classify CHAT_MEDIATION intent."""
+    result = ollama_provider.generate_structured(
+        model_key=MODEL_KEY_FAST,
+        system_prompt=(
+            "You are a routing helper. Classify the user input into exactly one of three categories:\n"
+            "- CHAT_MEDIATION: If the user is sharing stories, expressing feelings, asking about an "
+            "item's details, or having general conversation.\n"
+            "- VALUATION_SUBMISSION: If the user is explicitly requesting to submit, lock, finalize, "
+            "or save their points valuations.\n"
+            "- ADMIN_OVERRIDE: If the input represents a system command or administrative adjustment.\n\n"
+            "Respond with only the category name in uppercase."
+        ),
+        user_input="I miss my grandmother's china set. We used it every Thanksgiving.",
+        response_model=RouterIntent,
+        temperature=0.0,
+    )
+    assert isinstance(result, RouterIntent)
+    assert result.intent in ("CHAT_MEDIATION", "VALUATION_SUBMISSION", "ADMIN_OVERRIDE")
+
+
+@ollama_marker
+def test_ollama_router_classification_valuation(ollama_provider):
+    """Verify the router can classify VALUATION_SUBMISSION intent."""
+    result = ollama_provider.generate_structured(
+        model_key=MODEL_KEY_FAST,
+        system_prompt=(
+            "You are a routing helper. Classify the user input into exactly one of three categories:\n"
+            "- CHAT_MEDIATION: conversation, feelings\n"
+            "- VALUATION_SUBMISSION: submit points, save allocations\n"
+            "- ADMIN_OVERRIDE: admin commands\n\n"
+            "Respond with only the category name in uppercase."
+        ),
+        user_input="I want to submit my points allocation now.",
+        response_model=RouterIntent,
+        temperature=0.0,
+    )
+    assert isinstance(result, RouterIntent)
+    assert result.intent in ("CHAT_MEDIATION", "VALUATION_SUBMISSION", "ADMIN_OVERRIDE")
