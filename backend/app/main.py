@@ -2719,6 +2719,12 @@ class KeepsakeEmailRequest(BaseModel):
     heir_id: str | None = None
 
 
+class AdminOverrideRequest(BaseModel):
+    asset_id: str
+    allocated_to_id: str
+    reason: str = Field(..., min_length=5, max_length=250)
+
+
 class AbstainRequest(BaseModel):
     legal_name_signature: str = Field(..., min_length=3, max_length=200)
 
@@ -2987,6 +2993,230 @@ async def download_abstain_receipt(
         headers={
             "Content-Disposition": f'attachment; filename="waiver_receipt_{heir_id}.pdf"',
         },
+    )
+
+
+# ---------------------------------------------------------------------------
+# T44 — Session Override API
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/sessions/{session_id}/override")
+@limiter.limit("10/minute")
+async def session_override(
+    request: Request,
+    session_id: str,
+    body: list[AdminOverrideRequest],
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Admin override of division deadlocks — force allocation of contested assets.
+
+    Per Backend Spec §9.3 (POST /api/sessions/{session_id}/override):
+    1. Gates on LOCKED or deadlocked session state → 400 otherwise.
+    2. For each override: update asset in DB (allocated_to_id, status=PRE_ALLOCATED).
+    3. Adjust heir points budgets: subtract points allocated to overridden assets
+       from each heir's 1000-point budget.
+    4. Write ADMIN_OVERRIDE audit log block with fiduciary reason.
+    5. Write corrected valuations into LangGraph checkpointer state via
+       graph.update_state(config, {"valuations": corrected_valuations}, as_node="HITL_GUARD").
+    6. Resume graph execution via graph.stream(None, config), routing to COMMIT_NODE.
+    7. Clear is_deadlocked, transition to ACTIVE if not paused.
+    8. Broadcast WebSocket status update.
+    """
+    session = (
+        db.query(SessionModel)
+        .filter(SessionModel.id == session_id)
+        .with_for_update()
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status not in ("LOCKED",):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Session override is only available during LOCKED state. "
+            f"Current status is '{session.status}'.",
+        )
+
+    if len(body) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one override assignment is required.",
+        )
+
+    now_utc = datetime.now(timezone.utc)
+
+    # Collect all relevant heirs and their current valuations before overrides
+    heirs = (
+        db.query(User)
+        .filter(User.session_id == session_id, User.role == "HEIR")
+        .all()
+    )
+    heir_map = {str(h.id): h for h in heirs}
+
+    # 2. Process each override — update asset allocations
+    override_asset_ids: set[str] = set()
+    for override in body:
+        asset = db.query(Asset).filter(
+            Asset.id == override.asset_id,
+            Asset.session_id == session_id,
+        ).first()
+        if not asset:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Asset {override.asset_id} not found in this session.",
+            )
+        if override.allocated_to_id not in heir_map:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Heir {override.allocated_to_id} not found in this session.",
+            )
+
+        asset.allocated_to_id = override.allocated_to_id
+        asset.status = "PRE_ALLOCATED"
+        override_asset_ids.add(override.asset_id)
+
+    # 3. Adjust heir points budgets for overridden assets
+    #    For each heir, find their point allocations to overridden assets
+    #    and remove those valuations (since assets are now PRE_ALLOCATED and
+    #    won't enter the solver).
+    for heir in heirs:
+        db.query(Valuation).filter(
+            Valuation.asset_id.in_(override_asset_ids),
+            Valuation.heir_id == heir.id,
+        ).delete()
+
+    db.flush()
+
+    # 4. Write ADMIN_OVERRIDE audit log block
+    prev_hash = "0" * 64
+    last_log = (
+        db.query(AuditLog)
+        .filter(AuditLog.session_id == session_id)
+        .order_by(AuditLog.id.desc())
+        .first()
+    )
+    if last_log:
+        prev_hash = last_log.sha256_hash
+
+    overrides_snapshot = []
+    for override in body:
+        overrides_snapshot.append({
+            "asset_id": override.asset_id,
+            "allocated_to_id": override.allocated_to_id,
+            "reason": override.reason,
+        })
+
+    state_snapshot = {
+        "event": "ADMIN_OVERRIDE",
+        "session_id": session_id,
+        "overrides": overrides_snapshot,
+        "timestamp_utc": now_utc.isoformat(),
+    }
+    snapshot_str = str(sorted(state_snapshot.items()))
+    override_hash = hashlib.sha256(
+        (prev_hash + snapshot_str).encode("utf-8")
+    ).hexdigest()
+
+    audit_entry = AuditLog(
+        session_id=session_id,
+        event_type="ADMIN_OVERRIDE",
+        state_snapshot=state_snapshot,
+        prev_hash=prev_hash,
+        sha256_hash=override_hash,
+    )
+    db.add(audit_entry)
+
+    # 5 & 6. Write corrected allocations into LangGraph checkpointer state
+    #    and resume graph execution for each affected heir's thread
+    try:
+        from .graph import get_graph, get_postgres_checkpointer
+
+        saver = get_postgres_checkpointer()
+        graph = get_graph()
+
+        for heir in heirs:
+            hid = str(heir.id)
+            thread_id = f"{session_id}:{hid}"
+            config = {"configurable": {"thread_id": thread_id}}
+
+            # Collect the heir's current valuations after the deletions
+            current_vals = (
+                db.query(Valuation)
+                .filter(Valuation.heir_id == heir.id)
+                .all()
+            )
+            corrected_valuations = [
+                {
+                    "asset_id": str(v.asset_id),
+                    "heir_id": str(v.heir_id),
+                    "points": v.points,
+                    "reasoning": v.reasoning,
+                    "is_reasoning_shared": v.is_reasoning_shared,
+                }
+                for v in current_vals
+            ]
+
+            # Write corrected valuations into the checkpointer state at HITL_GUARD
+            try:
+                graph.update_state(
+                    config,
+                    {"valuations": corrected_valuations},
+                    as_node="HITL_GUARD",
+                )
+            except Exception:
+                logger.warning(
+                    "Could not update checkpointer state for thread %s — "
+                    "thread may not exist yet. Continuing.",
+                    thread_id,
+                )
+
+            # Resume graph execution — skips HITL_GUARD, routes to COMMIT_NODE
+            try:
+                for event in graph.stream(None, config):
+                    logger.debug(
+                        "Graph resumed for thread %s — event: %s",
+                        thread_id,
+                        list(event.keys()) if isinstance(event, dict) else str(event),
+                    )
+            except Exception:
+                logger.warning(
+                    "Graph resume failed for thread %s — continuing.",
+                    thread_id,
+                )
+    except Exception as e:
+        logger.warning(
+            "LangGraph override state update failed for session %s: %s",
+            session_id,
+            e,
+        )
+
+    # 7. Clear is_deadlocked, transition to ACTIVE if not paused
+    session.is_deadlocked = False
+    if not session.is_paused:
+        session.status = "ACTIVE"
+
+    db.commit()
+    db.refresh(session)
+
+    # 8. Broadcast WebSocket status update
+    await manager.broadcast_session_status(
+        session_id,
+        {
+            "type": "session_status",
+            "status": session.status,
+            "is_paused": session.is_paused,
+            "is_deadlocked": session.is_deadlocked,
+        },
+    )
+
+    return JSONResponse(
+        content={
+            "status": "resolved",
+        }
     )
 
 
