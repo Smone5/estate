@@ -45,17 +45,32 @@ class SolverHeir:
 
 
 @dataclass(frozen=True)
+class TieBreakerEvent:
+    """Structured record of a single tie-breaker resolution — T70 data contract.
+
+    Consumed by T14/T70 PDF builder for the Deterministic Tie-Breaker
+    Resolution Record table per Legal Spec §3 Item 6.
+    """
+    asset_id: str
+    tied_heir_ids: list[str]
+    points: int
+    winner_heir_id: str
+    reason: str  # e.g. "earlier submitted_at", "UUID fallback", "no bids"
+    event_description: str  # Human-readable string for the audit description
+
+
+@dataclass(frozen=True)
 class SolverResult:
     """Complete result of a solver run.
 
     Attributes:
         allocation:  Mapping from heir_id -> list[asset_id].
         mnw_product_value:  Scalar product of utilities (0.0 if no assets).
-        tie_breaker_events:  Descriptions of any tie-breaking that occurred.
+        tie_breaker_events:  Structured TieBreakerEvent records (T70 contract).
     """
     allocation: dict[str, list[str]] = field(default_factory=dict)
     mnw_product_value: float = 0.0
-    tie_breaker_events: list[str] = field(default_factory=list)
+    tie_breaker_events: list[TieBreakerEvent] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +122,7 @@ def solve_mnw(
     pre_allocated = pre_allocated or {}
     submission_times = submission_times or {}
     creation_times = creation_times or {}
-    tie_breaker_events: list[str] = []
+    tie_breaker_events: list[TieBreakerEvent] = []
 
     result_allocation: dict[str, list[str]] = {
         hid: [] for hid in heir_ids
@@ -228,7 +243,7 @@ def _resolve_ties(
     submission_times: dict[str, datetime],
     creation_times: dict[str, datetime],
     result_allocation: dict[str, list[str]],
-    tie_breaker_events: list[str],
+    tie_breaker_events: list[TieBreakerEvent],
 ) -> None:
     """Assign unallocated assets using deterministic tie-breaking.
 
@@ -248,10 +263,18 @@ def _resolve_ties(
             ordered = _tie_breaker_sort(heir_ids, submission_times, creation_times)
             winner = ordered[0]
             result_allocation[winner].append(aid)
-            tie_breaker_events.append(
+            desc = (
                 f"Asset {aid}: No bids — assigned to {winner} "
                 f"(deterministic fallback ordering)"
             )
+            tie_breaker_events.append(TieBreakerEvent(
+                asset_id=aid,
+                tied_heir_ids=list(heir_ids),
+                points=0,
+                winner_heir_id=winner,
+                reason="no bids — deterministic fallback",
+                event_description=desc,
+            ))
             continue
 
         candidates = [hid for hid, pts in bids if pts == max_pts]
@@ -263,11 +286,28 @@ def _resolve_ties(
         ordered = _tie_breaker_sort(candidates, submission_times, creation_times)
         winner = ordered[0]
         result_allocation[winner].append(aid)
-        tie_breaker_events.append(
+        # Determine the actual tie-breaker reason
+        winner_sub = _to_unix_epoch(submission_times.get(winner))
+        loser_sub = _to_unix_epoch(submission_times.get(candidates[1]))
+        if winner_sub < loser_sub:
+            reason = "earlier submitted_at"
+        elif _to_unix_epoch(creation_times.get(winner)) < _to_unix_epoch(creation_times.get(candidates[1])):
+            reason = "earlier created_at"
+        else:
+            reason = "UUID fallback"
+        desc = (
             f"Asset {aid}: Tied at {max_pts} points among "
             f"{', '.join(candidates)} → {winner} "
-            f"(earlier submitted_at or UUID fallback)"
+            f"({reason})"
         )
+        tie_breaker_events.append(TieBreakerEvent(
+            asset_id=aid,
+            tied_heir_ids=candidates,
+            points=max_pts,
+            winner_heir_id=winner,
+            reason=reason,
+            event_description=desc,
+        ))
 
 
 def _tie_breaker_sort(
@@ -291,7 +331,7 @@ def _starvation_bypass(
     submission_times: dict[str, datetime],
     creation_times: dict[str, datetime],
     existing_allocation: dict[str, list[str]],
-    tie_breaker_events: list[str],
+    tie_breaker_events: list[TieBreakerEvent],
 ) -> SolverResult:
     """Handle the case where there are more heirs than live assets.
 
@@ -303,10 +343,18 @@ def _starvation_bypass(
         if i < len(ordered_heirs):
             winner = ordered_heirs[i]
             existing_allocation[winner].append(aid)
-            tie_breaker_events.append(
+            desc = (
                 f"Asset {aid}: Zero-utility starvation bypass — assigned to "
                 f"{winner} (more heirs than assets: {len(heir_ids)} > {len(asset_ids)})"
             )
+            tie_breaker_events.append(TieBreakerEvent(
+                asset_id=aid,
+                tied_heir_ids=list(ordered_heirs),
+                points=0,
+                winner_heir_id=winner,
+                reason="starvation bypass (more heirs than assets)",
+                event_description=desc,
+            ))
 
     return SolverResult(
         allocation=existing_allocation,

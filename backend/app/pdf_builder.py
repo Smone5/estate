@@ -51,7 +51,7 @@ from .models import User as UserModel
 from .models import Valuation as ValuationModel
 from .notice_log import NoticeLog, NoticeLogEntry
 from .services.storage import StorageDriver, get_storage_driver
-from .solver import SolverResult
+from .solver import SolverResult, TieBreakerEvent
 
 logger = logging.getLogger(__name__)
 
@@ -696,7 +696,14 @@ def build_probate_ledger_pdf(
     elements.append(_build_mnw_callout(solver_result.mnw_product_value))
     elements.append(Spacer(1, 0.4 * inch))
 
-    # --- 6. Admin Intervention Log (if any) ---
+    # --- 6. Deterministic Tie-Breaker Resolution Record (T70) ---
+    if solver_result.tie_breaker_events:
+        elements.append(Paragraph("Deterministic Tie-Breaker Resolution Record", STYLES["heading"]))
+        elements.append(Spacer(1, 0.15 * inch))
+        elements.append(_build_tie_breaker_table(solver_result.tie_breaker_events))
+        elements.append(Spacer(1, 0.4 * inch))
+
+    # --- 7. Admin Intervention Log (if any) ---
     admin_interventions = [
         al for al in audit_logs if al.event_type == "ADMIN_OVERRIDE"
     ]
@@ -1147,6 +1154,44 @@ def _build_valuation_matrix_landscape(
     return table
 
 
+def _build_tie_breaker_table(events: list[TieBreakerEvent]) -> Table:
+    """Build the Deterministic Tie-Breaker Resolution Record table (T70).
+
+    Per Legal Spec §3 Item 6: shows which heirs tied, their points,
+    submission timestamps, and the deterministic outcome.
+    """
+    header = [
+        Paragraph("Asset", STYLES["table_header"]),
+        Paragraph("Tied Heirs", STYLES["table_header"]),
+        Paragraph("Points", STYLES["table_header"]),
+        Paragraph("Winner", STYLES["table_header"]),
+        Paragraph("Rule Applied", STYLES["table_header"]),
+    ]
+    data = [header]
+
+    for event in events:
+        data.append([
+            Paragraph(event.asset_id, STYLES["table_cell"]),
+            Paragraph(", ".join(event.tied_heir_ids), STYLES["table_cell"]),
+            Paragraph(str(event.points), STYLES["table_cell"]),
+            Paragraph(event.winner_heir_id, STYLES["table_cell"]),
+            Paragraph(event.reason, STYLES["table_cell"]),
+        ])
+
+    col_widths = [1.2 * inch, 2.2 * inch, 0.7 * inch, 1.3 * inch, 1.6 * inch]
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(CREAM_BG)),
+        ("LINEBELOW", (0, 0), (-1, 0), 1, colors.HexColor(WARM_GREY)),
+        ("LINEBELOW", (0, 1), (-1, -1), 0.5, colors.HexColor(WARM_GREY)),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("ALIGN", (2, 0), (2, -1), "CENTER"),
+    ]))
+    return table
+
+
 def _build_mathematical_proof(
     solver_result: SolverResult,
     heirs: list[UserModel],
@@ -1184,13 +1229,10 @@ def _build_mathematical_proof(
         elements.append(Spacer(1, 0.15 * inch))
         elements.append(
             Paragraph(
-                "<b>Tie-Breaker Events:</b>",
+                "A full record of deterministic tie-breaker resolutions is provided in "
+                "the Deterministic Tie-Breaker Resolution Record section above.",
                 STYLES["body"],
             )
         )
-        for event in solver_result.tie_breaker_events:
-            elements.append(
-                Paragraph(f"• {event}", STYLES["body"])
-            )
 
     return elements

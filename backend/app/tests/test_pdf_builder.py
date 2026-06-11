@@ -29,7 +29,7 @@ from app.pdf_builder import (
     NumberedCanvas,
     _TRUNCATION_LIMIT,
 )
-from app.solver import SolverResult
+from app.solver import SolverResult, TieBreakerEvent
 
 
 # ---------------------------------------------------------------------------
@@ -131,10 +131,24 @@ def _make_audit_log(session_id, **kwargs) -> AuditLog:
 
 
 def _make_solver_result(allocation=None, mnw=100.0, tie_events=None) -> SolverResult:
+    events: list[TieBreakerEvent] = []
+    if tie_events:
+        for e in tie_events:
+            if isinstance(e, TieBreakerEvent):
+                events.append(e)
+            elif isinstance(e, str):
+                events.append(TieBreakerEvent(
+                    asset_id="asset-1",
+                    tied_heir_ids=["heir-a", "heir-b"],
+                    points=50,
+                    winner_heir_id="heir-a",
+                    reason="earlier submitted_at",
+                    event_description=e,
+                ))
     return SolverResult(
         allocation=allocation or {},
         mnw_product_value=mnw,
-        tie_breaker_events=tie_events or [],
+        tie_breaker_events=events,
     )
 
 
@@ -466,7 +480,7 @@ class TestProbateLedgerPDF:
         assert "Maximum Nash Welfare" in text
 
     def test_tie_breaker_events_in_proof_section(self):
-        """Tie-breaker events are listed in the mathematical proof."""
+        """Tie-breaker events are listed in the tie-breaker resolution table."""
         session = _make_session()
         admin = _make_admin()
         heir = _make_user()
@@ -487,7 +501,8 @@ class TestProbateLedgerPDF:
 
         data = buf.getvalue()
         text = _extract_text_from_pdf(data)
-        assert "Tie-Breaker Events" in text
+        # T70: tie-breaker resolution record table
+        assert "Deterministic Tie-Breaker Resolution Record" in text
 
     def test_notice_log_table_section(self):
         """Proof of Notice Log table renders from NoticeLog data contract."""
