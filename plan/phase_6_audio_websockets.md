@@ -38,23 +38,23 @@ Configure real-time WebSocket communication, client transcription workflows, and
 
 ## Phase Checklist & Tasks
 
-### [ ] Task T22: WebSocket Server Endpoint
+### [x] Task T22: WebSocket Server Endpoint
 * **Objective**: Implement the async `/ws` route in `main.py` compiling LangGraph outputs and streaming audio/text chunk frames, integrated with the shared `app/websocket_manager.py` utility singleton class. Enforce gate locks: the WebSocket router must inspect the user's thread state via the Postgres checkpointer saver, and if the thread is currently suspended at the `HITL_GUARD` node, it must reject incoming client message frames and return an error frame of type `error` with message `"Points submission suspended. Your allocations require review and correction by the Executor."` while keeping the socket open for status broadcast frames. **Note: T21 (Kokoro TTS) is a SOFT dependency — T22 MUST be built and tested with text-only WebSocket frames (audio: null) before T21 is complete. Per the T21 graceful degradation contract, the WebSocket server functions correctly with text-only chat when Kokoro is unavailable.** Depends on T07a, T08, T10, and T38.
 * **Verification**: Connect a mock client and verify frame logs contain synthetic identifiers. Verify that a thread locked at HITL_GUARD rejects chat message frames (frame-level rejection) while keeping the socket connection alive for status broadcasts. Verify that non-chat frames (e.g., status pings) are not blocked by the HITL_GUARD gate. Verify that text-only WebSocket frames (audio: null) are correctly transmitted and rendered when Kokoro TTS is unavailable.
 
-### [ ] Task T23: WebSocket Client Connection Loop
+### [x] Task T23: WebSocket Client Connection Loop
 * **Objective**: Write client-side WebSocket hooks, connection reconnect backoffs, and an offline message queue buffer.
 * **Verification**: Verify that disconnecting network buffers typing, and automatically flushes messages once reconnected. Depends on T18 and T22.
 
-### [ ] Task T24: Web Speech Client Hook
+### [x] Task T24: Web Speech Client Hook
 * **Objective**: Code the SpeechRecognition hook supporting hold/toggle triggers, HTTPS guards, mobile timeout end events, verifying that the incoming audio frame carries the `is_synthetic` metadata, and implementing the **'Enable Audio' speaker button on dashboard mount** that resumes the suspended AudioContext per Frontend Spec §5.5 (hidden after first successful gesture). Depends on T17 and T23.
 * **Verification**: Assert that served over HTTP, the microphone is disabled in the DOM. Verify that synthetic metadata is parsed from WebSocket events. Verify that when AudioContext is suspended on dashboard mount, the 'Enable Audio' button appears and clicking it resumes audio playback. Verify the button is hidden after the first successful gesture.
 
-### [ ] Task T25: Client Audio Playback Queue
+### [x] Task T25: Client Audio Playback Queue
 * **Objective**: Program the frontend sequential audio playlist, base64 Blob decoder, unmount URL revokers, and confirm that the audio player updates its status label ("Synthesized AI Voice") based on the `is_synthetic` flag in the WebSocket chunk frame. **Note: Consolidated SB 942 synthetic voice label ownership — T25 is the sole owner of dynamic label updates; T20 should not duplicate this rendering.** Depends on T18 and T23.
 * **Verification**: Verify chunked audio plays continuously, unmounting cleans up active audio, and the synthetic voice label renders correctly based on the `is_synthetic` flag.
 
-### [ ] Task T45: Admin Voice Recorder Widget
+### [x] Task T45: Admin Voice Recorder Widget
 * **Objective**: Build the `MediaRecorder`-based voice story recording widget on the Admin asset staging card. Implement record/stop/playback/redo controls, a 2-minute max duration timer, and the Save trigger that uploads the audio blob via `POST /api/assets/{asset_id}/audio`. Add HTTPS guard disabling the Record button over insecure HTTP. Depends on T17, T18, and T41.
 * **Verification**: Start a recording and verify the pulsing timer renders. Stop and verify the local Blob URL is generated for playback. Click Re-do and verify the recording resets. Publish and verify the audio blob is POSTed to the backend and `audio_uri` is updated on the asset.
 
