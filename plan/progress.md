@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T60** — Admin Heir Deletion API (next)
+**T57** — FastAPI GDPR Data Portability API (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -47,7 +47,13 @@
 [DONE] T12 — FastAPI Valuation Router with pessimistic locking, draft version control, HITL_GUARD gate — 2026-06-11T08:31
 [DONE] T71 — Proof of Notice Log Data Contract — NoticeLog/NoticeLogEntry/build_notice_log — 2026-06-11T08:34
 [DONE] T15 — Fairpyx MNW Solver & Tie-Breakers with iterative maximum matching, deterministic tie-breaking — 2026-06-11T08:41
-[NEXT] T14 — ReportLab PDF Builders — Keepsake & Probate Ledger with NumberedCanvas, legal disclaimer, dynamic columns
+[DONE] T14 — ReportLab PDF Builders — Keepsake & Probate Ledger with NumberedCanvas, legal disclaimer, dynamic columns, 27 tests — 2026-06-11T08:53
+[DONE] T70 — Tie-Breaker Resolution Record in PDF — structured TieBreakerEvent data contract, deterministic resolution table in probate ledger PDF — 2026-06-11T08:57
+[DONE] T16 — FastAPI Keepsake & Finalization Router — finalize endpoint, solver execution, status transitions, hash chain sealing, PDF download routes — 2026-06-11T09:02
+[DONE] T33 — Active Abstention Waiver PDF Receipt & Email — abstain endpoint, SMTP receipt, fallback support ticket, ReportLab PDF receipt — 2026-06-11T09:08
+[DONE] T44 — Session Override API — HITL endpoint, ADMIN_OVERRIDE audit log, corrected allocations in checkpointer, adjusted heir points budgets — 2026-06-11T09:22
+[DONE] T55 — FastAPI Heir GDPR Erasure Router — DELETE /api/heirs/me, soft anonymization, chat/checkpointer cleanup, audit PII sanitization — 2026-06-11T09:26
+[NEXT] T57 — FastAPI GDPR Data Portability API — GET /api/heirs/me/export, structured JSON
 
 ## Blockers
 None.
