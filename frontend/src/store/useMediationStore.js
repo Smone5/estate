@@ -317,6 +317,47 @@ export const useMediationStore = create((set, get) => ({
     });
   },
 
+  // ── Auto-Balance Points ─────────────────────────────────────────────────
+  autoBalancePoints: () => {
+    const state = get();
+    if (state.isSubmitted) return;
+
+    const entries = Object.entries(state.valuations);
+    // Division-by-zero guard: abort if no points allocated
+    const totalPoints = entries.reduce((sum, [, v]) => sum + (v.points || 0), 0);
+    if (totalPoints === 0) return;
+
+    const newValuations = {};
+    // Proportional scaling to sum to exactly 1000
+    let scaledSum = 0;
+    const scaled = entries.map(([assetId, v]) => {
+      const raw = Math.round((v.points / totalPoints) * 1000);
+      newValuations[assetId] = { ...v, points: raw };
+      scaledSum += raw;
+      return { assetId, raw };
+    });
+
+    // Adjust rounding remainder: add or subtract to highest-point asset
+    const remainder = 1000 - scaledSum;
+    if (remainder !== 0) {
+      // Find the asset with the most points to absorb the remainder
+      let maxAssetId = entries[0][0];
+      let maxPoints = 0;
+      for (const [assetId, v] of entries) {
+        if ((v.points || 0) > maxPoints) {
+          maxPoints = v.points || 0;
+          maxAssetId = assetId;
+        }
+      }
+      newValuations[maxAssetId] = {
+        ...newValuations[maxAssetId],
+        points: (newValuations[maxAssetId].points || 0) + remainder,
+      };
+    }
+
+    set({ valuations: newValuations, unallocatedPoints: 0 });
+  },
+
   // ── Keepsake Actions ─────────────────────────────────────────────────────
   emailKeepsake: async (heirId = null) => {
     const state = get();
