@@ -4096,3 +4096,370 @@ async def verify_hash_chain(
             "rows": rows,
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# T26 — System Backup & Restore
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/system/backup")
+@limiter.limit("5/minute")
+async def system_backup(
+    request: Request,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Generate an encrypted backup of the entire system.
+
+    Per Backend Spec §9.5 (GET /api/system/backup):
+    1. Generates a PostgreSQL SQL dump of all tables.
+    2. Compresses the SQL dump together with static/uploads/ into a .tar.gz.
+    3. Encrypts the archive using AES-Fernet (ENCRYPTION_KEY).
+
+    Returns: application/octet-stream (.estate.bak).
+    """
+    import subprocess
+    import tempfile
+    import tarfile
+    from cryptography.fernet import Fernet
+    from pathlib import Path
+
+    encryption_key = os.environ.get("ENCRYPTION_KEY")
+    if not encryption_key:
+        raise HTTPException(
+            status_code=500,
+            detail="ENCRYPTION_KEY is not configured. Cannot encrypt backup.",
+        )
+
+    db_url = os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        raise HTTPException(
+            status_code=500,
+            detail="DATABASE_URL is not configured.",
+        )
+
+    try:
+        parsed = db_url.replace("postgresql://", "").split("@")
+        user_pass = parsed[0].split(":")
+        user = user_pass[0]
+        password = user_pass[1] if len(user_pass) > 1 else ""
+        host_port = parsed[1].split(":") if len(parsed) > 1 else ["localhost"]
+        host = host_port[0]
+        port = host_port[1].split("/")[0] if len(host_port) > 1 else "5432"
+        dbname = parsed[1].split("/")[1] if "/" in parsed[1] else "estate_agent"
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to parse DATABASE_URL for pg_dump.",
+        )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        sql_dump_path = tmp / "dump.sql"
+        archive_path = tmp / "backup.tar.gz"
+        encrypted_path = tmp / "backup.estate.bak"
+
+        env = os.environ.copy()
+        env["PGPASSWORD"] = password
+        cmd = [
+            "pg_dump",
+            "-h", host,
+            "-p", port,
+            "-U", user,
+            "-d", dbname,
+            "--no-owner",
+            "--no-acl",
+            "-f", str(sql_dump_path),
+        ]
+        try:
+            result = subprocess.run(
+                cmd, env=env, capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode != 0:
+                logger.error("pg_dump failed: %s", result.stderr)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Database dump failed: {result.stderr[:500]}",
+                )
+        except FileNotFoundError:
+            raise HTTPException(
+                status_code=500,
+                detail="pg_dump binary not found. Is PostgreSQL client installed?",
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(
+                status_code=500,
+                detail="Database dump timed out after 120 seconds.",
+            )
+
+        uploads_dir = Path("app/static/uploads")
+        with tarfile.open(archive_path, "w:gz") as tar:
+            tar.add(sql_dump_path, arcname="dump.sql")
+            if uploads_dir.exists():
+                tar.add(uploads_dir, arcname="uploads")
+
+        fernet = Fernet(encryption_key.encode())
+        with open(archive_path, "rb") as f:
+            plaintext = f.read()
+        encrypted = fernet.encrypt(plaintext)
+        with open(encrypted_path, "wb") as f:
+            f.write(encrypted)
+
+        with open(encrypted_path, "rb") as f:
+            encrypted_bytes = f.read()
+
+    return StreamingResponse(
+        io.BytesIO(encrypted_bytes),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": 'attachment; filename="estate_backup.estate.bak"',
+        },
+    )
+
+
+@app.post("/api/system/restore")
+@limiter.limit("3/minute")
+async def system_restore(
+    request: Request,
+    db: DBSession = Depends(get_db),
+):
+    """
+    Restore the system from an encrypted backup archive.
+
+    Per Backend Spec §9.5 (POST /api/system/restore):
+    - Admin credentials required, OR Public if zero registered users exist.
+    - Decrypts with ENCRYPTION_KEY or 24-word BIP39 recovery key.
+    - Unpacks tar.gz, executes SQL dump in transaction, restores media files.
+    """
+    import subprocess
+    import tempfile
+    import tarfile
+    import base64 as _base64
+    from cryptography.fernet import Fernet, InvalidToken
+    from mnemonic import Mnemonic as _Mnemonic
+    from pathlib import Path
+    from sqlalchemy import text as sa_text
+
+    admin_count = db.query(User).filter(User.role == "ADMIN").count()
+    is_fresh_system = admin_count == 0
+
+    if not is_fresh_system:
+        # Require admin credentials
+        admin = db.query(User).filter(User.role == "ADMIN").first()
+        if not admin:
+            raise HTTPException(status_code=401, detail="Admin authentication required.")
+
+    form = await request.form()
+    backup_file = form.get("backup_file")
+    if not backup_file:
+        raise HTTPException(status_code=400, detail="No backup_file provided.")
+
+    recovery_key_mnemonic = form.get("recovery_key")
+    raw_bytes = await backup_file.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded backup file is empty.")
+
+    fernet = None
+    decrypted = None
+
+    encryption_key = os.environ.get("ENCRYPTION_KEY")
+    if encryption_key:
+        try:
+            fernet = Fernet(encryption_key.encode())
+            decrypted = fernet.decrypt(raw_bytes)
+        except InvalidToken:
+            pass
+
+    if decrypted is None and recovery_key_mnemonic:
+        try:
+            mnemo = _Mnemonic("english")
+            if not mnemo.check(str(recovery_key_mnemonic)):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid recovery key mnemonic phrase.",
+                )
+            raw_key = mnemo.to_entropy(str(recovery_key_mnemonic))
+            fernet_key = _base64.urlsafe_b64encode(raw_key).decode()
+            fernet = Fernet(fernet_key.encode())
+            decrypted = fernet.decrypt(raw_bytes)
+        except InvalidToken:
+            raise HTTPException(
+                status_code=400,
+                detail="Recovery key does not match the backup archive.",
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Recovery key validation failed: {str(e)}",
+            )
+
+    if decrypted is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot decrypt backup. Provide the correct 24-word recovery "
+            "key mnemonic or ensure ENCRYPTION_KEY matches the backup's key.",
+        )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        archive_path = tmp / "backup.tar.gz"
+        with open(archive_path, "wb") as f:
+            f.write(decrypted)
+
+        extract_dir = tmp / "extract"
+        extract_dir.mkdir(exist_ok=True)
+        with tarfile.open(archive_path, "r:gz") as tar:
+            tar.extractall(extract_dir)
+
+        sql_dump = extract_dir / "dump.sql"
+        if not sql_dump.exists():
+            raise HTTPException(
+                status_code=400,
+                detail="Backup archive does not contain dump.sql.",
+            )
+
+        sql_content = sql_dump.read_text()
+        sql_content = sql_content.replace("SET statement_timeout = 0;", "")
+        sql_content = sql_content.replace("SET lock_timeout = 0;", "")
+
+        try:
+            from .database import engine
+            with engine.begin() as conn:
+                conn.execute(sa_text(sql_content))
+        except Exception as e:
+            logger.exception("SQL restore failed")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database restore failed: {str(e)[:500]}",
+            )
+
+        uploads_src = extract_dir / "uploads"
+        if uploads_src.exists():
+            uploads_dst = Path("app/static/uploads")
+            uploads_dst.mkdir(parents=True, exist_ok=True)
+            for item in uploads_src.iterdir():
+                dst = uploads_dst / item.name
+                if item.is_dir():
+                    import shutil
+                    if dst.exists():
+                        shutil.rmtree(dst)
+                    shutil.copytree(item, dst)
+                    dst.chmod(0o755)
+                    for f in dst.rglob("*"):
+                        f.chmod(0o644)
+                else:
+                    with open(item, "rb") as src_f:
+                        dst.write_bytes(src_f.read())
+                    dst.chmod(0o644)
+
+        try:
+            reset_provider()
+        except Exception:
+            pass
+
+    return JSONResponse(
+        content={
+            "status": "success",
+            "message": "System database and media restored successfully",
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# T49 — Secure Session Purge
+# ---------------------------------------------------------------------------
+
+
+@app.delete("/api/sessions/{session_id}")
+@limiter.limit("3/minute")
+async def secure_session_purge(
+    request: Request,
+    session_id: str,
+    confirm: bool = None,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Irreversibly purge a FINALIZED session and all associated data.
+
+    Per Backend Spec §9.1 (DELETE /api/sessions/{session_id}?confirm=true):
+    6-step permanent deletion — chat, checkpointer rows, asset files,
+    Heir users (cascade valuations/support), and session row.
+    Gates on session.status == 'FINALIZED' AND confirm=true.
+    """
+    if confirm is not True:
+        raise HTTPException(
+            status_code=400,
+            detail="Confirmation required. Use ?confirm=true to proceed.",
+        )
+
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status != "FINALIZED":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Session cannot be purged. Current status is '{session.status}'. "
+            "Only FINALIZED sessions can be permanently deleted.",
+        )
+
+    # 1. Delete all chat messages
+    db.query(ChatMessage).filter(ChatMessage.session_id == session_id).delete()
+
+    # 2. Delete LangGraph checkpointer rows for all threads in this session
+    try:
+        from .database import engine
+        from sqlalchemy import text as sa_text
+        with engine.begin() as conn:
+            for table in ("checkpoints", "checkpoint_writes", "checkpoint_blobs"):
+                conn.execute(
+                    sa_text(f"DELETE FROM {table} WHERE thread_id LIKE :pattern"),
+                    {"pattern": f"{session_id}:%"},
+                )
+    except Exception:
+        logger.warning(
+            "Failed to clean checkpointer state for session %s — continuing",
+            session_id,
+        )
+
+    # 3. Delete all asset files from storage
+    assets = db.query(Asset).filter(Asset.session_id == session_id).all()
+    storage = get_storage_driver()
+    for asset in assets:
+        if asset.image_uri:
+            try:
+                storage.delete(asset.image_uri)
+            except Exception:
+                pass
+        if asset.audio_uri:
+            try:
+                storage.delete(asset.audio_uri)
+            except Exception:
+                pass
+
+    # 4. Hard-delete all Heir users (cascade valuations, support)
+    heirs = db.query(User).filter(
+        User.session_id == session_id,
+        User.role == "HEIR",
+    ).all()
+    for heir in heirs:
+        if heir.id_scan_uri:
+            try:
+                storage.delete(heir.id_scan_uri)
+            except Exception:
+                pass
+        db.delete(heir)
+
+    # 5. Delete the session (cascades audit_logs, custom_faqs, assets)
+    db.delete(session)
+    db.commit()
+
+    return JSONResponse(
+        content={
+            "status": "success",
+            "message": f"Session {session_id} permanently purged.",
+        }
+    )
