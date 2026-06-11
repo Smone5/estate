@@ -29,7 +29,7 @@ from .auth import (
     get_current_user,
     get_current_admin,
 )
-from .models import User, Session as SessionModel, Asset, Valuation, SupportRequest, CustomFAQ
+from .models import User, Session as SessionModel, Asset, Valuation, AuditLog, SupportRequest, CustomFAQ
 from .websocket_manager import manager
 from .services.storage import get_storage_driver, preprocess_image
 from .services.llm_provider import get_provider, reset_provider
@@ -40,6 +40,37 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _redact_pii_in_place(obj, heir_id_str: str, pii_values: list[str]):
+    """Recursively walk a dict/list and replace PII values with 'Anonymized'.
+
+    Matches the heir_id_str as well as any known PII string values
+    (legal names, email, phone, address) inside the snapshot structure.
+    """
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if isinstance(value, str):
+                if value == heir_id_str:
+                    obj[key] = "Anonymized"
+                elif any(pii and pii == value for pii in pii_values):
+                    obj[key] = "Anonymized"
+                elif isinstance(value, str):
+                    # Check for substring matches of PII within longer strings
+                    for pii in pii_values:
+                        if pii and pii in value and len(pii) > 3:
+                            obj[key] = value.replace(pii, "Anonymized")
+            elif isinstance(value, (dict, list)):
+                _redact_pii_in_place(value, heir_id_str, pii_values)
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, (dict, list)):
+                _redact_pii_in_place(item, heir_id_str, pii_values)
 
 
 # ---------------------------------------------------------------------------
@@ -1293,6 +1324,142 @@ async def send_invite(
         content={
             "status": "success",
             "message": "Invitation email dispatched",
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# T60 — Admin Heir Deletion API
+# ---------------------------------------------------------------------------
+
+
+@app.delete("/api/sessions/{session_id}/heirs/{heir_id}")
+@limiter.limit("30/minute")
+async def delete_heir(
+    request: Request,
+    session_id: str,
+    heir_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Admin deletion of an Heir from a session.
+
+    Per Backend Spec §9.1 (DELETE /api/sessions/{session_id}/heirs/{heir_id}):
+    1. Unlink pre-allocated assets (reset allocated_to_id, status -> LIVE).
+    2. Delete encrypted ID scan file from disk storage if present.
+    3. Erase all LangGraph checkpointer state records for this Heir's thread.
+    4. Cascade-delete the user row (chat, support, valuations, audit via ORM).
+    5. Anonymize audit_logs state_snapshot for this Heir to prevent PII leakage.
+
+    Returns 400 if session status is LOCKED or FINALIZED.
+    """
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status in ("LOCKED", "FINALIZED"):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete heirs from a locked or finalized session.",
+        )
+
+    heir = (
+        db.query(User)
+        .filter(User.id == heir_id, User.session_id == session_id, User.role == "HEIR")
+        .first()
+    )
+    if not heir:
+        raise HTTPException(status_code=404, detail="Heir not found in this session")
+
+    # 1. Unlink pre-allocated assets
+    pre_allocated = (
+        db.query(Asset)
+        .filter(
+            Asset.session_id == session_id,
+            Asset.allocated_to_id == heir_id,
+            Asset.status == "PRE_ALLOCATED",
+        )
+        .all()
+    )
+    for asset in pre_allocated:
+        asset.allocated_to_id = None
+        asset.status = "LIVE"
+
+    # 2. Delete encrypted ID scan file from storage if present
+    if heir.id_scan_uri:
+        try:
+            storage = get_storage_driver()
+            storage.delete(heir.id_scan_uri)
+        except Exception:
+            logger.warning(
+                "Failed to delete ID scan file %s for heir %s",
+                heir.id_scan_uri,
+                heir_id,
+            )
+
+    # 3. Erase LangGraph checkpointer state for this Heir's thread
+    thread_id = f"{session_id}:{heir_id}"
+    try:
+        from .database import engine
+        from sqlalchemy import text as sa_text
+        with engine.begin() as conn:
+            for table in ("checkpoints", "checkpoint_writes", "checkpoint_blobs"):
+                conn.execute(
+                    sa_text(f"DELETE FROM {table} WHERE thread_id = :tid"),
+                    {"tid": thread_id},
+                )
+    except Exception:
+        logger.warning(
+            "Failed to clean checkpointer state for thread %s — continuing",
+            thread_id,
+        )
+
+    # 4. Collect PII for audit log anonymization before cascade delete
+    heir_id_str = str(heir.id)
+    pii_values = [
+        heir.legal_first_name,
+        heir.legal_middle_name,
+        heir.legal_last_name,
+        heir.email,
+        heir.phone,
+        heir.physical_address,
+    ]
+    pii_values = [v for v in pii_values if v]
+
+    # 5. Cascade-delete the heir — this removes the user row and cascades
+    #    to chat_messages, support_requests, valuations via ORM relationships
+    db.delete(heir)
+    db.flush()
+
+    # 6. Anonymize audit_logs state_snapshot for this Heir
+    audit_logs = (
+        db.query(AuditLog)
+        .filter(AuditLog.session_id == session_id)
+        .all()
+    )
+    for log_entry in audit_logs:
+        try:
+            snapshot = log_entry.state_snapshot
+            if not isinstance(snapshot, (dict, list)):
+                continue
+            _redact_pii_in_place(snapshot, heir_id_str, pii_values)
+            # Mark the column as modified so SQLAlchemy writes the updated value
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(log_entry, "state_snapshot")
+        except Exception:
+            logger.warning(
+                "Failed to anonymize audit log %d — continuing",
+                log_entry.id,
+            )
+
+    db.commit()
+
+    return JSONResponse(
+        content={
+            "status": "success",
+            "message": "Heir removed, associated ID scan files deleted, "
+            "checkpointer states cleared, and data cascade-deleted",
         }
     )
 
