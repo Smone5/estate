@@ -4,6 +4,7 @@ import OptOutPage from './routes/OptOut'
 import DashboardGuard from './components/DashboardGuard'
 import IDScanner from './components/IDScanner'
 import SemanticSearch from './components/SemanticSearch'
+import AdminDashboard from './routes/AdminDashboard'
 
 const PUBLIC_PATHS = ['/invite', '/opt-out']
 
@@ -12,19 +13,6 @@ function DashboardPlaceholder() {
     <DashboardGuard variant="heir">
       <IDScanner />
       <SemanticSearch />
-    </DashboardGuard>
-  )
-}
-
-function AdminPlaceholder() {
-  return (
-    <DashboardGuard variant="admin">
-      <div className="flex items-center justify-center" style={{ flex: 1 }}>
-        <div className="archival-card" style={{ maxWidth: 520, width: '100%' }}>
-          <h2 style={{ marginBottom: 'var(--space-lg)' }}>Admin Console</h2>
-          <p className="text-muted">Admin management panel loading...</p>
-        </div>
-      </div>
     </DashboardGuard>
   )
 }
@@ -56,7 +44,7 @@ function App() {
         <Routes>
           <Route path="/invite/:token" element={<InvitePage />} />
           <Route path="/dashboard" element={<DashboardPlaceholder />} />
-          <Route path="/admin" element={<AdminPlaceholder />} />
+          <Route path="/admin" element={<AdminDashboard />} />
           <Route path="/opt-out" element={<OptOutPage />} />
           <Route path="*" element={<Navigate to="/invite/placeholder" replace />} />
         </Routes>
