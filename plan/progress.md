@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T35** — Executor Force Allocation Console UI (next)
+**T47** — FAQ/Help UI Components (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -65,7 +65,8 @@
 [DONE] T73_UI — Legal Disclaimer Footer — LegalFooter component hiding on public paths, visible on dashboard/admin — 2026-06-11T10:15
 [DONE] T32 — Government ID Scanner & File Drop UI — HTML5 camera, card-shaped overlay, drag-and-drop, 10MB limit — 2026-06-11T10:17
 [DONE] T46 — Semantic Search UI — gallery search bar, filter panel, sorting controls, confidence badge, zero-match fallback — 2026-06-11T14:27
-[NEXT] T35 — Executor Force Allocation Console UI — view deadlocked items, select beneficiaries, override reasons, POST override
+[DONE] T35 — Executor Force Allocation Console UI — view deadlocked items, select beneficiaries, override reasons, POST override — 2026-06-11T14:38
+[NEXT] T47 — FAQ/Help UI Components — Heir FAQ drawer, Admin Help Portal, scroll tutorial, inline FAQ editor
 
 ## Blockers
 None.

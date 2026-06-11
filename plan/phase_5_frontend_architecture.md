@@ -92,7 +92,7 @@ Structure the React Vite application shell, Zustand global stores, custom client
 * **Objective**: Build the HTML5 rear-camera overlay guide and desktop drag-and-drop ID scan file upload UI cards on the frontend dashboard. Ensure it renders only under `'PROFILE_HOLD'` status, and not on the public onboarding page. Depends on `T31` for ID uploads.
 * **Verification**: Mount the uploader on `/dashboard` with status `'PROFILE_HOLD'`, and verify that the HTML5 camera scanner opens and uploader drag-and-drop actions trigger file transmission.
 
-### [ ] Task T35: Executor Force Allocation Console UI
+### [x] Task T35: Executor Force Allocation Console UI
 * **Objective**: Construct the Executor dashboard "Force Allocation Console" UI where the Executor can view deadlocked items, select winning beneficiaries, write fiduciary override reasons, and submit them via `POST /api/sessions/{session_id}/override`. Depends on `T44` for the override endpoint.
 * **Verification**: Verify that under session deadlock status, the console displays contested assets and enables manual allocations.
 
