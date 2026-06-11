@@ -83,14 +83,68 @@ def get_db() -> DBSession:
 # App lifecycle
 # ---------------------------------------------------------------------------
 
+import asyncio
+
+
+async def _invite_expiration_task():
+    """Periodic background task to expire stale invite tokens.
+
+    Runs every 15 minutes. Checks for users where:
+      - role == 'HEIR'
+      - invite_token_used == False
+      - invite_token_expires_at < now()
+    Transitions those users to 'EXPIRED_NON_PARTICIPATING'.
+    """
+    while True:
+        try:
+            await asyncio.sleep(900)  # 15 minutes
+            db = SessionLocal()
+            try:
+                now_utc = datetime.now(timezone.utc)
+                expired = (
+                    db.query(User)
+                    .filter(
+                        User.role == "HEIR",
+                        User.invite_token_used == False,
+                        User.invite_token_expires_at.isnot(None),
+                        User.invite_token_expires_at < now_utc,
+                        User.status != "EXPIRED_NON_PARTICIPATING",
+                    )
+                    .all()
+                )
+                for user in expired:
+                    user.status = "EXPIRED_NON_PARTICIPATING"
+                if expired:
+                    db.commit()
+                    logger.info(
+                        "Invite scheduler: expired %d heir(s)",
+                        len(expired),
+                    )
+            except Exception:
+                db.rollback()
+                logger.exception("Invite scheduler error")
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            logger.info("Invite scheduler cancelled")
+            break
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Perform startup database initialization with retry loop."""
     logger.info("Starting Estate Steward backend...")
     init_db()
+    task = asyncio.create_task(_invite_expiration_task())
     logger.info("Startup complete.")
     yield
-    logger.info("Shutting down.")
+    logger.info("Shutting down invite scheduler...")
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    logger.info("Shut down.")
 
 
 app = FastAPI(

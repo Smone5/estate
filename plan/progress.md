@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T64** — Asset Pre-Allocation API (next)
+**T65** — Background Invite Expiration Scheduler (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -39,7 +39,8 @@
 [DONE] T41 — Admin Audio Story Upload & Delete API — 2026-06-11T08:02
 [DONE] T42 — Support Request & Help CRUD API with WebSocket alerts — 2026-06-11T08:06
 [DONE] T43 — Custom FAQ CRUD API with WebSocket mutation broadcasts — 2026-06-11T08:08
-[NEXT] T64 — Asset Pre-Allocation API — pre-allocate asset, delete orphaned valuations, session-status gate
+[DONE] T64 — Asset Pre-Allocation API with orphaned valuation cleanup — 2026-06-11T08:10
+[NEXT] T65 — Background Invite Expiration Scheduler — periodic task for expired token transitions
 
 ## Blockers
 None.
