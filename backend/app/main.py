@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .database import init_db
+from .rate_limiter import init_rate_limiting
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,6 +36,8 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+init_rate_limiting(app)
+
 
 
 @app.get("/health")
