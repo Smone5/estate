@@ -126,11 +126,11 @@ DB_ECHO=false       # Toggles database query prints (True | False)
     ```bash
     mkdir -p backend/app/models
     # Download the lightweight 82M ONNX model weights
-    curl -L -o backend/app/models/kokoro-v0.19.onnx \
-      https://github.com/theonlygust/kokoro-onnx/releases/download/v0.2.0/kokoro-v0.19.onnx
-    # Download the companion voice JSON maps
-    curl -L -o backend/app/models/voices.json \
-      https://github.com/theonlygust/kokoro-onnx/releases/download/v0.2.0/voices.json
+    curl -L -o backend/app/models/kokoro-v1.0.onnx \
+      https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
+    # Download the companion voice binary maps
+    curl -L -o backend/app/models/voices-v1.0.bin \
+      https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
     ```
 2.  **Verify Ollama Models**:
     Ensure the following models are pulled and ready on the local host:

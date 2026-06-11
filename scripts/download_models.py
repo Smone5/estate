@@ -32,13 +32,13 @@ OLLAMA_MODELS = {
 }
 
 KOKORO_FILES = {
-    "kokoro-v0.19.onnx": {
-        "url": "https://github.com/theonlygust/kokoro-onnx/releases/download/v0.2.0/kokoro-v0.19.onnx",
+    "kokoro-v1.0.onnx": {
+        "url": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx",
         "size_gb": 2.5,
     },
-    "voices.json": {
-        "url": "https://github.com/theonlygust/kokoro-onnx/releases/download/v0.2.0/voices.json",
-        "size_gb": 0.002,
+    "voices-v1.0.bin": {
+        "url": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin",
+        "size_gb": 0.1,
     },
 }
 
