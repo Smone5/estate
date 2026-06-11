@@ -20,10 +20,13 @@ services:
       - SMTP_USER=${SMTP_USER}
       - SMTP_PASSWORD=${SMTP_PASSWORD}
       - SMTP_FROM=${SMTP_FROM}
+      - KOKORO_MODEL_PATH=/app/models/kokoro-v1.0.onnx
+      - KOKORO_VOICES_PATH=/app/models/voices.json
     ports:
       - "8000:8000"
     volumes:
       - uploads_data:/app/static/uploads
+      - ./backend/app/models:/app/models
     depends_on:
       - db
     extra_hosts:

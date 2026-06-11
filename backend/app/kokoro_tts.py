@@ -8,7 +8,7 @@ returns None for synthesize() calls (text-only chat proceeds).
 
 Configurable via environment variables:
   KOKORO_MODEL_PATH  (default: app/models/kokoro-v1.0.onnx)
-  KOKORO_VOICES_PATH (default: app/models/voices-v1.0.bin)
+  KOKORO_VOICES_PATH (default: app/models/voices.json)
 """
 
 import asyncio
@@ -51,7 +51,7 @@ DEFAULT_MODEL_PATH = os.environ.get(
 )
 DEFAULT_VOICES_PATH = os.environ.get(
     "KOKORO_VOICES_PATH",
-    str(_MODELS_DIR / "voices-v1.0.bin"),
+    str(_MODELS_DIR / "voices.json"),
 )
 
 # ONNX session options — restrict CPU threads per Backend Spec §7.1
@@ -102,11 +102,21 @@ class KokoroTTS:
             return
 
         try:
-            self._engine = _Kokoro(
-                model_path=self._model_path,
-                voices_path=self._voices_path,
-                **_SESS_OPTIONS,
-            )
+            if _ort is not None and "session_options" in _SESS_OPTIONS:
+                session = _ort.InferenceSession(
+                    self._model_path,
+                    sess_options=_SESS_OPTIONS["session_options"],
+                    providers=["CPUExecutionProvider"],
+                )
+                self._engine = _Kokoro.from_session(
+                    session=session,
+                    voices_path=self._voices_path,
+                )
+            else:
+                self._engine = _Kokoro(
+                    model_path=self._model_path,
+                    voices_path=self._voices_path,
+                )
             self._available = True
             logger.info(
                 "KokoroTTS: Engine initialized successfully. "
