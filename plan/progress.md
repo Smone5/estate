@@ -63,7 +63,8 @@
 [DONE] T19 — Client Routing & Onboarding views — legal profile confirmation checkbox, executor ack gate, E-SIGN, consent cards — 2026-06-11T10:13
 [DONE] T20 — Heir & Admin Dashboard View Guards — DashboardGuard component, SB 1001 banners, Sum Validation Hold, LegalFooter — 2026-06-11T10:15
 [DONE] T73_UI — Legal Disclaimer Footer — LegalFooter component hiding on public paths, visible on dashboard/admin — 2026-06-11T10:15
-[NEXT] T32 — Government ID Scanner & File Drop UI — HTML5 camera, drag-and-drop upload under PROFILE_HOLD
+[DONE] T32 — Government ID Scanner & File Drop UI — HTML5 camera, card-shaped overlay, drag-and-drop, 10MB limit — 2026-06-11T10:17
+[NEXT] T46 — Semantic Search UI — gallery search bar, filter panel, sorting, confidence pills, zero-match fallback
 
 ## Blockers
 None.
