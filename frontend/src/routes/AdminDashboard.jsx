@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useMediationStore } from '../store/useMediationStore';
 import DashboardGuard from '../components/DashboardGuard';
 import ForceAllocationConsole from '../components/ForceAllocationConsole';
+import AdminInventoryDashboard from '../components/AdminInventoryDashboard';
 import AdminHelpPortal from '../components/AdminHelpPortal';
 import AdminAnnouncementConsole from '../components/AdminAnnouncementConsole';
 
@@ -176,19 +177,25 @@ export default function AdminDashboard() {
             <div className="archival-card text-center">
               <p className="text-muted">Syncing session status...</p>
             </div>
-          ) : isDeadlocked ? (
-            <ForceAllocationConsole sessionId={sessionId} onOverrideComplete={handleOverrideComplete} />
           ) : (
-            <div className="archival-card text-center" style={{ padding: 'var(--space-xl)' }}>
-              <h3 style={{ marginBottom: 'var(--space-md)' }}>Mediation Status: Clear</h3>
-              <p className="text-muted" style={{ maxWidth: 480, margin: '0 auto' }}>
-                There are no active deadlocks or allocation conflicts requiring manual force allocation overrides.
-                Heir progress and final keepsake divisions can be monitored via the Session Control panel.
-              </p>
-            </div>
-          )}
+            <>
+              <AdminInventoryDashboard sessionId={sessionId} />
 
-          {sessionId && <AdminAnnouncementConsole sessionId={sessionId} />}
+              {isDeadlocked ? (
+                <ForceAllocationConsole sessionId={sessionId} onOverrideComplete={handleOverrideComplete} />
+              ) : sessionStatus !== 'SETUP' ? (
+                <div className="archival-card text-center" style={{ padding: 'var(--space-xl)' }}>
+                  <h3 style={{ marginBottom: 'var(--space-md)' }}>Mediation Status: Clear</h3>
+                  <p className="text-muted" style={{ maxWidth: 480, margin: '0 auto' }}>
+                    There are no active deadlocks or allocation conflicts requiring manual force allocation overrides.
+                    Heir progress and final keepsake divisions can be monitored via the Session Control panel.
+                  </p>
+                </div>
+              ) : null}
+
+              {sessionId && <AdminAnnouncementConsole sessionId={sessionId} />}
+            </>
+          )}
         </div>
       </div>
       <AdminHelpPortal
