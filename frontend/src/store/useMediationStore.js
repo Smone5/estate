@@ -25,6 +25,8 @@ export const useMediationStore = create((set, get) => ({
   networkStatus: 'Disconnected', // 'Connected' | 'Reconnecting...' | 'Disconnected'
   openSupportRequests: [],
   transientMessageQueue: [],
+  announcement: null,
+  announcement_updated_at: null,
 
   // ── Invite Actions ───────────────────────────────────────────────────────
   checkInviteStatus: async (token) => {
@@ -58,6 +60,8 @@ export const useMediationStore = create((set, get) => ({
     isAuthenticated: sessionData.isAuthenticated ?? false,
     draft_version: sessionData.draft_version || 0,
     sessionStatus: sessionData.status,
+    announcement: sessionData.announcement ?? null,
+    announcement_updated_at: sessionData.announcement_updated_at ?? null,
   }),
 
   // ── Valuation Actions ────────────────────────────────────────────────────
@@ -236,6 +240,21 @@ export const useMediationStore = create((set, get) => ({
       isSubmitted: data.is_submitted || false,
       is_hitl_suspended: data.is_hitl_suspended || false,
       draft_version: data.draft_version || 0,
+    });
+  },
+
+  loadSessionDetails: async () => {
+    const state = get();
+    if (!state.session_id) return;
+    const res = await fetch(`${API_BASE}/api/sessions/${state.session_id}`);
+    if (!res.ok) throw new Error(`Load session details failed: ${res.status}`);
+    const data = await res.json();
+    set({
+      announcement: data.announcement || null,
+      announcement_updated_at: data.announcement_updated_at || null,
+      isPaused: data.is_paused || false,
+      isDeadlocked: data.is_deadlocked || false,
+      sessionStatus: data.status,
     });
   },
 

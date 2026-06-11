@@ -701,6 +701,57 @@ class TestInviteLoginEndpoint:
 
 
 # ---------------------------------------------------------------------------
+# Invite status endpoint
+# ---------------------------------------------------------------------------
+
+
+class TestInviteStatusEndpoint:
+    def _setup_heir_mock(self, mock_db_session, heir):
+        mock_query = mock_db_session.query.return_value
+        mock_filter = mock_query.filter.return_value
+        mock_filter.first.return_value = heir
+
+    def test_invite_status_new(self, client, mock_db_session, test_env):
+        heir = _make_heir_user(invite_token_used=False)
+        self._setup_heir_mock(mock_db_session, heir)
+
+        resp = client.get(f"/api/invite/status/{heir.invite_token}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "NEW"
+        assert data["used"] is False
+        assert data["username"] == heir.username
+
+    def test_invite_status_used(self, client, mock_db_session, test_env):
+        heir = _make_heir_user(invite_token_used=True)
+        self._setup_heir_mock(mock_db_session, heir)
+
+        resp = client.get(f"/api/invite/status/{heir.invite_token}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "USED"
+        assert data["used"] is True
+
+    def test_invite_status_expired(self, client, mock_db_session, test_env):
+        heir = _make_heir_user(invite_token_used=False)
+        heir.invite_token_expires_at = datetime.now(timezone.utc) - timedelta(days=1)
+        self._setup_heir_mock(mock_db_session, heir)
+
+        resp = client.get(f"/api/invite/status/{heir.invite_token}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "EXPIRED"
+
+    def test_invite_status_not_found(self, client, mock_db_session, test_env):
+        mock_query = mock_db_session.query.return_value
+        mock_filter = mock_query.filter.return_value
+        mock_filter.first.return_value = None
+
+        resp = client.get(f"/api/invite/status/{uuid.uuid4()}")
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # Health endpoint (regression)
 # ---------------------------------------------------------------------------
 

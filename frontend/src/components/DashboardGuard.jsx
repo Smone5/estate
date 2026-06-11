@@ -1,4 +1,7 @@
+import React, { useEffect } from 'react';
 import { useMediationStore } from '../store/useMediationStore';
+import AnnouncementAlertBanner from './AnnouncementAlertBanner';
+import AnnouncementLoginModal from './AnnouncementLoginModal';
 
 /**
  * Renders the appropriate status banner and optionally disables controls
@@ -16,6 +19,15 @@ export default function DashboardGuard({ variant = 'heir', children }) {
   const is_hitl_suspended = useMediationStore((s) => s.is_hitl_suspended);
   const isSubmitted = useMediationStore((s) => s.isSubmitted);
   const isAuthenticated = useMediationStore((s) => s.isAuthenticated);
+
+  const sessionId = useMediationStore((s) => s.session_id);
+  const loadSessionDetails = useMediationStore((s) => s.loadSessionDetails);
+
+  useEffect(() => {
+    if (isAuthenticated && sessionId && variant === 'heir') {
+      loadSessionDetails().catch((err) => console.error('Failed to load session details', err));
+    }
+  }, [isAuthenticated, sessionId, variant, loadSessionDetails]);
 
   // Redirect is handled by the router, but double-check here
   if (!isAuthenticated && variant !== 'placeholder') {
@@ -115,6 +127,8 @@ export default function DashboardGuard({ variant = 'heir', children }) {
 
   return (
     <div className="app-main" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+      {variant === 'heir' && <AnnouncementAlertBanner />}
+      {variant === 'heir' && <AnnouncementLoginModal />}
       {/* SB 1001 AI Mediator bot disclosure — permanent, always visible */}
       <div className="ai-mediator-banner banner banner-info" style={{ borderRadius: 0, borderTop: '1px solid var(--color-border)', borderBottom: '1px solid var(--color-border)' }}>
         <strong>AI Mediator Agent</strong>

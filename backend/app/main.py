@@ -96,6 +96,17 @@ class InviteVerifyRequest(BaseModel):
     date_of_birth: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
 
 
+class HeirProfileUpdate(BaseModel):
+    legal_first_name: str = Field(..., min_length=1, max_length=50)
+    legal_middle_name: str | None = None
+    legal_last_name: str = Field(..., min_length=1, max_length=100)
+    relationship_to_decedent: str = Field(..., min_length=1, max_length=50)
+    date_of_birth: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+    email: str | None = Field(None, max_length=255)
+    phone: str | None = Field(None, max_length=50)
+    physical_address: str | None = Field(None, max_length=255)
+
+
 class InviteLoginRequest(BaseModel):
     token: str
 
@@ -337,6 +348,42 @@ async def invite_verify(
         "session_id": str(user.session_id) if user.session_id else None,
         "heir_id": str(user.id),
         "user_status": "PROFILE_HOLD",
+    }
+
+
+@app.get("/api/invite/status/{token}")
+@limiter.limit("60/minute")
+async def get_invite_status(
+    request: Request,
+    token: str,
+    response: Response,
+    db: DBSession = Depends(get_db),
+):
+    """
+    Check the usage status of an invitation token.
+    Per Backend Spec §9.1 (GET /api/invite/status/{token}):
+    """
+    user = db.query(User).filter(User.invite_token == token).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Invitation token not found")
+
+    now_utc = datetime.now(timezone.utc)
+    if user.invite_token_expires_at and user.invite_token_expires_at < now_utc:
+        status_val = "EXPIRED"
+    elif user.invite_token_used:
+        status_val = "USED"
+    else:
+        status_val = "NEW"
+
+    return {
+        "status": status_val,
+        "used": user.invite_token_used,
+        "username": user.username,
+        "legal_first_name": user.legal_first_name,
+        "legal_middle_name": user.legal_middle_name,
+        "legal_last_name": user.legal_last_name,
+        "relationship_to_decedent": user.relationship_to_decedent,
+        "date_of_birth": user.date_of_birth.isoformat() if user.date_of_birth else None,
     }
 
 
@@ -2706,6 +2753,186 @@ async def create_session(
             ),
         },
         status_code=201,
+    )
+
+
+@app.get("/api/heirs/me")
+@limiter.limit("60/minute")
+async def get_my_heir_profile(
+    request: Request,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Retrieve current heir profile.
+    Per Backend Spec §9.5 (GET /api/heirs/me):
+    """
+    if current_user.get("role") != "HEIR":
+        raise HTTPException(status_code=403, detail="Heir access required")
+
+    heir_id = current_user.get("user_id")
+    heir = db.query(User).filter(User.id == heir_id).first()
+    if not heir:
+        raise HTTPException(status_code=401, detail="Heir not found")
+
+    return JSONResponse(content=_heir_to_response(heir))
+
+
+@app.put("/api/heirs/me/profile")
+@limiter.limit("30/minute")
+async def update_my_heir_profile(
+    request: Request,
+    body: HeirProfileUpdate,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Update current heir profile.
+    Per Backend Spec §9.5 (PUT /api/heirs/me/profile):
+    """
+    import hashlib
+    if current_user.get("role") != "HEIR":
+        raise HTTPException(status_code=403, detail="Heir access required")
+
+    heir_id = current_user.get("user_id")
+    heir = db.query(User).filter(User.id == heir_id).first()
+    if not heir:
+        raise HTTPException(status_code=401, detail="Heir not found")
+
+    # 1. Verify session status is not LOCKED or FINALIZED
+    session = db.query(SessionModel).filter(SessionModel.id == heir.session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.status in ["LOCKED", "FINALIZED"]:
+        raise HTTPException(status_code=400, detail="Cannot update profile when session is locked or finalized.")
+
+    # 2. Verify heir status is not ABSTAINED or EXPIRED_NON_PARTICIPATING
+    if heir.status in ["ABSTAINED", "EXPIRED_NON_PARTICIPATING"]:
+        raise HTTPException(status_code=400, detail="Cannot update profile for abstained or non-participating heirs.")
+
+    # Parse date_of_birth
+    try:
+        new_dob = datetime.strptime(body.date_of_birth, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date_of_birth format. Use YYYY-MM-DD.")
+
+    # 3. Check if legal identity fields changed
+    legal_fields_changed = (
+        heir.legal_first_name != body.legal_first_name or
+        heir.legal_middle_name != body.legal_middle_name or
+        heir.legal_last_name != body.legal_last_name or
+        heir.date_of_birth != new_dob
+    )
+
+    # Collect pre-update values
+    pre_update_snapshot = {
+        "legal_first_name": heir.legal_first_name,
+        "legal_middle_name": heir.legal_middle_name,
+        "legal_last_name": heir.legal_last_name,
+        "relationship_to_decedent": heir.relationship_to_decedent,
+        "date_of_birth": heir.date_of_birth.isoformat() if heir.date_of_birth else None,
+        "email": heir.email,
+        "phone": heir.phone,
+        "physical_address": heir.physical_address,
+        "identity_verified": heir.identity_verified,
+        "status": heir.status,
+        "id_scan_uri": heir.id_scan_uri,
+    }
+
+    if legal_fields_changed:
+        if heir.id_scan_uri:
+            try:
+                storage = get_storage_driver()
+                storage.delete(heir.id_scan_uri)
+            except Exception:
+                pass
+            heir.id_scan_uri = None
+        heir.identity_verified = False
+        heir.status = "PROFILE_HOLD"
+
+    # 4. Save updated fields
+    heir.legal_first_name = body.legal_first_name
+    heir.legal_middle_name = body.legal_middle_name
+    heir.legal_last_name = body.legal_last_name
+    heir.relationship_to_decedent = body.relationship_to_decedent
+    heir.date_of_birth = new_dob
+    heir.email = body.email
+    heir.phone = body.phone
+    heir.physical_address = body.physical_address
+
+    post_update_snapshot = {
+        "legal_first_name": heir.legal_first_name,
+        "legal_middle_name": heir.legal_middle_name,
+        "legal_last_name": heir.legal_last_name,
+        "relationship_to_decedent": heir.relationship_to_decedent,
+        "date_of_birth": heir.date_of_birth.isoformat() if heir.date_of_birth else None,
+        "email": heir.email,
+        "phone": heir.phone,
+        "physical_address": heir.physical_address,
+        "identity_verified": heir.identity_verified,
+        "status": heir.status,
+        "id_scan_uri": heir.id_scan_uri,
+    }
+
+    changed_fields = {}
+    for k, v in post_update_snapshot.items():
+        if pre_update_snapshot[k] != v:
+            changed_fields[k] = {
+                "pre": pre_update_snapshot[k],
+                "post": v
+            }
+
+    # 5. Log USER_PROFILE_UPDATE event
+    prev_hash = "0" * 64
+    last_log = (
+        db.query(AuditLog)
+        .filter(AuditLog.session_id == heir.session_id)
+        .order_by(AuditLog.id.desc())
+        .first()
+    )
+    if last_log:
+        prev_hash = last_log.sha256_hash
+
+    state_snapshot = {
+        "event": "USER_PROFILE_UPDATE",
+        "editor_id": str(heir_id),
+        "heir_id": str(heir_id),
+        "changed_fields": changed_fields,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    snapshot_str = str(sorted(state_snapshot.items()))
+    profile_update_hash = hashlib.sha256(
+        (prev_hash + snapshot_str).encode("utf-8")
+    ).hexdigest()
+
+    audit_entry = AuditLog(
+        session_id=heir.session_id,
+        event_type="USER_PROFILE_UPDATE",
+        state_snapshot=state_snapshot,
+        prev_hash=prev_hash,
+        sha256_hash=profile_update_hash,
+    )
+    db.add(audit_entry)
+    db.commit()
+
+    # 6. Broadcast WebSocket status frame
+    if heir.session_id:
+        await manager.broadcast_session_status(
+            str(heir.session_id),
+            {
+                "type": "heir_profile_updated",
+                "heir_id": str(heir.id),
+                "heir_username": heir.username,
+                "status": heir.status,
+            },
+        )
+
+    return JSONResponse(
+        content={
+            "status": "success",
+            "message": "Heir profile updated successfully.",
+            "identity_verified": heir.identity_verified,
+        }
     )
 
 

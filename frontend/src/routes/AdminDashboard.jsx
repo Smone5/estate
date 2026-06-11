@@ -3,6 +3,7 @@ import { useMediationStore } from '../store/useMediationStore';
 import DashboardGuard from '../components/DashboardGuard';
 import ForceAllocationConsole from '../components/ForceAllocationConsole';
 import AdminHelpPortal from '../components/AdminHelpPortal';
+import AdminAnnouncementConsole from '../components/AdminAnnouncementConsole';
 
 export default function AdminDashboard() {
   const store = useMediationStore();
@@ -186,6 +187,8 @@ export default function AdminDashboard() {
               </p>
             </div>
           )}
+
+          {sessionId && <AdminAnnouncementConsole sessionId={sessionId} />}
         </div>
       </div>
       <AdminHelpPortal
