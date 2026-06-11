@@ -89,7 +89,8 @@ Phase 6: Audio Speech & Real-Time Communications (next)
 [DONE] T45 — Admin Voice Recorder Widget — MediaRecorder record/stop/playback/redo, pulsing timer 2:00 max, HTTPS guard, POST /api/assets/{asset_id}/audio upload on save, Sage-Green aesthetics, 141 frontend tests pass — 2026-06-11T12:06
 [DONE] T72 — Unauthenticated System Restore Gate — JWT cookie auth on initialized restore, fresh-system bypass preserved, 480 tests pass — 2026-06-11T12:12
 [DONE] T61 — Nginx & Production Build Setup — npm run build verified, dist/ populated, nginx static serve configured — 2026-06-11T12:13
-[NEXT] T74 — Cloudflare Tunnel & Public Exposure Setup
+[DONE] T74 — Cloudflare Tunnel Service — cloudflared container with profile activation, CLOUDFLARE_TUNNEL_TOKEN, outbound-only tunnel — 2026-06-11T12:15
+[NEXT] T75 — Host Hardening & SSH Configuration
 
 ## Blockers
 None.
