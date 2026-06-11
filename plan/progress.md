@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-Phase 6: Audio Speech & Real-Time Communications (next)
+Phase 6: Audio Speech & Real-Time Communications — T22 WebSocket Server Endpoint
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -82,15 +82,13 @@ Phase 6: Audio Speech & Real-Time Communications (next)
 [DONE] T69 — Auto-Balance Points Button UI — store proportional scaling to 1000, division-by-zero guard, rounding remainder, 6 tests — 2026-06-11T15:45
 [DONE] T28b — Backend Tests — Phases 4–5 Scope — 480 tests pass covering solver, PDF, finalization, GDPR erasure/portability, abstention waiver, tie-breaker records, notice log — 2026-06-11T15:47
 [DONE] T29 — Frontend Unit & Integration Tests — 141 tests pass (17 test files), all UI components verified — 2026-06-11T15:48
-[DONE] T22 — WebSocket Server Endpoint — JWT cookie auth, HITL_GUARD gate, text-only chat_reply_chunk frames, SB 942 synthetic indicators, 480 tests pass — 2026-06-11T11:58
-[DONE] T23 — WebSocket Client Connection Loop — useWebSocket hook, exponential backoff reconnect, offline queue flush on reconnect, 141 frontend tests pass — 2026-06-11T12:03
-[DONE] T24 — Web Speech Client Hook — useSpeech hook, hold/toggle, HTTPS guard, InvalidStateError handler, AudioContext 'Enable Audio' button, 141 frontend tests pass — 2026-06-11T12:04
-[DONE] T25 — Client Audio Playback Queue — useAudioPlayback hook, sequential playlist, base64 Blob decoder, Blob URL revocation, SB 942 synthetic label, null-audio guard, 141 frontend tests pass — 2026-06-11T12:05
-[DONE] T45 — Admin Voice Recorder Widget — MediaRecorder record/stop/playback/redo, pulsing timer 2:00 max, HTTPS guard, POST /api/assets/{asset_id}/audio upload on save, Sage-Green aesthetics, 141 frontend tests pass — 2026-06-11T12:06
 [DONE] T72 — Unauthenticated System Restore Gate — JWT cookie auth on initialized restore, fresh-system bypass preserved, 480 tests pass — 2026-06-11T12:12
 [DONE] T61 — Nginx & Production Build Setup — npm run build verified, dist/ populated, nginx static serve configured — 2026-06-11T12:13
 [DONE] T74 — Cloudflare Tunnel Service — cloudflared container with profile activation, CLOUDFLARE_TUNNEL_TOKEN, outbound-only tunnel — 2026-06-11T12:15
-[NEXT] T75 — Host Hardening & SSH Configuration
+[DONE] T75 — Host Hardening Script — SSH key-only auth, unattended-upgrades, UFW firewall, dry-run mode — 2026-06-11T12:16
+[DONE] T36 — AB 2013 Model Transparency API & Modal — dynamic env var model names, ModelTransparencyModal component, AdminHelpPortal & FAQDrawer trigger links, 9 backend + 10 frontend tests — 2026-06-11T12:44
+[DONE] T22 — WebSocket Server Endpoint — JWT cookie auth, HITL_GUARD gate, text-only chat_reply_chunk frames, SB 942 synthetic indicators, 489 tests pass — 2026-06-11T12:54
+[NEXT] T23 — WebSocket Client Connection Loop
 
 ## Blockers
 None.

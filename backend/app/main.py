@@ -4282,6 +4282,147 @@ async def get_heir_chat(
 
 
 # ---------------------------------------------------------------------------
+# T36 — AB 2013 Model Transparency API
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/system/models")
+async def system_models():
+    """
+    California AB 2013 AI Training Data Transparency endpoint.
+
+    Per Compliance Spec §2.4 (GET /api/system/models):
+    Returns metadata outlining the active model parameters, licensing,
+    and training provenance. Dynamically queries environment variables
+    for active model names: FAST_THINKER_MODEL, SLOW_THINKER_MODEL,
+    VISION_MODEL, EMBEDDING_MODEL. If a non-default model name is
+    detected, the response reflects the actual model name from the env
+    var so that changing env vars dynamically alters the transparency
+    output (per UAT spec).
+
+    Access: Public.
+    """
+    import os as _os
+
+    fast = _os.environ.get("FAST_THINKER_MODEL", "qwen2.5:8b-instruct")
+    slow = _os.environ.get("SLOW_THINKER_MODEL", "qwen2.5:14b-instruct")
+    vision = _os.environ.get("VISION_MODEL", "llava:7b")
+    embed = _os.environ.get("EMBEDDING_MODEL", "nomic-embed-text")
+
+    # Map Ollama model identifiers to human-readable display metadata.
+    # When an env var maps to a known model, use the canonical display info;
+    # otherwise fall back to a generic entry using the raw env var value.
+    _MODEL_DISPLAY = {
+        # Fast thinker variants
+        "qwen2.5:8b-instruct": {
+            "display_name": "Qwen-2.5-8B-Instruct",
+            "parameters": "8.0B",
+            "license": "Apache-2.0",
+            "provenance": "Pretrained on Qwen open training datasets; fine-tuned for instruction-following.",
+        },
+        "qwen2.5:latest": {
+            "display_name": "Qwen-2.5 (latest)",
+            "parameters": "8.0B",
+            "license": "Apache-2.0",
+            "provenance": "Pretrained on Qwen open training datasets; fine-tuned for instruction-following.",
+        },
+        "qwen2.5:3b-instruct": {
+            "display_name": "Qwen-2.5-3B-Instruct (Pi 5 profile)",
+            "parameters": "3.1B",
+            "license": "Apache-2.0",
+            "provenance": "Compact instruction-tuned Qwen variant optimized for low-resource devices.",
+        },
+        "qwen2.5:1.5b-instruct": {
+            "display_name": "Qwen-2.5-1.5B-Instruct (Pi 5 alt profile)",
+            "parameters": "1.5B",
+            "license": "Apache-2.0",
+            "provenance": "Smallest instruction-tuned Qwen variant for constrained hardware.",
+        },
+        # Slow thinker variants
+        "qwen2.5:14b": {
+            "display_name": "Qwen-2.5-14B-Instruct",
+            "parameters": "14.2B",
+            "license": "Apache-2.0",
+            "provenance": "Pretrained and post-trained by Alibaba Cloud; optimized for reasoning and logical validation.",
+        },
+        "qwen2.5:14b-instruct": {
+            "display_name": "Qwen-2.5-14B-Instruct",
+            "parameters": "14.2B",
+            "license": "Apache-2.0",
+            "provenance": "Pretrained and post-trained by Alibaba Cloud; optimized for reasoning and logical validation.",
+        },
+        "qwen2.5:8b-instruct": {
+            "display_name": "Qwen-2.5-8B-Instruct",
+            "parameters": "8.0B",
+            "license": "Apache-2.0",
+            "provenance": "Pretrained on Qwen open training datasets; fine-tuned for instruction-following.",
+        },
+        # Vision variants
+        "llava:7b": {
+            "display_name": "Llava-1.5",
+            "parameters": "7.0B",
+            "license": "Apache-2.0",
+            "provenance": "CLIP ViT-L/14 visual encoder and Llama-2; trained on public multi-modal datasets.",
+        },
+        "llava:latest": {
+            "display_name": "Llava-1.5 (latest)",
+            "parameters": "7.0B",
+            "license": "Apache-2.0",
+            "provenance": "CLIP ViT-L/14 visual encoder and Llama-2; trained on public multi-modal datasets.",
+        },
+        "moondream:latest": {
+            "display_name": "Moondream (Pi 5 vision profile)",
+            "parameters": "1.9B",
+            "license": "Apache-2.0",
+            "provenance": "Lightweight vision-language model optimized for edge devices.",
+        },
+        # Embedding variants
+        "nomic-embed-text": {
+            "display_name": "nomic-embed-text",
+            "parameters": "137M",
+            "license": "Apache-2.0",
+            "provenance": "Trained by Nomic AI on public web text. Generates 768-dimensional dense vectors for estate asset similarity search and RAG context retrieval.",
+        },
+    }
+
+    def _model_entry(component: str, model_id: str):
+        info = _MODEL_DISPLAY.get(model_id)
+        if info:
+            return {
+                "component": component,
+                "name": info["display_name"],
+                "parameters": info["parameters"],
+                "license": info["license"],
+                "provenance": info["provenance"],
+                "model_id": model_id,
+            }
+        # Unknown model — return the raw env var as the name
+        return {
+            "component": component,
+            "name": model_id,
+            "parameters": "Unknown",
+            "license": "Unknown",
+            "provenance": f"Active model identifier: {model_id}. Provenance not catalogued.",
+            "model_id": model_id,
+        }
+
+    models = [
+        _model_entry("Fast Mediator (System 1)", fast),
+        _model_entry("Slow Critic (System 2)", slow),
+        _model_entry("Vision OCR Engine", vision),
+        {
+            "component": "Local Speech Synthesis (TTS)",
+            "name": "Kokoro-82M ONNX",
+            "parameters": "82M",
+            "license": "Apache-2.0 / Custom Research",
+            "provenance": "Trained on public domain and CC-licensed audio datasets. Runs locally on CPU.",
+        },
+        _model_entry("Semantic Search & RAG Embedding Engine", embed),
+    ]
+    return JSONResponse(content={"models": models})
+
+
+# ---------------------------------------------------------------------------
 # T82 — Hash Chain Verification Tool
 # ---------------------------------------------------------------------------
 

@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
+import ModelTransparencyModal from './ModelTransparencyModal';
 
 export default function AdminHelpPortal({ isOpen, onClose, sessionId }) {
   const [faqs, setFaqs] = useState([]);
   const [loadingFaqs, setLoadingFaqs] = useState(false);
+  const [showTransparency, setShowTransparency] = useState(false);
   
   // Form state
   const [editingFaqId, setEditingFaqId] = useState(null);
@@ -208,6 +210,20 @@ export default function AdminHelpPortal({ isOpen, onClose, sessionId }) {
                   </p>
                 </div>
               </div>
+
+              <div style={{ marginTop: 'var(--space-lg)', paddingTop: 'var(--space-md)', borderTop: '1px solid var(--color-border)' }}>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setShowTransparency(true)}
+                  data-testid="transparency-trigger"
+                  type="button"
+                >
+                  AI Model Details & Training Transparency
+                </button>
+                <p className="text-xs text-muted" style={{ marginTop: 'var(--space-xs)' }}>
+                  View model parameters, licensing, and training data provenance per California AB 2013.
+                </p>
+              </div>
             </section>
 
             {/* Section 5: Estate FAQ Editor */}
@@ -327,6 +343,11 @@ export default function AdminHelpPortal({ isOpen, onClose, sessionId }) {
           </div>
         </div>
       </div>
+
+      <ModelTransparencyModal
+        isOpen={showTransparency}
+        onClose={() => setShowTransparency(false)}
+      />
     </div>
   );
 }

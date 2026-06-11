@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { useMediationStore } from '../store/useMediationStore';
+import ModelTransparencyModal from './ModelTransparencyModal';
 
 export default function FAQDrawer({ isOpen, onClose }) {
   const sessionId = useMediationStore((s) => s.session_id);
   const [estateFaqs, setEstateFaqs] = useState([]);
   const [loadingEstateFaqs, setLoadingEstateFaqs] = useState(false);
   const [openItem, setOpenItem] = useState(null); // id of open faq item
+  const [showTransparency, setShowTransparency] = useState(false);
 
   useEffect(() => {
     if (isOpen && sessionId) {
@@ -183,8 +185,28 @@ export default function FAQDrawer({ isOpen, onClose }) {
               </div>
             ))}
           </div>
+
+          <div style={{ padding: 'var(--space-md) 0', borderTop: '1px solid var(--color-border)', marginTop: 'var(--space-md)' }}>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => setShowTransparency(true)}
+              data-testid="transparency-trigger"
+              type="button"
+              style={{ width: '100%', textAlign: 'left' }}
+            >
+              AI Model Details & Training Transparency
+            </button>
+            <p className="text-xs text-muted" style={{ marginTop: 'var(--space-xs)' }}>
+              View model parameters, licensing, and training data provenance per California AB 2013.
+            </p>
+          </div>
         </div>
       </div>
+
+      <ModelTransparencyModal
+        isOpen={showTransparency}
+        onClose={() => setShowTransparency(false)}
+      />
     </>
   );
 }
