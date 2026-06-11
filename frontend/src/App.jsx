@@ -1,121 +1,77 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import './App.css'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+
+function InvitePage() {
+  return (
+    <div className="app-main flex items-center justify-center" style={{ flex: 1 }}>
+      <div className="archival-card" style={{ maxWidth: 520, width: '100%' }}>
+        <h2 style={{ marginBottom: 'var(--space-lg)' }}>Invitation</h2>
+        <p className="text-muted">Loading invitation details...</p>
+      </div>
+    </div>
+  )
+}
+
+function DashboardPage() {
+  return (
+    <div className="app-main flex items-center justify-center" style={{ flex: 1 }}>
+      <div className="archival-card" style={{ maxWidth: 520, width: '100%' }}>
+        <h2 style={{ marginBottom: 'var(--space-lg)' }}>Dashboard</h2>
+        <p className="text-muted">Your mediation workspace will appear here.</p>
+      </div>
+    </div>
+  )
+}
+
+function AdminPage() {
+  return (
+    <div className="app-main flex items-center justify-center" style={{ flex: 1 }}>
+      <div className="archival-card" style={{ maxWidth: 520, width: '100%' }}>
+        <h2 style={{ marginBottom: 'var(--space-lg)' }}>Admin Console</h2>
+        <p className="text-muted">Admin management panel loading...</p>
+      </div>
+    </div>
+  )
+}
+
+function OptOutPage() {
+  return (
+    <div className="app-main flex items-center justify-center" style={{ flex: 1 }}>
+      <div className="archival-card text-center" style={{ maxWidth: 480, width: '100%' }}>
+        <h2 style={{ marginBottom: 'var(--space-md)' }}>Invitation Declined</h2>
+        <p className="text-muted">
+          You have declined the consent agreement. No personal data has been saved.
+          Your invitation remains uncompleted.
+        </p>
+      </div>
+    </div>
+  )
+}
 
 function App() {
-  const [count, setCount] = useState(0)
-
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.jsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+    <BrowserRouter>
+      <div className="app-shell">
+        <header className="app-header">
+          <h1>The Estate Steward</h1>
+        </header>
 
-      <div className="ticks"></div>
+        <Routes>
+          <Route path="/invite/:token" element={<InvitePage />} />
+          <Route path="/dashboard" element={<DashboardPage />} />
+          <Route path="/admin" element={<AdminPage />} />
+          <Route path="/opt-out" element={<OptOutPage />} />
+          <Route path="*" element={<Navigate to="/invite/placeholder" replace />} />
+        </Routes>
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
+        <footer className="app-footer">
+          Disclaimer: The Estate Steward is a collaborative mediation aid designed to assist
+          executors and heirs in dividing personal property. It does not provide legal advice,
+          estate planning, or tax counsel. Use of this tool does not guarantee probate court
+          approval. Executors are advised to consult with a licensed probate attorney regarding
+          their fiduciary obligations and court filings.
+        </footer>
+      </div>
+    </BrowserRouter>
   )
 }
 
