@@ -496,11 +496,13 @@ To ensure the system works seamlessly with various mobile camera uploads (which 
     *   To support serverless stateless deployment (like Google Cloud Run or AWS Fargate) without code modifications, file storage is managed by a pluggable driver class toggled via the `STORAGE_DRIVER` environment variable:
         *   `STORAGE_DRIVER=LOCAL` (Default for Raspberry Pi): Files are saved locally to `static/uploads/` (mounted as a Docker volume) and served via Nginx.
         *   `STORAGE_DRIVER=GCS` (For Cloud Run): Files are streamed directly to a secure **Google Cloud Storage (GCS)** bucket.
-    *   In both cases, files are renamed to a secure UUID (e.g. `c7b74e89-1384-4861-abdf-c6a6f1d2c673.webp`) and the database's `image_uri` stores the accessible public HTTP URL or local static path.
+        *   `STORAGE_DRIVER=S3` (For S3-Compatible Storage): Files are streamed directly to an **S3-compatible** bucket (such as MinIO, Cloudflare R2, or Backblaze B2) with endpoints and credentials configured via environment variables.
+    *   In all cases, files are renamed to a secure UUID (e.g. `c7b74e89-1384-4861-abdf-c6a6f1d2c673.webp`) and the database's `image_uri` stores the accessible public HTTP URL or local static path.
 5.  **Pluggable Deletion Support**:
     *   To prevent orphaned file accumulation and comply with PII/security purges, the pluggable driver must implement file deletion methods:
         *   `STORAGE_DRIVER=LOCAL`: Deletes the target file from the local `/app/static/uploads/` path.
         *   `STORAGE_DRIVER=GCS`: Calls the Google Cloud Storage bucket API to delete the corresponding blob object.
+        *   `STORAGE_DRIVER=S3`: Calls the S3 API to delete the corresponding object from the S3 bucket.
 
 
 ---

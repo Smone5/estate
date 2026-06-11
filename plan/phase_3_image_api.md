@@ -17,6 +17,7 @@ Construct the image scaling/conversion pipelines and expose authenticated FastAP
    * Pluggable Storage Driver: Develop a storage helper utilizing `STORAGE_DRIVER` environment variable:
      * `STORAGE_DRIVER=LOCAL`: Save WebP files locally to `/app/static/uploads/`.
      * `STORAGE_DRIVER=GCS`: Stream WebP files directly to a Google Cloud Storage bucket.
+     * `STORAGE_DRIVER=S3`: Stream WebP files directly to an S3-compatible bucket (MinIO, Cloudflare R2, Backblaze B2, etc.).
 2. **Asset Staging & Background OCR API**:
    * Build `POST /api/sessions/{session_id}/assets/stage` endpoint.
    * Actions: Process and save the WebP image, create the database asset record setting status to `'STAGED'` and `ocr_status = 'PROCESSING'`.
@@ -64,9 +65,9 @@ Construct the image scaling/conversion pipelines and expose authenticated FastAP
 * **Objective**: Define abstract storage driver base class with `save(path, bytes)`, `get(path)`, and `delete(path)` methods. Implement a Mock driver for unit testing. **This enables all downstream API tasks (T11, T13, T31, T34, T40, T41, T55, T60, T49) to be developed in parallel with concrete storage implementations.**
 * **Verification**: Verify that the abstract interface enforces the `delete()` method contract. Verify that the Mock driver saves, retrieves, and deletes byte payloads correctly, and that deleting a nonexistent file does not raise an error (idempotent).
 
-### [ ] Task T09b: Image Preprocessing Pipeline & Concrete Storage Drivers
-* **Objective**: Write HEIC/PNG to WebP conversion logic with 80% compression, 1200x1200px bounds, and aspect-ratio-preserving scaling using `Image.thumbnail`. Implement LOCAL and GCS concrete storage drivers with explicit `delete()` method for file cleanup. The storage driver MUST implement a `delete(path)` method: for LOCAL driver, deletes the file from disk; for GCS driver, calls the bucket API to delete the corresponding blob. **Depends on T09a for the interface contract. Required by T40, T41, T31, T34, T55, T60, T13, T49 for secure deletions.**
-* **Verification**: Verify PNG, JPG, and HEIC uploads compile to normalized 1200x1200px WebP files. Verify that calling `delete()` on the LOCAL driver removes the file from the filesystem, and on the GCS driver sends a delete request to the bucket. Test that deleting a nonexistent file does not raise an error (idempotent).
+### [x] Task T09b: Image Preprocessing Pipeline & Concrete Storage Drivers
+* **Objective**: Write HEIC/PNG to WebP conversion logic with 80% compression, 1200x1200px bounds, and aspect-ratio-preserving scaling using `Image.thumbnail`. Implement LOCAL, GCS, and S3 (MinIO, R2, B2) concrete storage drivers with explicit `delete()` method for file cleanup. The storage driver MUST implement a `delete(path)` method: for LOCAL driver, deletes the file from disk; for GCS driver, calls the bucket API to delete the corresponding blob; for S3 driver, calls the S3 API to delete the corresponding object. **Depends on T09a for the interface contract. Required by T40, T41, T31, T34, T55, T60, T13, T49 for secure deletions.**
+* **Verification**: Verify PNG, JPG, and HEIC uploads compile to normalized 1200x1200px WebP files. Verify that calling `delete()` on the LOCAL driver removes the file from the filesystem, on the GCS driver sends a delete request to the bucket, and on the S3 driver sends a delete request to the S3 bucket. Test that deleting a nonexistent file does not raise an error (idempotent).
 
 ### [ ] Task T10: FastAPI Core & Onboarding endpoints
 * **Objective**: Define core FastAPI routing, Argon2 admin login, invite verification, and secure JWT HTTP-only cookie handlers. **Rate limiting middleware (T73) MUST be applied to all public endpoints implemented in this task.**

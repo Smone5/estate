@@ -15,7 +15,7 @@ Develop the ReportLab PDF rendering engine, integrate the Fairpyx division solve
    * **NumberedCanvas Pagination**: Write a custom canvas subclassing `canvas.Canvas` to perform a double-pass calculation. Draw page footers in the format `"Page X of Y"` and background canvas assets on all pages except the cover page.
    * **Paragraph Cell Wrapping**: Build tables placing text cells inside ReportLab `Paragraph` flowables. Enforce explicit column widths to prevent descriptions from overflowing.
    * **Dynamic Columns and Landscape Rotation**: For the dynamic heir points matrix table, calculate column widths programmatically (`width_title = 2.5in` and split remaining `4.5in` equally among the $N$ heirs). If $N > 4$, transition the page section template to a Landscape layout to widen printable space to `9.5in` (where `width_title = 3.5in` and remaining `6.0in` is split among heirs).
-   * **Cloud Image Buffer**: If `STORAGE_DRIVER=GCS` is enabled, download remote asset image URLs into an `io.BytesIO` buffer rather than passing string URLs to ReportLab.
+   * **Cloud Image Buffer**: If `STORAGE_DRIVER=GCS` or `STORAGE_DRIVER=S3` is enabled, download remote asset image URLs into an `io.BytesIO` buffer rather than passing string URLs to ReportLab.
    * **Output Files**:
      1. *Heir Keepsake Memory Book*: Cover page, division summary, and allocated heir items list.
      2. *Final Distribution & Probate Ledger*: Estate details, beneficiary tables, proof of notice log, final grid, admin intervention log, and monospace cryptographic block hash seal.
@@ -55,7 +55,7 @@ Develop the ReportLab PDF rendering engine, integrate the Fairpyx division solve
 * **Verification**: Verify that the notice log data schema is correctly declared and can be populated from users table rows.
 
 ### [ ] Task T14: ReportLab PDF Builders
-* **Objective**: Write the Keepsake and Probate Ledger PDF generation modules with canvas page numbers, text cell paragraph wrappers, dynamic columns (with programmatic width calculations and transition to Landscape layout if $N > 4$ heirs), an `io.BytesIO` cloud image buffer when GCS is active, and legal disclaimer on cover page per Legal Spec §5. Depends on T02, T03, T71.
+* **Objective**: Write the Keepsake and Probate Ledger PDF generation modules with canvas page numbers, text cell paragraph wrappers, dynamic columns (with programmatic width calculations and transition to Landscape layout if $N > 4$ heirs), an `io.BytesIO` cloud image buffer when GCS or S3 is active, and legal disclaimer on cover page per Legal Spec §5. Depends on T02, T03, T71.
 * **Verification**: Assert that generated PDFs have cover pages (including legal disclaimer), tabular layouts, and correct page numbers.
 
 ### [ ] Task T15: Fairpyx MNW Solver & Tie-Breakers

@@ -82,7 +82,7 @@ This specification defines the test suites, verification assertions, and mock bo
 *   **Test Paragraph Wrapping inside Tables**:
     *   Verify the PDF builder wraps long asset descriptions in `Paragraph` flowables inside table cells. Ensure no text overflows off-canvas.
 *   **Test Image Downloader & Buffer**:
-    *   Mock external network calls. Verify that if `STORAGE_DRIVER=GCS` and an asset's image is a remote URL, the PDF builder downloads the bytes into an `io.BytesIO` buffer rather than passing the URL string directly to ReportLab's `Image` class.
+    *   Mock external network calls. Verify that if `STORAGE_DRIVER=GCS` or `STORAGE_DRIVER=S3` and an asset's image is a remote URL, the PDF builder downloads the bytes into an `io.BytesIO` buffer rather than passing the URL string directly to ReportLab's `Image` class.
 *   **Test NumberedCanvas Pagination**:
     *   Verify that `NumberedCanvas` prints the dynamic footer `"Page X of Y"` and background canvas fill on all pages except the cover page (Page 1).
 *   **Test PDF Document Content Differentiation**:
