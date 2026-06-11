@@ -29,7 +29,7 @@ from .auth import (
     get_current_user,
     get_current_admin,
 )
-from .models import User, Session as SessionModel, Asset, Valuation
+from .models import User, Session as SessionModel, Asset, Valuation, SupportRequest
 from .websocket_manager import manager
 from .services.storage import get_storage_driver, preprocess_image
 from .services.llm_provider import get_provider, reset_provider
@@ -921,6 +921,15 @@ async def session_assets(
 
 
 # ---------------------------------------------------------------------------
+# T42 — Schema
+# ---------------------------------------------------------------------------
+
+
+class SupportRequestCreate(BaseModel):
+    message: str = Field(..., min_length=5, max_length=1000)
+
+
+# ---------------------------------------------------------------------------
 # T13 — Schema
 # ---------------------------------------------------------------------------
 
@@ -1295,6 +1304,121 @@ async def delete_asset(
 # ---------------------------------------------------------------------------
 # T31 — Government ID Scan Upload API
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# T42 — Support Request & Help CRUD API
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/sessions/{session_id}/help")
+@limiter.limit("30/minute")
+async def create_help_request(
+    request: Request,
+    session_id: str,
+    body: SupportRequestCreate,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Submit a help ticket from an Heir to the Executor.
+
+    Per Backend Spec §9.4 (POST /api/sessions/{session_id}/help):
+    Heir submits a support request, persisted to support_requests table.
+    Broadcasts a WebSocket alert to the Admin channel.
+    """
+    if current_user.get("role") != "HEIR":
+        raise HTTPException(status_code=403, detail="Only heirs can submit help requests")
+
+    heir_id = current_user.get("user_id")
+
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    sr = SupportRequest(
+        session_id=session_id,
+        heir_id=heir_id,
+        message=body.message,
+        status="OPEN",
+    )
+    db.add(sr)
+    db.commit()
+
+    # Broadcast WebSocket alert to Admin
+    await manager.broadcast_support_alert(
+        session_id,
+        str(sr.id),
+        current_user.get("username", ""),
+        body.message,
+    )
+
+    return JSONResponse(
+        content={"status": "submitted"},
+        status_code=201,
+    )
+
+
+@app.get("/api/sessions/{session_id}/help")
+@limiter.limit("60/minute")
+async def list_help_requests(
+    request: Request,
+    session_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    List all help requests for a session.
+
+    Per Backend Spec §9.4 (GET /api/sessions/{session_id}/help):
+    Admin credentials required. Returns list of SupportRequestResponse
+    with resolved Heir usernames via database joins.
+    """
+    tickets = (
+        db.query(SupportRequest)
+        .filter(SupportRequest.session_id == session_id)
+        .order_by(SupportRequest.created_at.desc())
+        .all()
+    )
+
+    results = []
+    for t in tickets:
+        heir = db.query(User).filter(User.id == t.heir_id).first()
+        results.append({
+            "id": str(t.id),
+            "username": heir.username if heir else "Unknown",
+            "message": t.message,
+            "status": t.status,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+        })
+
+    return JSONResponse(content=results)
+
+
+@app.post("/api/help/{ticket_id}/resolve")
+@limiter.limit("30/minute")
+async def resolve_help_request(
+    request: Request,
+    ticket_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Mark a support request as RESOLVED.
+
+    Per Backend Spec §9.4 (POST /api/help/{ticket_id}/resolve):
+    Admin credentials required. Toggles support request status to 'RESOLVED'.
+    """
+    ticket = (
+        db.query(SupportRequest).filter(SupportRequest.id == ticket_id).first()
+    )
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Support ticket not found")
+
+    ticket.status = "RESOLVED"
+    db.commit()
+
+    return JSONResponse(content={"status": "resolved"})
 
 
 # ---------------------------------------------------------------------------

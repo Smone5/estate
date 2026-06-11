@@ -135,6 +135,20 @@ class ConnectionManager:
         for ws in dead:
             self.disconnect(ws, session_id=session_id)
 
+    async def broadcast_support_alert(
+        self, session_id: str, ticket_id: str, heir_name: str, message: str
+    ):
+        """Broadcast a support_alert frame to all Admin connections in a session."""
+        import datetime
+        payload = {
+            "type": "support_alert",
+            "ticket_id": ticket_id,
+            "heir_name": heir_name,
+            "message": message,
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        await self.broadcast_session_status(session_id, payload)
+
     async def send_to_heir(
         self, session_id: str, heir_id: str, payload: dict
     ):
