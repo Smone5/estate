@@ -44,7 +44,8 @@
 [DONE] T34 — Executor ID Verification State Transition API — 2026-06-11T08:13
 [DONE] T60 — Admin Heir Deletion API — purge PII, delete scan, unlink pre-allocated assets — 2026-06-11T08:24
 [DONE] T28a-3 — Backend Tests — Phase 3 Scope (426 tests pass, gates Phase 4) — 2026-06-11T08:27
-[NEXT] T12 — FastAPI Valuation Router — valuation draft saving, pessimistic locking, HITL_GUARD suspension
+[DONE] T12 — FastAPI Valuation Router with pessimistic locking, draft version control, HITL_GUARD gate — 2026-06-11T08:31
+[NEXT] T71 — Proof of Notice Log Data Contract — formalize notice_log data structure consumed by PDF builders
 
 ## Blockers
 None.
