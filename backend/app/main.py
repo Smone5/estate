@@ -32,6 +32,7 @@ from .models import User, Session as SessionModel, Asset, Valuation
 from .websocket_manager import manager
 from .services.storage import get_storage_driver, preprocess_image
 from .services.llm_provider import get_provider, reset_provider
+from .services.smtp_service import send_email_background, Attachment
 
 logging.basicConfig(
     level=logging.INFO,
@@ -915,4 +916,308 @@ async def session_assets(
             }
             for a in assets
         ]
+    )
+
+
+# ---------------------------------------------------------------------------
+# T13 — Schema
+# ---------------------------------------------------------------------------
+
+
+class HeirCreateRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=100)
+    legal_first_name: str = Field(..., min_length=1, max_length=50)
+    legal_middle_name: str | None = None
+    legal_last_name: str = Field(..., min_length=1, max_length=100)
+    relationship_to_decedent: str | None = None
+    date_of_birth: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    physical_address: str | None = None
+    expiration_days: int | None = 14
+
+
+class InviteTokenRenewRequest(BaseModel):
+    expiration_days: int | None = 14
+
+
+# ---------------------------------------------------------------------------
+# T13 — Heir Management & Invitations
+# ---------------------------------------------------------------------------
+
+
+def _heir_to_response(heir: User) -> dict:
+    """Serialize a User (HEIR) to a dict matching HeirResponse schema."""
+    return {
+        "id": str(heir.id),
+        "username": heir.username,
+        "legal_first_name": heir.legal_first_name,
+        "legal_middle_name": heir.legal_middle_name,
+        "legal_last_name": heir.legal_last_name,
+        "relationship_to_decedent": heir.relationship_to_decedent,
+        "date_of_birth": (
+            heir.date_of_birth.isoformat() if heir.date_of_birth else None
+        ),
+        "identity_verified": heir.identity_verified,
+        "id_scan_uri": heir.id_scan_uri,
+        "role": heir.role,
+        "email": heir.email,
+        "phone": heir.phone,
+        "physical_address": heir.physical_address,
+        "invite_token": str(heir.invite_token) if heir.invite_token else None,
+        "invite_token_expires_at": (
+            heir.invite_token_expires_at.isoformat()
+            if heir.invite_token_expires_at
+            else None
+        ),
+        "invite_token_used": heir.invite_token_used,
+        "consent_accepted": heir.consent_accepted,
+        "age_verified": heir.age_verified,
+        "consent_timestamp": (
+            heir.consent_timestamp.isoformat() if heir.consent_timestamp else None
+        ),
+        "is_submitted": heir.is_submitted,
+        "submitted_at": (
+            heir.submitted_at.isoformat() if heir.submitted_at else None
+        ),
+        "draft_version": heir.draft_version,
+        "status": heir.status,
+        "created_at": heir.created_at.isoformat() if heir.created_at else None,
+        "invitation_dispatched_at": (
+            heir.invitation_dispatched_at.isoformat()
+            if heir.invitation_dispatched_at
+            else None
+        ),
+    }
+
+
+@app.get("/api/sessions/{session_id}/heirs")
+@limiter.limit("60/minute")
+async def session_heirs(
+    request: Request,
+    session_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    List all Heirs currently registered in the session.
+
+    Per Backend Spec §9.1 (GET /api/sessions/{session_id}/heirs):
+    Admin credentials required. Returns list of HeirResponse.
+    """
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    heirs = (
+        db.query(User)
+        .filter(User.session_id == session_id, User.role == "HEIR")
+        .all()
+    )
+    return JSONResponse(content=[_heir_to_response(h) for h in heirs])
+
+
+@app.post("/api/sessions/{session_id}/heirs")
+@limiter.limit("30/minute")
+async def create_heir(
+    request: Request,
+    session_id: str,
+    body: HeirCreateRequest,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Create an Heir user with invitation token.
+
+    Per Backend Spec §9.1 (POST /api/sessions/{session_id}/heirs):
+    Creates an Heir, generates a single-use UUID invite token, sets
+    invite_token_expires_at to expiration_days from now (default 14).
+    Returns 400 if session status is LOCKED or FINALIZED.
+    """
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status in ("LOCKED", "FINALIZED"):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot add heirs to a locked or finalized session.",
+        )
+
+    import uuid as _uuid_mod
+
+    now_utc = datetime.now(timezone.utc)
+    expiration_days = body.expiration_days if body.expiration_days is not None else 14
+    invite_token = _uuid_mod.uuid4()
+    invite_expires = now_utc + timedelta(days=expiration_days)
+
+    dob = None
+    if body.date_of_birth:
+        try:
+            dob = datetime.strptime(body.date_of_birth, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid date_of_birth format. Use YYYY-MM-DD.",
+            )
+
+    heir = User(
+        session_id=session_id,
+        username=body.username,
+        legal_first_name=body.legal_first_name,
+        legal_middle_name=body.legal_middle_name,
+        legal_last_name=body.legal_last_name,
+        relationship_to_decedent=body.relationship_to_decedent,
+        date_of_birth=dob,
+        email=body.email,
+        phone=body.phone,
+        physical_address=body.physical_address,
+        role="HEIR",
+        invite_token=invite_token,
+        invite_token_expires_at=invite_expires,
+        invite_token_used=False,
+        status="PENDING",
+        consent_accepted=False,
+        age_verified=False,
+    )
+    db.add(heir)
+    db.commit()
+    db.refresh(heir)
+
+    # Build invite URL
+    base_url = str(request.base_url).rstrip("/")
+    invite_url = f"{base_url}/invite/{invite_token}"
+
+    return JSONResponse(
+        content={
+            "invite_token": str(invite_token),
+            "invite_url": invite_url,
+            "username": heir.username,
+        },
+        status_code=201,
+    )
+
+
+@app.post("/api/heirs/{heir_id}/invite-token")
+@limiter.limit("30/minute")
+async def renew_invite_token(
+    request: Request,
+    heir_id: str,
+    body: InviteTokenRenewRequest,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Regenerate a fresh single-use UUID invite token for an existing Heir.
+
+    Per Backend Spec §9.1 (POST /api/heirs/{heir_id}/invite-token):
+    Resets invite_token_used = False and expiration to expiration_days
+    from now (default 14). Returns 400 if session is LOCKED/FINALIZED.
+    """
+    heir = db.query(User).filter(User.id == heir_id, User.role == "HEIR").first()
+    if not heir:
+        raise HTTPException(status_code=404, detail="Heir not found")
+
+    session = (
+        db.query(SessionModel).filter(SessionModel.id == heir.session_id).first()
+    )
+    if session and session.status in ("LOCKED", "FINALIZED"):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot renew invite tokens for a locked or finalized session.",
+        )
+
+    import uuid as _uuid_mod
+
+    now_utc = datetime.now(timezone.utc)
+    expiration_days = body.expiration_days if body.expiration_days is not None else 14
+    new_token = _uuid_mod.uuid4()
+
+    heir.invite_token = new_token
+    heir.invite_token_expires_at = now_utc + timedelta(days=expiration_days)
+    heir.invite_token_used = False
+    db.commit()
+
+    base_url = str(request.base_url).rstrip("/")
+    invite_url = f"{base_url}/invite/{new_token}"
+
+    return JSONResponse(
+        content={
+            "invite_token": str(new_token),
+            "invite_url": invite_url,
+        }
+    )
+
+
+@app.post("/api/heirs/{heir_id}/send-invite")
+@limiter.limit("30/minute")
+async def send_invite(
+    request: Request,
+    heir_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Dispatch invitation email to the Heir.
+
+    Per Backend Spec §9.1 (POST /api/heirs/{heir_id}/send-invite):
+    Sends email asynchronously via SMTP. On successful relay, updates
+    invitation_dispatched_at. Returns 400 if session is LOCKED/FINALIZED.
+    """
+    heir = db.query(User).filter(User.id == heir_id, User.role == "HEIR").first()
+    if not heir:
+        raise HTTPException(status_code=404, detail="Heir not found")
+
+    if not heir.email:
+        raise HTTPException(
+            status_code=400,
+            detail="Heir has no email address on file.",
+        )
+
+    session = (
+        db.query(SessionModel).filter(SessionModel.id == heir.session_id).first()
+    )
+    if session and session.status in ("LOCKED", "FINALIZED"):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot send invitations for a locked or finalized session.",
+        )
+
+    base_url = str(request.base_url).rstrip("/")
+    invite_url = (
+        f"{base_url}/invite/{heir.invite_token}" if heir.invite_token else base_url
+    )
+
+    # Fire background email task — transactionally decoupled
+    subject = f"Estate Mediation Invitation — {session.title if session else 'Estate'}"
+    body = (
+        f"Dear {heir.username},\n\n"
+        f"You have been invited to participate in the estate mediation for "
+        f"'{session.title if session else 'Estate'}'.\n\n"
+        f"Please use the following link to accept your invitation:\n{invite_url}\n\n"
+        f"This invitation expires on "
+        f"{heir.invite_token_expires_at.isoformat() if heir.invite_token_expires_at else 'N/A'}.\n\n"
+        f"The Estate Steward"
+    )
+
+    await send_email_background(
+        to=heir.email,
+        subject=subject,
+        body=body,
+        on_failure_message=(
+            f"SYSTEM WARNING: Invitation email to {heir.email} "
+            f"(heir {heir.username}) failed to deliver."
+        ),
+    )
+
+    # Mark as dispatched
+    now_utc = datetime.now(timezone.utc)
+    heir.invitation_dispatched_at = now_utc
+    db.commit()
+
+    return JSONResponse(
+        content={
+            "status": "success",
+            "message": "Invitation email dispatched",
+        }
     )
