@@ -1,49 +1,49 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
+import InvitePage from './routes/Invite'
+import OptOutPage from './routes/OptOut'
+import DashboardGuard from './components/DashboardGuard'
 
-function InvitePage() {
+const PUBLIC_PATHS = ['/invite', '/opt-out']
+
+function DashboardPlaceholder() {
   return (
-    <div className="app-main flex items-center justify-center" style={{ flex: 1 }}>
-      <div className="archival-card" style={{ maxWidth: 520, width: '100%' }}>
-        <h2 style={{ marginBottom: 'var(--space-lg)' }}>Invitation</h2>
-        <p className="text-muted">Loading invitation details...</p>
+    <DashboardGuard variant="heir">
+      <div className="flex items-center justify-center" style={{ flex: 1 }}>
+        <div className="archival-card" style={{ maxWidth: 520, width: '100%' }}>
+          <h2 style={{ marginBottom: 'var(--space-lg)' }}>Dashboard</h2>
+          <p className="text-muted">Your mediation workspace will appear here.</p>
+        </div>
       </div>
-    </div>
+    </DashboardGuard>
   )
 }
 
-function DashboardPage() {
+function AdminPlaceholder() {
   return (
-    <div className="app-main flex items-center justify-center" style={{ flex: 1 }}>
-      <div className="archival-card" style={{ maxWidth: 520, width: '100%' }}>
-        <h2 style={{ marginBottom: 'var(--space-lg)' }}>Dashboard</h2>
-        <p className="text-muted">Your mediation workspace will appear here.</p>
+    <DashboardGuard variant="admin">
+      <div className="flex items-center justify-center" style={{ flex: 1 }}>
+        <div className="archival-card" style={{ maxWidth: 520, width: '100%' }}>
+          <h2 style={{ marginBottom: 'var(--space-lg)' }}>Admin Console</h2>
+          <p className="text-muted">Admin management panel loading...</p>
+        </div>
       </div>
-    </div>
+    </DashboardGuard>
   )
 }
 
-function AdminPage() {
-  return (
-    <div className="app-main flex items-center justify-center" style={{ flex: 1 }}>
-      <div className="archival-card" style={{ maxWidth: 520, width: '100%' }}>
-        <h2 style={{ marginBottom: 'var(--space-lg)' }}>Admin Console</h2>
-        <p className="text-muted">Admin management panel loading...</p>
-      </div>
-    </div>
-  )
-}
+function LegalFooter() {
+  const location = useLocation()
+  const isPublic = PUBLIC_PATHS.some((p) => location.pathname.startsWith(p))
+  if (isPublic) return null
 
-function OptOutPage() {
   return (
-    <div className="app-main flex items-center justify-center" style={{ flex: 1 }}>
-      <div className="archival-card text-center" style={{ maxWidth: 480, width: '100%' }}>
-        <h2 style={{ marginBottom: 'var(--space-md)' }}>Invitation Declined</h2>
-        <p className="text-muted">
-          You have declined the consent agreement. No personal data has been saved.
-          Your invitation remains uncompleted.
-        </p>
-      </div>
-    </div>
+    <footer className="app-footer">
+      Disclaimer: The Estate Steward is a collaborative mediation aid designed to assist
+      executors and heirs in dividing personal property. It does not provide legal advice,
+      estate planning, or tax counsel. Use of this tool does not guarantee probate court
+      approval. Executors are advised to consult with a licensed probate attorney regarding
+      their fiduciary obligations and court filings.
+    </footer>
   )
 }
 
@@ -57,19 +57,13 @@ function App() {
 
         <Routes>
           <Route path="/invite/:token" element={<InvitePage />} />
-          <Route path="/dashboard" element={<DashboardPage />} />
-          <Route path="/admin" element={<AdminPage />} />
+          <Route path="/dashboard" element={<DashboardPlaceholder />} />
+          <Route path="/admin" element={<AdminPlaceholder />} />
           <Route path="/opt-out" element={<OptOutPage />} />
           <Route path="*" element={<Navigate to="/invite/placeholder" replace />} />
         </Routes>
 
-        <footer className="app-footer">
-          Disclaimer: The Estate Steward is a collaborative mediation aid designed to assist
-          executors and heirs in dividing personal property. It does not provide legal advice,
-          estate planning, or tax counsel. Use of this tool does not guarantee probate court
-          approval. Executors are advised to consult with a licensed probate attorney regarding
-          their fiduciary obligations and court filings.
-        </footer>
+        <LegalFooter />
       </div>
     </BrowserRouter>
   )
