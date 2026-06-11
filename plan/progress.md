@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T73** — Rate Limiting Middleware (next)
+**T63** — Pi 5 Model Downscaling & Memory Profiling (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -20,6 +20,8 @@
 | T50 | LLM Provider Abstraction Layer & Ollama Health-Check | [x] |
 | T07a | LangGraph State Schema, Nodes & Prompt Templates | [x] |
 | T08 | LangGraph PostgresSaver Integration | [x] |
+| T73 | Rate Limiting Middleware | [x] |
+
 
 ## Blockers
 None.
