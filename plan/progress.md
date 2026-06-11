@@ -1,7 +1,7 @@
 # The Estate Steward: Progress Log
 
 ## Current Task
-**T57** — FastAPI GDPR Data Portability API (next)
+**T19** — Client Routing & Onboarding views (next)
 
 ## Completed Tasks
 | Task ID | Description | Status |
@@ -53,7 +53,15 @@
 [DONE] T33 — Active Abstention Waiver PDF Receipt & Email — abstain endpoint, SMTP receipt, fallback support ticket, ReportLab PDF receipt — 2026-06-11T09:08
 [DONE] T44 — Session Override API — HITL endpoint, ADMIN_OVERRIDE audit log, corrected allocations in checkpointer, adjusted heir points budgets — 2026-06-11T09:22
 [DONE] T55 — FastAPI Heir GDPR Erasure Router — DELETE /api/heirs/me, soft anonymization, chat/checkpointer cleanup, audit PII sanitization — 2026-06-11T09:26
-[NEXT] T57 — FastAPI GDPR Data Portability API — GET /api/heirs/me/export, structured JSON
+[DONE] T57 — FastAPI GDPR Data Portability API — flattened to Compliance Spec §2.2 schema, 3 tests passing — 2026-06-11T09:41
+[DONE] T82 — Hash Chain Verification Tool — GET /api/system/verify-hash-chain, re-computation, break detection, 4 tests — 2026-06-11T09:45
+[DONE] T83 — Mediation Chat History API — GET /api/sessions/{session_id}/heirs/{heir_id}/chat, admin-blocked — 2026-06-11T09:46
+[DONE] T26 — System Backup & Restore — pg_dump, Fernet-encrypted .estate.bak, BIP39 recovery restore — 2026-06-11T09:49
+[DONE] T49 — Secure Session Purge — DELETE /api/sessions/{session_id}?confirm=true, 6-step permanent deletion — 2026-06-11T09:49
+[DONE] T17 — Frontend Vite Base & Vanilla CSS — Archival index card design system, @media print, React Router shell, API proxy — 2026-06-11T10:02
+[DONE] T18 — Zustand store & cache keys — useMediationStore, points math, debounced draft saving, TanStack Query cache key constants — 2026-06-11T10:04
+[DONE] T19 — Client Routing & Onboarding views — legal profile confirmation checkbox, executor ack gate, E-SIGN, consent cards — 2026-06-11T10:13
+[NEXT] T20 — Heir & Admin Dashboard View Guards — UI locks, SB 1001 AI Mediator banners, Sum Validation Hold lock
 
 ## Blockers
 None.
