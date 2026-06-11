@@ -95,9 +95,9 @@ ENCRYPTION_KEY=your-32-byte-base64-aes-fernet-key-here
 
 # Ollama Configuration (Use host.docker.internal to bridge to host Ollama from docker)
 OLLAMA_BASE_URL=http://host.docker.internal:11434
-FAST_THINKER_MODEL=qwen2.5:8b-instruct
-SLOW_THINKER_MODEL=qwen2.5:14b-instruct
-VISION_MODEL=llava:7b
+FAST_THINKER_MODEL=qwen2.5:latest
+SLOW_THINKER_MODEL=qwen2.5:14b
+VISION_MODEL=llava:latest
 EMBEDDING_MODEL=nomic-embed-text
 
 # SMTP Server Configurations
@@ -135,9 +135,9 @@ DB_ECHO=false       # Toggles database query prints (True | False)
 2.  **Verify Ollama Models**:
     Ensure the following models are pulled and ready on the local host:
     ```bash
-    ollama pull qwen2.5:8b-instruct
-    ollama pull qwen2.5:14b-instruct
-    ollama pull llava:7b
+    ollama pull qwen2.5:latest
+    ollama pull qwen2.5:14b
+    ollama pull llava:latest
     ollama pull nomic-embed-text
     ```
 3.  **Launch Local Infrastructure & DB Bootstrap**:

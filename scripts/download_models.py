@@ -25,10 +25,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = PROJECT_ROOT / "backend" / "app" / "models"
 
 OLLAMA_MODELS = {
-    "qwen2.5:8b-instruct":  {"size_gb": 4.7, "description": "Fast Mediator (System 1)"},
-    "qwen2.5:14b-instruct": {"size_gb": 8.2, "description": "Slow Critique (System 2)"},
-    "llava:7b":              {"size_gb": 3.9, "description": "Vision OCR Engine"},
-    "nomic-embed-text":      {"size_gb": 0.27, "description": "Semantic Search Embeddings"},
+    "qwen2.5:latest":  {"size_gb": 4.7, "description": "Fast Mediator (System 1) — 8B instruct"},
+    "qwen2.5:14b":     {"size_gb": 9.0, "description": "Slow Critique (System 2) — 14B instruct"},
+    "llava:latest":     {"size_gb": 4.7, "description": "Vision OCR Engine — 7B multimodal"},
+    "nomic-embed-text": {"size_gb": 0.27, "description": "Semantic Search Embeddings"},
 }
 
 KOKORO_FILES = {
