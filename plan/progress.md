@@ -61,7 +61,9 @@
 [DONE] T17 — Frontend Vite Base & Vanilla CSS — Archival index card design system, @media print, React Router shell, API proxy — 2026-06-11T10:02
 [DONE] T18 — Zustand store & cache keys — useMediationStore, points math, debounced draft saving, TanStack Query cache key constants — 2026-06-11T10:04
 [DONE] T19 — Client Routing & Onboarding views — legal profile confirmation checkbox, executor ack gate, E-SIGN, consent cards — 2026-06-11T10:13
-[NEXT] T20 — Heir & Admin Dashboard View Guards — UI locks, SB 1001 AI Mediator banners, Sum Validation Hold lock
+[DONE] T20 — Heir & Admin Dashboard View Guards — DashboardGuard component, SB 1001 banners, Sum Validation Hold, LegalFooter — 2026-06-11T10:15
+[DONE] T73_UI — Legal Disclaimer Footer — LegalFooter component hiding on public paths, visible on dashboard/admin — 2026-06-11T10:15
+[NEXT] T32 — Government ID Scanner & File Drop UI — HTML5 camera, drag-and-drop upload under PROFILE_HOLD
 
 ## Blockers
 None.
