@@ -10,9 +10,10 @@ T10: Exposes core auth and onboarding endpoints with rate limiting.
 
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI, Depends, HTTPException, Response, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session as DBSession
 
@@ -25,8 +26,10 @@ from .auth import (
     set_auth_cookie,
     clear_auth_cookie,
     get_current_user,
+    get_current_admin,
 )
-from .models import User
+from .models import User, Session as SessionModel, Asset
+from .websocket_manager import manager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -301,3 +304,272 @@ async def invite_login(
         "heir_id": str(user.id),
         "user_status": user.status,
     }
+
+
+# ---------------------------------------------------------------------------
+# T37 — Schema
+# ---------------------------------------------------------------------------
+
+
+class AnnouncementRequest(BaseModel):
+    announcement: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# T37 — Session lifecycle & announcement endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/sessions/{session_id}/launch")
+@limiter.limit("30/minute")
+async def session_launch(
+    request: Request,
+    session_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Launch a session — transition from SETUP to ACTIVE.
+
+    Per Backend Spec §9.1 (POST /api/sessions/{session_id}/launch):
+    Transitions session status from 'SETUP' to 'ACTIVE', permanently locks
+    the inventory catalog, sets the session deadline to 14 days from now,
+    and triggers a WebSocket broadcast of the updated status.
+    Returns 400 if no published assets (LIVE or PRE_ALLOCATED) exist.
+    """
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status != "SETUP":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Session cannot be launched — current status is '{session.status}'.",
+        )
+
+    # Verify at least one published asset exists
+    published_count = (
+        db.query(Asset)
+        .filter(
+            Asset.session_id == session_id,
+            Asset.status.in_(["LIVE", "PRE_ALLOCATED"]),
+        )
+        .count()
+    )
+    if published_count == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot launch session with no published assets. "
+            "Stage and publish at least one asset first.",
+        )
+
+    now_utc = datetime.now(timezone.utc)
+    session.status = "ACTIVE"
+    session.deadline = now_utc + timedelta(days=14)
+    db.commit()
+    db.refresh(session)
+
+    # Broadcast status update via WebSocket
+    await manager.broadcast_session_status(
+        session_id,
+        {
+            "type": "session_status",
+            "status": session.status,
+            "is_paused": session.is_paused,
+            "is_deadlocked": session.is_deadlocked,
+        },
+    )
+
+    return JSONResponse(
+        content={
+            "session_id": str(session.id),
+            "status": session.status,
+        }
+    )
+
+
+@app.post("/api/sessions/{session_id}/pause")
+@limiter.limit("30/minute")
+async def session_pause(
+    request: Request,
+    session_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Pause a session.
+
+    Per Backend Spec §9.1 (POST /api/sessions/{session_id}/pause):
+    Transitions session status to 'LOCKED', sets is_paused = True, updates
+    paused_at to current UTC timestamp, freezing active points sliders
+    and chat mediation interfaces for all heirs.
+    """
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status not in ("ACTIVE", "LOCKED"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Session cannot be paused — current status is '{session.status}'.",
+        )
+
+    if session.is_paused:
+        raise HTTPException(status_code=400, detail="Session is already paused.")
+
+    now_utc = datetime.now(timezone.utc)
+    session.status = "LOCKED"
+    session.is_paused = True
+    session.paused_at = now_utc
+    db.commit()
+
+    await manager.broadcast_session_status(
+        session_id,
+        {
+            "type": "session_status",
+            "status": session.status,
+            "is_paused": session.is_paused,
+            "is_deadlocked": session.is_deadlocked,
+        },
+    )
+
+    return JSONResponse(
+        content={
+            "session_id": str(session.id),
+            "is_paused": True,
+        }
+    )
+
+
+@app.post("/api/sessions/{session_id}/unpause")
+@limiter.limit("30/minute")
+async def session_unpause(
+    request: Request,
+    session_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Unpause a session.
+
+    Per Backend Spec §9.1 (POST /api/sessions/{session_id}/unpause):
+    Transitions session status to 'ACTIVE', sets is_paused = False,
+    calculates total pause duration, dynamically extends invite token
+    expiration timestamps and session deadline by that duration,
+    sets paused_at = NULL, and broadcasts status update.
+    """
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if not session.is_paused:
+        raise HTTPException(status_code=400, detail="Session is not paused.")
+
+    if session.paused_at is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Session is marked as paused but has no pause timestamp.",
+        )
+
+    now_utc = datetime.now(timezone.utc)
+    pause_duration = now_utc - session.paused_at
+    if pause_duration.total_seconds() < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid pause state — paused_at is in the future.",
+        )
+
+    # Extend invite token expiration for all heirs in the session whose
+    # deadlines are not yet passed
+    heirs = (
+        db.query(User)
+        .filter(
+            User.session_id == session_id,
+            User.role == "HEIR",
+            User.invite_token_expires_at.isnot(None),
+        )
+        .all()
+    )
+    for heir in heirs:
+        if heir.invite_token_expires_at and heir.invite_token_expires_at > now_utc:
+            heir.invite_token_expires_at = heir.invite_token_expires_at + pause_duration
+
+    # Extend session deadline
+    if session.deadline:
+        session.deadline = session.deadline + pause_duration
+
+    session.status = "ACTIVE"
+    session.is_paused = False
+    session.paused_at = None
+    db.commit()
+
+    await manager.broadcast_session_status(
+        session_id,
+        {
+            "type": "session_status",
+            "status": session.status,
+            "is_paused": session.is_paused,
+            "is_deadlocked": session.is_deadlocked,
+        },
+    )
+
+    return JSONResponse(
+        content={
+            "session_id": str(session.id),
+            "is_paused": False,
+        }
+    )
+
+
+@app.put("/api/sessions/{session_id}/announcement")
+@limiter.limit("30/minute")
+async def session_announcement(
+    request: Request,
+    session_id: str,
+    body: AnnouncementRequest,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Set, update, or clear a session-wide announcement.
+
+    Per Backend Spec §9.1 (PUT /api/sessions/{session_id}/announcement):
+    Updates the announcement and announcement_updated_at fields in the
+    session, triggers a WebSocket broadcast to all connected users.
+    Returns 400 if session status is 'FINALIZED'.
+    """
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status == "FINALIZED":
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot update announcement on a finalized session.",
+        )
+
+    now_utc = datetime.now(timezone.utc)
+    session.announcement = body.announcement
+    session.announcement_updated_at = now_utc
+    db.commit()
+
+    updated_at_iso = (
+        session.announcement_updated_at.isoformat()
+        if session.announcement_updated_at
+        else None
+    )
+
+    # Broadcast to all connected clients in this session
+    await manager.broadcast_announcement(
+        session_id,
+        session.announcement,
+        updated_at_iso,
+    )
+
+    return JSONResponse(
+        content={
+            "session_id": str(session.id),
+            "announcement": session.announcement,
+            "announcement_updated_at": updated_at_iso,
+        }
+    )
