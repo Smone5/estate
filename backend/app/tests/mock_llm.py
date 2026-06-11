@@ -11,10 +11,10 @@ Usage in tests:
     text = provider.generate_text("fast", "system prompt", "user input", 0.5)
 """
 
-from typing import List, Dict, Optional, Type
+from typing import List, Dict, Optional, Type, Any
 from pydantic import BaseModel
 
-# ── Pre-cached responses ────────────────────────────────────────────────────
+# ── Pre-cached responses ────────────────------------------------------------
 
 FAST_MEDIATOR_RESPONSE = (
     "I hear how much this piece means to you — it carries a lifetime of "
@@ -62,11 +62,33 @@ class MockLLMProvider:
         Available scenarios:
           - "default"         Normal responses
           - "critique_fail"   SLOW_CRITIQUE returns violation=true
+          - "reflect_fail"    SLOW_REFLECT returns aligned=false
           - "ollama_down"     Simulate first health-check fail, then recover
           - "timeout"         Simulate httpx.Timeout exception
         """
         self._scenario = scenario
         self._call_log.clear()
+
+    # ── Limits & profiles ───────────────────────────────────────────────────
+
+    def get_limits(self, profile_override: Optional[str] = None) -> Dict[str, Any]:
+        """Mock limits matching model profiles."""
+        p_name = (profile_override or "default").strip().lower()
+        if p_name in ("pi5", "pi5_alternative"):
+            return {
+                "fast_token_limit": 100,
+                "slow_token_limit": 150,
+                "vision_token_limit": 256,
+                "timeout_seconds": 30,
+                "concurrency_ceiling": 1,
+            }
+        return {
+            "fast_token_limit": 150,
+            "slow_token_limit": 256,
+            "vision_token_limit": 512,
+            "timeout_seconds": 60,
+            "concurrency_ceiling": 4,
+        }
 
     # ── Health-check (T50 consolidated) ─────────────────────────────────────
 
@@ -87,8 +109,15 @@ class MockLLMProvider:
         user_input: str,
         temperature: float = 0.5,
         history: Optional[List[Dict]] = None,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
-        self._call_log.append({"method": "generate_text", "model": model_key})
+        self._call_log.append({
+            "method": "generate_text",
+            "model": model_key,
+            "max_tokens": max_tokens,
+            "timeout": timeout,
+        })
         if self._scenario == "timeout":
             import httpx
             raise httpx.ReadTimeout("Simulated timeout")
@@ -108,9 +137,22 @@ class MockLLMProvider:
         user_input: str,
         response_model: Type[BaseModel],
         temperature: float = 0.0,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> BaseModel:
-        self._call_log.append({"method": "generate_structured", "model": model_key})
+        self._call_log.append({
+            "method": "generate_structured",
+            "model": model_key,
+            "max_tokens": max_tokens,
+            "timeout": timeout,
+        })
         import json
+
+        # Detect ReflectResult calls
+        if response_model.__name__ == "ReflectResult":
+            if self._scenario == "reflect_fail":
+                return response_model(**{"aligned": False, "reason": "Discrepancy detected: heir likes asset but points assigned is 0"})
+            return response_model(**{"aligned": True, "reason": "Valuations aligned with expressed sentiments"})
 
         # Detect router calls: the prompt always contains "routing" / "ROUTER"
         is_router = (
@@ -144,10 +186,31 @@ class MockLLMProvider:
             return response_model(**{"violation": True, "reason": "Mock violation"})
         return response_model(**{"violation": False, "reason": ""})
 
-    def generate_vision(self, model_key: str, image_bytes: bytes, prompt: str) -> str:
-        self._call_log.append({"method": "generate_vision", "model": model_key})
+    def generate_vision(
+        self,
+        model_key: str,
+        image_bytes: bytes,
+        prompt: str,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> str:
+        self._call_log.append({
+            "method": "generate_vision",
+            "model": model_key,
+            "max_tokens": max_tokens,
+            "timeout": timeout,
+        })
         return VISION_OCR_RESULT
 
-    def get_embeddings(self, model_key: str, text: str) -> List[float]:
-        self._call_log.append({"method": "get_embeddings", "model": model_key})
+    def get_embeddings(
+        self,
+        model_key: str,
+        text: str,
+        timeout: Optional[float] = None,
+    ) -> List[float]:
+        self._call_log.append({
+            "method": "get_embeddings",
+            "model": model_key,
+            "timeout": timeout,
+        })
         return EMBEDDING_VECTOR

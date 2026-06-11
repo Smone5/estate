@@ -73,25 +73,40 @@ _VISION_PROVIDER = os.environ.get("VISION_PROVIDER", PROVIDER_OLLAMA).strip().lo
 
 _OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
-# Model profiles (T63)
+# Model profiles (T63 & T07b)
 _MODEL_PROFILES = {
     "default": {
         "fast": "qwen2.5:latest",
         "slow": "qwen2.5:14b",
         "vision": "llava:latest",
         "embedding": "nomic-embed-text",
+        "fast_token_limit": 150,
+        "slow_token_limit": 256,
+        "vision_token_limit": 512,
+        "timeout_seconds": 60,
+        "concurrency_ceiling": 4,
     },
     "pi5": {
         "fast": "qwen2.5:3b-instruct",
         "slow": "qwen2.5:8b-instruct",
         "vision": "moondream:latest",
         "embedding": "nomic-embed-text",
+        "fast_token_limit": 100,
+        "slow_token_limit": 150,
+        "vision_token_limit": 256,
+        "timeout_seconds": 30,
+        "concurrency_ceiling": 1,
     },
     "pi5_alternative": {
         "fast": "qwen2.5:1.5b-instruct",
         "slow": "qwen2.5:8b-instruct",
         "vision": "llava:7b",
         "embedding": "nomic-embed-text",
+        "fast_token_limit": 100,
+        "slow_token_limit": 150,
+        "vision_token_limit": 256,
+        "timeout_seconds": 30,
+        "concurrency_ceiling": 1,
     },
 }
 
@@ -261,10 +276,36 @@ class LLMProvider:
         self._openrouter_client = None
         self._nvidia_client = None
 
+        # Read model profiles & limits (T63 & T07b)
+        self.profile_name = os.environ.get("MODEL_PROFILE", "default").strip().lower()
+        self.profile = _MODEL_PROFILES.get(self.profile_name, _MODEL_PROFILES["default"])
+
+        self.fast_token_limit = int(os.environ.get("LLM_FAST_TOKEN_LIMIT", self.profile.get("fast_token_limit", 150)))
+        self.slow_token_limit = int(os.environ.get("LLM_SLOW_TOKEN_LIMIT", self.profile.get("slow_token_limit", 256)))
+        self.vision_token_limit = int(os.environ.get("LLM_VISION_TOKEN_LIMIT", self.profile.get("vision_token_limit", 512)))
+        self.timeout_seconds = int(os.environ.get("LLM_TIMEOUT_SECONDS", self.profile.get("timeout_seconds", 60)))
+        self.concurrency_ceiling = int(os.environ.get("LLM_CONCURRENCY_CEILING", self.profile.get("concurrency_ceiling", 4)))
+
+        import threading
+        self._semaphore = threading.Semaphore(self.concurrency_ceiling)
+
         logger.info(
-            "LLMProvider initialised: text=%s embedding=%s vision=%s",
+            "LLMProvider initialised: text=%s embedding=%s vision=%s profile=%s concurrency=%d timeout=%d",
             self.llm_provider, self.embedding_provider, self.vision_provider,
+            self.profile_name, self.concurrency_ceiling, self.timeout_seconds,
         )
+
+    def get_limits(self, profile_override: Optional[str] = None) -> Dict[str, Any]:
+        """Return a dictionary of limits for the active or overridden model profile."""
+        p_name = (profile_override or self.profile_name).strip().lower()
+        prof = _MODEL_PROFILES.get(p_name, self.profile)
+        return {
+            "fast_token_limit": prof.get("fast_token_limit", 150),
+            "slow_token_limit": prof.get("slow_token_limit", 256),
+            "vision_token_limit": prof.get("vision_token_limit", 512),
+            "timeout_seconds": prof.get("timeout_seconds", 60),
+            "concurrency_ceiling": prof.get("concurrency_ceiling", 4),
+        }
 
     # ------------------------------------------------------------------
     # public API
@@ -277,26 +318,39 @@ class LLMProvider:
         user_input: str,
         temperature: float = 0.5,
         history: Optional[List[Dict[str, str]]] = None,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         """Generate a plain-text completion."""
+        if max_tokens is None:
+            if model_key == MODEL_KEY_FAST:
+                max_tokens = self.fast_token_limit
+            elif model_key == MODEL_KEY_SLOW:
+                max_tokens = self.slow_token_limit
+            elif model_key == MODEL_KEY_VISION:
+                max_tokens = self.vision_token_limit
+        if timeout is None:
+            timeout = self.timeout_seconds
+
         logger.debug(
-            "[LLMProvider] generate_text model_key=%s temperature=%.2f prompt_len=%d",
-            model_key, temperature, len(user_input),
+            "[LLMProvider] generate_text model_key=%s temperature=%.2f prompt_len=%d max_tokens=%s timeout=%s",
+            model_key, temperature, len(user_input), max_tokens, timeout,
         )
-        if self.llm_provider == PROVIDER_OLLAMA:
-            result = self._ollama_generate_text(model_key, system_prompt, user_input, temperature, history)
-        elif self.llm_provider == PROVIDER_OPENAI:
-            result = self._openai_generate_text(model_key, system_prompt, user_input, temperature, history)
-        elif self.llm_provider == PROVIDER_ANTHROPIC:
-            result = self._anthropic_generate_text(model_key, system_prompt, user_input, temperature, history)
-        elif self.llm_provider == PROVIDER_GOOGLE:
-            result = self._google_generate_text(model_key, system_prompt, user_input, temperature, history)
-        elif self.llm_provider == PROVIDER_OPENROUTER:
-            result = self._openrouter_generate_text(model_key, system_prompt, user_input, temperature, history)
-        elif self.llm_provider == PROVIDER_NVIDIA:
-            result = self._nvidia_generate_text(model_key, system_prompt, user_input, temperature, history)
-        else:
-            raise ValueError(f"Unsupported text provider: {self.llm_provider}")
+        with self._semaphore:
+            if self.llm_provider == PROVIDER_OLLAMA:
+                result = self._ollama_generate_text(model_key, system_prompt, user_input, temperature, history, max_tokens, timeout)
+            elif self.llm_provider == PROVIDER_OPENAI:
+                result = self._openai_generate_text(model_key, system_prompt, user_input, temperature, history, max_tokens, timeout)
+            elif self.llm_provider == PROVIDER_ANTHROPIC:
+                result = self._anthropic_generate_text(model_key, system_prompt, user_input, temperature, history, max_tokens, timeout)
+            elif self.llm_provider == PROVIDER_GOOGLE:
+                result = self._google_generate_text(model_key, system_prompt, user_input, temperature, history, max_tokens, timeout)
+            elif self.llm_provider == PROVIDER_OPENROUTER:
+                result = self._openrouter_generate_text(model_key, system_prompt, user_input, temperature, history, max_tokens, timeout)
+            elif self.llm_provider == PROVIDER_NVIDIA:
+                result = self._nvidia_generate_text(model_key, system_prompt, user_input, temperature, history, max_tokens, timeout)
+            else:
+                raise ValueError(f"Unsupported text provider: {self.llm_provider}")
         logger.debug("[LLMProvider] generate_text result_len=%d", len(result))
         return result
 
@@ -307,38 +361,51 @@ class LLMProvider:
         user_input: str,
         response_model: Type[BaseModel],
         temperature: float = 0.0,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> BaseModel:
         """Generate a structured (JSON) output validated against a Pydantic model."""
+        if max_tokens is None:
+            if model_key == MODEL_KEY_FAST:
+                max_tokens = self.fast_token_limit
+            elif model_key == MODEL_KEY_SLOW:
+                max_tokens = self.slow_token_limit
+            elif model_key == MODEL_KEY_VISION:
+                max_tokens = self.vision_token_limit
+        if timeout is None:
+            timeout = self.timeout_seconds
+
         logger.debug(
-            "[LLMProvider] generate_structured model_key=%s model=%s",
-            model_key, response_model.__name__,
+            "[LLMProvider] generate_structured model_key=%s model=%s max_tokens=%s timeout=%s",
+            model_key, response_model.__name__, max_tokens, timeout,
         )
-        if self.llm_provider == PROVIDER_OLLAMA:
-            result = self._ollama_generate_structured(
-                model_key, system_prompt, user_input, response_model, temperature,
-            )
-        elif self.llm_provider == PROVIDER_OPENAI:
-            result = self._openai_generate_structured(
-                model_key, system_prompt, user_input, response_model, temperature,
-            )
-        elif self.llm_provider == PROVIDER_ANTHROPIC:
-            result = self._anthropic_generate_structured(
-                model_key, system_prompt, user_input, response_model, temperature,
-            )
-        elif self.llm_provider == PROVIDER_GOOGLE:
-            result = self._google_generate_structured(
-                model_key, system_prompt, user_input, response_model, temperature,
-            )
-        elif self.llm_provider == PROVIDER_OPENROUTER:
-            result = self._openrouter_generate_structured(
-                model_key, system_prompt, user_input, response_model, temperature,
-            )
-        elif self.llm_provider == PROVIDER_NVIDIA:
-            result = self._nvidia_generate_structured(
-                model_key, system_prompt, user_input, response_model, temperature,
-            )
-        else:
-            raise ValueError(f"Unsupported text provider: {self.llm_provider}")
+        with self._semaphore:
+            if self.llm_provider == PROVIDER_OLLAMA:
+                result = self._ollama_generate_structured(
+                    model_key, system_prompt, user_input, response_model, temperature, max_tokens, timeout
+                )
+            elif self.llm_provider == PROVIDER_OPENAI:
+                result = self._openai_generate_structured(
+                    model_key, system_prompt, user_input, response_model, temperature, max_tokens, timeout
+                )
+            elif self.llm_provider == PROVIDER_ANTHROPIC:
+                result = self._anthropic_generate_structured(
+                    model_key, system_prompt, user_input, response_model, temperature, max_tokens, timeout
+                )
+            elif self.llm_provider == PROVIDER_GOOGLE:
+                result = self._google_generate_structured(
+                    model_key, system_prompt, user_input, response_model, temperature, max_tokens, timeout
+                )
+            elif self.llm_provider == PROVIDER_OPENROUTER:
+                result = self._openrouter_generate_structured(
+                    model_key, system_prompt, user_input, response_model, temperature, max_tokens, timeout
+                )
+            elif self.llm_provider == PROVIDER_NVIDIA:
+                result = self._nvidia_generate_structured(
+                    model_key, system_prompt, user_input, response_model, temperature, max_tokens, timeout
+                )
+            else:
+                raise ValueError(f"Unsupported text provider: {self.llm_provider}")
         logger.debug("[LLMProvider] generate_structured OK")
         return result
 
@@ -347,47 +414,64 @@ class LLMProvider:
         model_key: str,
         image_bytes: bytes,
         prompt: str,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         """Vision / OCR extraction from image bytes."""
+        if max_tokens is None:
+            max_tokens = self.vision_token_limit
+        if timeout is None:
+            timeout = self.timeout_seconds
+
         logger.debug(
-            "[LLMProvider] generate_vision model_key=%s img_size=%d prompt_len=%d",
-            model_key, len(image_bytes), len(prompt),
+            "[LLMProvider] generate_vision model_key=%s img_size=%d prompt_len=%d max_tokens=%s timeout=%s",
+            model_key, len(image_bytes), len(prompt), max_tokens, timeout,
         )
-        if self.vision_provider == PROVIDER_OLLAMA:
-            result = self._ollama_generate_vision(model_key, image_bytes, prompt)
-        elif self.vision_provider == PROVIDER_OPENAI:
-            result = self._openai_generate_vision(model_key, image_bytes, prompt)
-        elif self.vision_provider == PROVIDER_ANTHROPIC:
-            result = self._anthropic_generate_vision(model_key, image_bytes, prompt)
-        elif self.vision_provider == PROVIDER_GOOGLE:
-            result = self._google_generate_vision(model_key, image_bytes, prompt)
-        elif self.vision_provider == PROVIDER_OPENROUTER:
-            result = self._openrouter_generate_vision(model_key, image_bytes, prompt)
-        elif self.vision_provider == PROVIDER_NVIDIA:
-            result = self._nvidia_generate_vision(model_key, image_bytes, prompt)
-        else:
-            raise ValueError(f"Unsupported vision provider: {self.vision_provider}")
+        with self._semaphore:
+            if self.vision_provider == PROVIDER_OLLAMA:
+                result = self._ollama_generate_vision(model_key, image_bytes, prompt, max_tokens, timeout)
+            elif self.vision_provider == PROVIDER_OPENAI:
+                result = self._openai_generate_vision(model_key, image_bytes, prompt, max_tokens, timeout)
+            elif self.vision_provider == PROVIDER_ANTHROPIC:
+                result = self._anthropic_generate_vision(model_key, image_bytes, prompt, max_tokens, timeout)
+            elif self.vision_provider == PROVIDER_GOOGLE:
+                result = self._google_generate_vision(model_key, image_bytes, prompt, max_tokens, timeout)
+            elif self.vision_provider == PROVIDER_OPENROUTER:
+                result = self._openrouter_generate_vision(model_key, image_bytes, prompt, max_tokens, timeout)
+            elif self.vision_provider == PROVIDER_NVIDIA:
+                result = self._nvidia_generate_vision(model_key, image_bytes, prompt, max_tokens, timeout)
+            else:
+                raise ValueError(f"Unsupported vision provider: {self.vision_provider}")
         logger.debug("[LLMProvider] generate_vision result_len=%d", len(result))
         return result
 
-    def get_embeddings(self, model_key: str, text: str) -> List[float]:
+    def get_embeddings(
+        self,
+        model_key: str,
+        text: str,
+        timeout: Optional[float] = None,
+    ) -> List[float]:
         """Return a dense embedding vector for the given text."""
+        if timeout is None:
+            timeout = self.timeout_seconds
+
         logger.debug(
-            "[LLMProvider] get_embeddings model_key=%s text_len=%d",
-            model_key, len(text),
+            "[LLMProvider] get_embeddings model_key=%s text_len=%d timeout=%s",
+            model_key, len(text), timeout,
         )
-        if self.embedding_provider == PROVIDER_OLLAMA:
-            result = self._ollama_get_embeddings(model_key, text)
-        elif self.embedding_provider == PROVIDER_OPENAI:
-            result = self._openai_get_embeddings(model_key, text)
-        elif self.embedding_provider == PROVIDER_GOOGLE:
-            result = self._google_get_embeddings(model_key, text)
-        elif self.embedding_provider == PROVIDER_OPENROUTER:
-            result = self._openrouter_get_embeddings(model_key, text)
-        elif self.embedding_provider == PROVIDER_NVIDIA:
-            result = self._nvidia_get_embeddings(model_key, text)
-        else:
-            raise ValueError(f"Unsupported embedding provider: {self.embedding_provider}")
+        with self._semaphore:
+            if self.embedding_provider == PROVIDER_OLLAMA:
+                result = self._ollama_get_embeddings(model_key, text, timeout)
+            elif self.embedding_provider == PROVIDER_OPENAI:
+                result = self._openai_get_embeddings(model_key, text, timeout)
+            elif self.embedding_provider == PROVIDER_GOOGLE:
+                result = self._google_get_embeddings(model_key, text, timeout)
+            elif self.embedding_provider == PROVIDER_OPENROUTER:
+                result = self._openrouter_get_embeddings(model_key, text, timeout)
+            elif self.embedding_provider == PROVIDER_NVIDIA:
+                result = self._nvidia_get_embeddings(model_key, text, timeout)
+            else:
+                raise ValueError(f"Unsupported embedding provider: {self.embedding_provider}")
         logger.debug("[LLMProvider] get_embeddings dim=%d", len(result))
         return result
 
@@ -425,14 +509,21 @@ class LLMProvider:
         user_input: str,
         temperature: float,
         history: Optional[List[Dict[str, str]]],
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         model = self._resolve_model(model_key)
         full_prompt = system_prompt + "\n\n" + user_input
+        if self._ollama_client and timeout is not None:
+            self._ollama_client._client.timeout = httpx.Timeout(timeout)
+        options = {"temperature": temperature}
+        if max_tokens is not None:
+            options["num_predict"] = max_tokens
         try:
             response = self._ollama_client.generate(
                 model=model,
                 prompt=full_prompt,
-                options={"temperature": temperature},
+                options=options,
                 keep_alive=-1,
             )
             return response.response.strip()
@@ -447,6 +538,8 @@ class LLMProvider:
         user_input: str,
         response_model: Type[BaseModel],
         temperature: float,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> BaseModel:
         model = self._resolve_model(model_key)
         schema_json = response_model.model_json_schema()
@@ -456,11 +549,16 @@ class LLMProvider:
             f"Respond ONLY with a valid JSON object matching this schema:\n{schema_str}\n\n"
             f"Input: {user_input}\nJSON:"
         )
+        if self._ollama_client and timeout is not None:
+            self._ollama_client._client.timeout = httpx.Timeout(timeout)
+        options = {"temperature": temperature}
+        if max_tokens is not None:
+            options["num_predict"] = max_tokens
         try:
             response = self._ollama_client.generate(
                 model=model,
                 prompt=full_prompt,
-                options={"temperature": temperature},
+                options=options,
                 keep_alive=-1,
             )
             import json
@@ -475,16 +573,23 @@ class LLMProvider:
         model_key: str,
         image_bytes: bytes,
         prompt: str,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         model = self._resolve_model(model_key)
         import base64
         b64_image = base64.b64encode(image_bytes).decode("utf-8")
+        if self._ollama_client and timeout is not None:
+            self._ollama_client._client.timeout = httpx.Timeout(timeout)
+        options = {"temperature": 0.0}
+        if max_tokens is not None:
+            options["num_predict"] = max_tokens
         try:
             response = self._ollama_client.generate(
                 model=model,
                 prompt=prompt,
                 images=[b64_image],
-                options={"temperature": 0.0},
+                options=options,
                 keep_alive=-1,
             )
             return response.response.strip()
@@ -492,8 +597,15 @@ class LLMProvider:
             logger.error("Ollama generate_vision failed for model=%s: %s", model, exc)
             raise
 
-    def _ollama_get_embeddings(self, model_key: str, text: str) -> List[float]:
+    def _ollama_get_embeddings(
+        self,
+        model_key: str,
+        text: str,
+        timeout: Optional[float] = None,
+    ) -> List[float]:
         model = self._resolve_model(model_key)
+        if self._ollama_client and timeout is not None:
+            self._ollama_client._client.timeout = httpx.Timeout(timeout)
         try:
             response = self._ollama_client.embed(
                 model=model,
@@ -527,6 +639,8 @@ class LLMProvider:
         user_input: str,
         temperature: float,
         history: Optional[List[Dict[str, str]]],
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         model = self._resolve_model(model_key)
         client = self._get_openai_client()
@@ -536,6 +650,7 @@ class LLMProvider:
         messages.append({"role": "user", "content": user_input})
         resp = client.chat.completions.create(
             model=model, messages=messages, temperature=temperature,
+            max_tokens=max_tokens, timeout=timeout,
         )
         return resp.choices[0].message.content.strip()
 
@@ -546,6 +661,8 @@ class LLMProvider:
         user_input: str,
         response_model: Type[BaseModel],
         temperature: float,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> BaseModel:
         model = self._resolve_model(model_key)
         client = self._get_openai_client()
@@ -557,6 +674,8 @@ class LLMProvider:
             ],
             temperature=temperature,
             response_format={"type": "json_object"},
+            max_tokens=max_tokens,
+            timeout=timeout,
         )
         import json
         parsed = json.loads(resp.choices[0].message.content)
@@ -567,6 +686,8 @@ class LLMProvider:
         model_key: str,
         image_bytes: bytes,
         prompt: str,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         model = self._resolve_model(model_key)
         client = self._get_openai_client()
@@ -581,14 +702,20 @@ class LLMProvider:
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
                 ],
             }],
-            max_tokens=500,
+            max_tokens=max_tokens or 500,
+            timeout=timeout,
         )
         return resp.choices[0].message.content.strip()
 
-    def _openai_get_embeddings(self, model_key: str, text: str) -> List[float]:
+    def _openai_get_embeddings(
+        self,
+        model_key: str,
+        text: str,
+        timeout: Optional[float] = None,
+    ) -> List[float]:
         model = self._resolve_model(model_key)
         client = self._get_openai_client()
-        resp = client.embeddings.create(model=model, input=text)
+        resp = client.embeddings.create(model=model, input=text, timeout=timeout)
         return resp.data[0].embedding
 
     # ------------------------------------------------------------------
@@ -611,6 +738,8 @@ class LLMProvider:
         user_input: str,
         temperature: float,
         history: Optional[List[Dict[str, str]]],
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         model = self._resolve_model(model_key)
         client = self._get_anthropic_client()
@@ -624,7 +753,8 @@ class LLMProvider:
             system=system_prompt,
             messages=messages,
             temperature=temperature,
-            max_tokens=1024,
+            max_tokens=max_tokens or 1024,
+            timeout=timeout,
         )
         return resp.content[0].text.strip()
 
@@ -635,9 +765,11 @@ class LLMProvider:
         user_input: str,
         response_model: Type[BaseModel],
         temperature: float,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> BaseModel:
         import json
-        text = self._anthropic_generate_text(model_key, system_prompt, user_input, temperature, None)
+        text = self._anthropic_generate_text(model_key, system_prompt, user_input, temperature, None, max_tokens, timeout)
         parsed = json.loads(text)
         return response_model(**parsed)
 
@@ -646,6 +778,8 @@ class LLMProvider:
         model_key: str,
         image_bytes: bytes,
         prompt: str,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         model = self._resolve_model(model_key)
         client = self._get_anthropic_client()
@@ -664,7 +798,8 @@ class LLMProvider:
                     }},
                 ],
             }],
-            max_tokens=500,
+            max_tokens=max_tokens or 500,
+            timeout=timeout,
         )
         return resp.content[0].text.strip()
 
@@ -689,16 +824,22 @@ class LLMProvider:
         user_input: str,
         temperature: float,
         history: Optional[List[Dict[str, str]]],
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         model = self._resolve_model(model_key)
         genai = self._get_google_client()
+        gen_config = {"temperature": temperature}
+        if max_tokens is not None:
+            gen_config["max_output_tokens"] = max_tokens
         gemini_model = genai.GenerativeModel(
             model_name=model,
             system_instruction=system_prompt,
-            generation_config={"temperature": temperature},
+            generation_config=gen_config,
         )
         combined = user_input
-        resp = gemini_model.generate_content(combined)
+        req_options = {"timeout": timeout} if timeout else None
+        resp = gemini_model.generate_content(combined, request_options=req_options)
         return resp.text.strip()
 
     def _google_generate_structured(
@@ -708,9 +849,11 @@ class LLMProvider:
         user_input: str,
         response_model: Type[BaseModel],
         temperature: float,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> BaseModel:
         import json
-        text = self._google_generate_text(model_key, system_prompt, user_input, temperature, None)
+        text = self._google_generate_text(model_key, system_prompt, user_input, temperature, None, max_tokens, timeout)
         parsed = json.loads(text)
         return response_model(**parsed)
 
@@ -719,17 +862,35 @@ class LLMProvider:
         model_key: str,
         image_bytes: bytes,
         prompt: str,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         model = self._resolve_model(model_key)
         genai = self._get_google_client()
-        gemini_model = genai.GenerativeModel(model_name=model)
-        resp = gemini_model.generate_content([prompt, {"mime_type": "image/jpeg", "data": image_bytes}])
+        gen_config = {}
+        if max_tokens is not None:
+            gen_config["max_output_tokens"] = max_tokens
+        gemini_model = genai.GenerativeModel(
+            model_name=model,
+            generation_config=gen_config,
+        )
+        req_options = {"timeout": timeout} if timeout else None
+        resp = gemini_model.generate_content(
+            [prompt, {"mime_type": "image/jpeg", "data": image_bytes}],
+            request_options=req_options
+        )
         return resp.text.strip()
 
-    def _google_get_embeddings(self, model_key: str, text: str) -> List[float]:
+    def _google_get_embeddings(
+        self,
+        model_key: str,
+        text: str,
+        timeout: Optional[float] = None,
+    ) -> List[float]:
         model = self._resolve_model(model_key)
         genai = self._get_google_client()
-        resp = genai.embed_content(model=model, content=text)
+        req_options = {"timeout": timeout} if timeout else None
+        resp = genai.embed_content(model=model, content=text, request_options=req_options)
         return resp["embedding"]
 
     # ------------------------------------------------------------------
@@ -755,6 +916,8 @@ class LLMProvider:
         user_input: str,
         temperature: float,
         history: Optional[List[Dict[str, str]]],
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         model = self._resolve_model(model_key)
         client = self._get_openrouter_client()
@@ -766,6 +929,8 @@ class LLMProvider:
             model=model,
             messages=messages,
             temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
         )
         return resp.choices[0].message.content.strip()
 
@@ -776,6 +941,8 @@ class LLMProvider:
         user_input: str,
         response_model: Type[BaseModel],
         temperature: float,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> BaseModel:
         model = self._resolve_model(model_key)
         client = self._get_openrouter_client()
@@ -788,6 +955,8 @@ class LLMProvider:
             ],
             temperature=temperature,
             response_format={"type": "json_object"},
+            max_tokens=max_tokens,
+            timeout=timeout,
         )
         parsed = json.loads(resp.choices[0].message.content)
         return response_model(**parsed)
@@ -797,6 +966,8 @@ class LLMProvider:
         model_key: str,
         image_bytes: bytes,
         prompt: str,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         model = self._resolve_model(model_key)
         client = self._get_openrouter_client()
@@ -811,14 +982,20 @@ class LLMProvider:
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
                 ],
             }],
-            max_tokens=500,
+            max_tokens=max_tokens or 500,
+            timeout=timeout,
         )
         return resp.choices[0].message.content.strip()
 
-    def _openrouter_get_embeddings(self, model_key: str, text: str) -> List[float]:
+    def _openrouter_get_embeddings(
+        self,
+        model_key: str,
+        text: str,
+        timeout: Optional[float] = None,
+    ) -> List[float]:
         model = self._resolve_model(model_key)
         client = self._get_openrouter_client()
-        resp = client.embeddings.create(model=model, input=text)
+        resp = client.embeddings.create(model=model, input=text, timeout=timeout)
         return resp.data[0].embedding
 
     # ------------------------------------------------------------------
@@ -844,6 +1021,8 @@ class LLMProvider:
         user_input: str,
         temperature: float,
         history: Optional[List[Dict[str, str]]],
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         model = self._resolve_model(model_key)
         client = self._get_nvidia_client()
@@ -855,6 +1034,8 @@ class LLMProvider:
             model=model,
             messages=messages,
             temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
         )
         return resp.choices[0].message.content.strip()
 
@@ -865,6 +1046,8 @@ class LLMProvider:
         user_input: str,
         response_model: Type[BaseModel],
         temperature: float,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> BaseModel:
         model = self._resolve_model(model_key)
         client = self._get_nvidia_client()
@@ -877,6 +1060,8 @@ class LLMProvider:
             ],
             temperature=temperature,
             response_format={"type": "json_object"},
+            max_tokens=max_tokens,
+            timeout=timeout,
         )
         parsed = json.loads(resp.choices[0].message.content)
         return response_model(**parsed)
@@ -886,6 +1071,8 @@ class LLMProvider:
         model_key: str,
         image_bytes: bytes,
         prompt: str,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         model = self._resolve_model(model_key)
         client = self._get_nvidia_client()
@@ -900,14 +1087,20 @@ class LLMProvider:
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
                 ],
             }],
-            max_tokens=500,
+            max_tokens=max_tokens or 500,
+            timeout=timeout,
         )
         return resp.choices[0].message.content.strip()
 
-    def _nvidia_get_embeddings(self, model_key: str, text: str) -> List[float]:
+    def _nvidia_get_embeddings(
+        self,
+        model_key: str,
+        text: str,
+        timeout: Optional[float] = None,
+    ) -> List[float]:
         model = self._resolve_model(model_key)
         client = self._get_nvidia_client()
-        resp = client.embeddings.create(model=model, input=text)
+        resp = client.embeddings.create(model=model, input=text, timeout=timeout)
         return resp.data[0].embedding
 
 

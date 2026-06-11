@@ -449,3 +449,93 @@ class TestRouterHealingFallback:
         # Should route to CHAT_MEDIATION path (RETRIEVE_RAG)
         assert "RETRIEVE_RAG" in node_names
         assert "HITL_GUARD" not in node_names
+
+
+class TestModelProfileConfiguration:
+    @mock.patch("app.graph.presidio_scrub", side_effect=_mock_scrub)
+    def test_model_profile_limits_passed(self, _mock_presidio):
+        provider = MockLLMProvider()
+        graph = build_graph(provider=provider, db_session_factory=None)
+
+        state = make_initial_state(
+            session_id=SESSION_ID,
+            heir_id=HEIR_ID,
+            input_text="Hello mediation",
+        )
+
+        config = {
+            "configurable": {
+                "thread_id": f"{SESSION_ID}:{HEIR_ID}",
+                "model_profile": "pi5"
+            }
+        }
+        list(graph.stream(state, config))
+
+        # Verify that limits matching the 'pi5' profile were passed
+        # 'pi5' limits: fast_token_limit=100, slow_token_limit=150, timeout_seconds=30
+        call_log = provider._call_log
+        assert len(call_log) > 0
+
+        for call in call_log:
+            if call["method"] in ("generate_text", "generate_structured"):
+                if call["model"] == "fast":
+                    assert call["max_tokens"] == 100
+                elif call["model"] == "slow":
+                    assert call["max_tokens"] == 150
+                assert call["timeout"] == 30
+
+
+class TestSentimentDiscrepancy:
+    @mock.patch("app.graph.presidio_scrub", side_effect=_mock_scrub)
+    def test_sentiment_discrepancy_loopback(self, _mock_presidio):
+        provider = MockLLMProvider()
+        provider.set_scenario("reflect_fail")
+        graph = build_graph(provider=provider, db_session_factory=None)
+
+        valuations = [
+            ValuationSchema(asset_id="111", heir_id=HEIR_ID, points=1000, reasoning="Love it.", is_reasoning_shared=False),
+        ]
+        state = make_initial_state(
+            session_id=SESSION_ID,
+            heir_id=HEIR_ID,
+            input_text="I want to submit my points.",
+            valuations=valuations,
+            loopback_count=0,
+        )
+        config = {"configurable": {"thread_id": f"{SESSION_ID}:{HEIR_ID}"}}
+        events = list(graph.stream(state, config))
+
+        # Check nodes traversed: SLOW_REFLECT -> VALIDATE -> RETRIEVE_RAG because validation fails
+        node_names = [list(e.keys())[0] for e in events]
+        assert "SLOW_REFLECT" in node_names
+        assert "VALIDATE" in node_names
+
+        final = _merge_events(events, state)
+        assert final.get("loopback_count", 0) >= 1
+        assert final.get("validation_passed") is False
+        assert "sentiment" in final.get("correction_instruction", "").lower()
+
+    @mock.patch("app.graph.presidio_scrub", side_effect=_mock_scrub)
+    def test_sentiment_discrepancy_escalation_to_hitl(self, _mock_presidio):
+        provider = MockLLMProvider()
+        provider.set_scenario("reflect_fail")
+        graph = build_graph(provider=provider, db_session_factory=None)
+
+        valuations = [
+            ValuationSchema(asset_id="111", heir_id=HEIR_ID, points=1000, reasoning="Love it.", is_reasoning_shared=False),
+        ]
+        state = make_initial_state(
+            session_id=SESSION_ID,
+            heir_id=HEIR_ID,
+            input_text="I want to submit my points.",
+            valuations=valuations,
+            loopback_count=3,  # Already exceeded threshold
+        )
+        config = {"configurable": {"thread_id": f"{SESSION_ID}:{HEIR_ID}"}}
+        events = list(graph.stream(state, config))
+
+        node_names = [list(e.keys())[0] for e in events]
+        assert "HITL_GUARD" in node_names
+
+        final = _merge_events(events, state)
+        assert final.get("is_deadlocked") is True

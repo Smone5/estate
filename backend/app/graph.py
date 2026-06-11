@@ -17,6 +17,7 @@ import re
 from typing import Annotated, Any, Callable, Dict, List, Literal, Optional, Type
 
 import httpx
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -49,6 +50,11 @@ class IntentResult(BaseModel):
 
 class CritiqueResult(BaseModel):
     violation: bool
+    reason: str = ""
+
+
+class ReflectResult(BaseModel):
+    aligned: bool
     reason: str = ""
 
 
@@ -104,6 +110,7 @@ class MediationState(TypedDict, total=False):
     loopback_count: int
     critique_loopback_count: int
     correction_instruction: Optional[str]
+    sentiment_aligned: bool
     # ── Transient fields for intra-graph routing (not persisted) ──
     routing_intent: str
     critique_passed: bool
@@ -132,6 +139,7 @@ _DEFAULT_STATE: MediationState = {
     "loopback_count": 0,
     "critique_loopback_count": 0,
     "correction_instruction": None,
+    "sentiment_aligned": True,
 }
 
 
@@ -215,6 +223,19 @@ _COMPLIANCE_FALLBACK = (
     "I am here to listen and help you catalog your feelings and stories about the estate, "
     "but I cannot promise ownership or make financial allocations. "
     "Let's focus on what this keepsake means to you."
+)
+
+_REFLECT_SYSTEM_PROMPT = (
+    "You are a sentiment alignment auditor. Review the heir's chat history and their point valuations. "
+    "Verify if the point allocations match the sentiments expressed in the chat history. "
+    "For example, if an heir repeatedly expresses intense attachment to an asset, they should not allocate 0 points to it. "
+    "If they express they have no interest or dislike an asset, they should not allocate a high number of points to it.\n\n"
+    "Assets:\n{assets}\n\n"
+    "Valuations:\n{valuations}\n\n"
+    "Chat History:\n{chat_history}\n\n"
+    "Output a JSON block with the following fields:\n"
+    '- "aligned": true if the valuations are generally aligned with the expressed sentiments, false if there is a clear contradiction.\n'
+    '- "reason": a brief explanation of the alignment or contradiction.'
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -301,6 +322,8 @@ def _generate_structured_with_healing(
     temperature: float,
     thread_id: str,
     node_name: str,
+    max_tokens: Optional[int] = None,
+    timeout: Optional[float] = None,
 ) -> BaseModel:
     """Call provider.generate_structured with automatic JSON healing."""
     for attempt in range(_MAX_JSON_RETRIES + 1):
@@ -311,6 +334,8 @@ def _generate_structured_with_healing(
                 user_input=user_input,
                 response_model=response_model,
                 temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
             )
         except (json.JSONDecodeError, ValidationError) as exc:
             if attempt < _MAX_JSON_RETRIES:
@@ -380,7 +405,7 @@ def build_graph(
             "scrubbed_text": scrubbed,
         }
 
-    def _router_node(state: MediationState) -> MediationState:
+    def _router_node(state: MediationState, config: Optional[RunnableConfig] = None) -> MediationState:
         """ROUTER_NODE — Smart Intent Router (LangGraph Spec §4.2)."""
         thread_id = _get_thread_id(state)
         node_name = "ROUTER_NODE"
@@ -390,6 +415,11 @@ def build_graph(
 
         # Format the prompt with the scrubbed text
         user_input = _ROUTER_SYSTEM_PROMPT.format(user_input=scrubbed)
+
+        profile_name = None
+        if config is not None:
+            profile_name = config.get("configurable", {}).get("model_profile")
+        limits = provider.get_limits(profile_name)
 
         try:
             result = _generate_structured_with_healing(
@@ -401,6 +431,8 @@ def build_graph(
                 temperature=0.0,
                 thread_id=thread_id,
                 node_name=node_name,
+                max_tokens=limits["fast_token_limit"],
+                timeout=limits["timeout_seconds"],
             )
             intent = result.intent
         except Exception:
@@ -517,7 +549,7 @@ def build_graph(
         finally:
             db.close()
 
-    def _fast_mediate_node(state: MediationState) -> MediationState:
+    def _fast_mediate_node(state: MediationState, config: Optional[RunnableConfig] = None) -> MediationState:
         """FAST_MEDIATE_NODE — System 1 Conversation (LangGraph Spec §4.3)."""
         thread_id = _get_thread_id(state)
         node_name = "FAST_MEDIATE"
@@ -540,12 +572,19 @@ def build_graph(
             scrubbed_text=scrubbed,
         )
 
+        profile_name = None
+        if config is not None:
+            profile_name = config.get("configurable", {}).get("model_profile")
+        limits = provider.get_limits(profile_name)
+
         raw_response = provider.generate_text(
             model_key=MODEL_KEY_FAST,
             system_prompt="",
             user_input=user_input,
             temperature=0.5,
             history=None,
+            max_tokens=limits["fast_token_limit"],
+            timeout=limits["timeout_seconds"],
         )
 
         # Post-generation 4-sentence enforcement
@@ -557,7 +596,7 @@ def build_graph(
             "mediator_response": truncated,  # transient — consumed by critique node
         }
 
-    def _slow_critique_node(state: MediationState) -> MediationState:
+    def _slow_critique_node(state: MediationState, config: Optional[RunnableConfig] = None) -> MediationState:
         """SLOW_CRITIQUE_NODE — System 2 Chat Audit (LangGraph Spec §4.4)."""
         thread_id = _get_thread_id(state)
         node_name = "SLOW_CRITIQUE"
@@ -567,6 +606,11 @@ def build_graph(
         critique_count = state.get("critique_loopback_count", 0)
 
         user_input = _CRITIQUE_SYSTEM_PROMPT.format(mediator_response=mediator_response)
+
+        profile_name = None
+        if config is not None:
+            profile_name = config.get("configurable", {}).get("model_profile")
+        limits = provider.get_limits(profile_name)
 
         try:
             result = _generate_structured_with_healing(
@@ -578,6 +622,8 @@ def build_graph(
                 temperature=0.0,
                 thread_id=thread_id,
                 node_name=node_name,
+                max_tokens=limits["slow_token_limit"],
+                timeout=limits["timeout_seconds"],
             )
         except Exception:
             logger.warning(
@@ -628,16 +674,72 @@ def build_graph(
             "critique_passed": True,
         }
 
-    def _slow_reflect_node(state: MediationState) -> MediationState:
+    def _slow_reflect_node(state: MediationState, config: Optional[RunnableConfig] = None) -> MediationState:
         """SLOW_REFLECT_NODE — System 2 Valuation Audit (LangGraph Spec §4.4b)."""
         thread_id = _get_thread_id(state)
         node_name = "SLOW_REFLECT"
         _thread_log(thread_id, node_name, "Auditing valuations against user sentiment.")
-        # For T07a, this node prepares the valuations for validation.
-        # The actual sentiment cross-check is model-dependent and will be
-        # finalized in T07b with the T63 model profile.
-        _thread_log(thread_id, node_name, "Valuation audit complete (pass-through for T07a).")
-        return {}  # type: ignore[return-value]
+
+        profile_name = None
+        if config is not None:
+            profile_name = config.get("configurable", {}).get("model_profile")
+        limits = provider.get_limits(profile_name)
+
+        valuations = state.get("valuations", [])
+        assets = state.get("assets", [])
+        chat_history = state.get("chat_history", [])
+
+        # Format valuations, assets, and chat history
+        vals_str = "\n".join(
+            f"- Asset ID: {v.asset_id if not isinstance(v, dict) else v.get('asset_id')}, "
+            f"Points: {v.points if not isinstance(v, dict) else v.get('points')}, "
+            f"Reasoning: {v.reasoning if not isinstance(v, dict) else v.get('reasoning')}"
+            for v in valuations
+        )
+        assets_str = "\n".join(
+            f"- Asset ID: {a.id if not isinstance(a, dict) else a.get('id')}, "
+            f"Title: {a.title if not isinstance(a, dict) else a.get('title')}, "
+            f"Description: {a.description if not isinstance(a, dict) else a.get('description')}, "
+            f"Sentiment tag: {a.sentiment_tag if not isinstance(a, dict) else a.get('sentiment_tag')}"
+            for a in assets
+        )
+        hist_str = _format_chat_history_for_prompt(chat_history)
+
+        user_input = _REFLECT_SYSTEM_PROMPT.format(
+            assets=assets_str,
+            valuations=vals_str,
+            chat_history=hist_str,
+        )
+
+        try:
+            result = _generate_structured_with_healing(
+                provider=provider,
+                model_key=MODEL_KEY_SLOW,
+                system_prompt="",
+                user_input=user_input,
+                response_model=ReflectResult,
+                temperature=0.0,
+                thread_id=thread_id,
+                node_name=node_name,
+                max_tokens=limits["slow_token_limit"],
+                timeout=limits["timeout_seconds"],
+            )
+            aligned = result.aligned
+            reason = result.reason
+        except Exception as exc:
+            logger.warning(
+                "[THREAD %s] [NODE %s] - Reflect JSON healing/call failed. Defaulting to aligned=True. Error: %s",
+                thread_id,
+                node_name,
+                exc,
+            )
+            aligned = True
+            reason = "Failed to run sentiment audit, defaulting to aligned."
+
+        _thread_log(thread_id, node_name, f"Valuation sentiment audit complete. Aligned: {aligned}. Reason: {reason}")
+        return {  # type: ignore[return-value]
+            "sentiment_aligned": aligned,
+        }
 
     def _validate_node(state: MediationState) -> MediationState:
         """VALIDATE_NODE — Mathematical Constraints (LangGraph Spec §4.5)."""
@@ -646,9 +748,12 @@ def build_graph(
         valuations = state.get("valuations", [])
         total = sum(v.points if isinstance(v, dict) else getattr(v, "points", 0) for v in valuations)
         loopback = state.get("loopback_count", 0)
+        
+        # Check sentiment alignment
+        sentiment_aligned = state.get("sentiment_aligned", True)
 
-        if total == 1000:
-            _thread_log(thread_id, node_name, f"Math check: Total point allocations = {total}. Verification: SUCCESS.")
+        if total == 1000 and sentiment_aligned:
+            _thread_log(thread_id, node_name, f"Math & sentiment check: Total point allocations = {total}, aligned = {sentiment_aligned}. Verification: SUCCESS.")
             return {  # type: ignore[return-value]
                 "loopback_count": 0,
                 "correction_instruction": None,
@@ -659,13 +764,25 @@ def build_graph(
             _thread_log(
                 thread_id,
                 node_name,
-                f"Math check: Total point allocations = {total}. Verification: FAILED. "
+                f"Math & sentiment check: Total point allocations = {total}, aligned = {sentiment_aligned}. Verification: FAILED. "
                 f"Incrementing loopback counter to {loopback + 1}.",
             )
-            instruction = (
-                f"Your total points ({total}) do not sum to the required 1000. "
-                f"Please adjust your allocations so they total exactly 1000 points."
-            )
+            if total != 1000 and not sentiment_aligned:
+                instruction = (
+                    f"Your total points ({total}) do not sum to the required 1000, "
+                    f"and your point allocations do not align with your expressed sentiments. "
+                    f"Please adjust your allocations to total exactly 1000 points and ensure they match your sentiments."
+                )
+            elif total != 1000:
+                instruction = (
+                    f"Your total points ({total}) do not sum to the required 1000. "
+                    f"Please adjust your allocations so they total exactly 1000 points."
+                )
+            else:
+                instruction = (
+                    f"Your point allocations do not align with your expressed sentiments in the chat history. "
+                    f"Please revise your allocations to match your expressed feelings."
+                )
             return {  # type: ignore[return-value]
                 "loopback_count": loopback + 1,
                 "correction_instruction": instruction,
@@ -676,14 +793,14 @@ def build_graph(
         _thread_log(
             thread_id,
             node_name,
-            f"Math check: Total point allocations = {total}. Verification: FAILED. "
+            f"Math & sentiment check: Total point allocations = {total}, aligned = {sentiment_aligned}. Verification: FAILED. "
             f"Loopback count {loopback} > 2. Escalating to HITL_GUARD.",
         )
         return {  # type: ignore[return-value]
             "loopback_count": loopback + 1,
             "correction_instruction": (
-                f"Points sum validation failed after {loopback} attempts. "
-                f"Executor assistance required to correct allocations."
+                f"Points validation failed (points total: {total}, sentiment aligned: {sentiment_aligned}) "
+                f"after {loopback} attempts. Executor assistance required to correct allocations."
             ),
             "validation_passed": False,
         }
