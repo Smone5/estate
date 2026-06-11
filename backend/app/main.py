@@ -2594,6 +2594,82 @@ async def setup_admin(
     }
 
 
+class SessionResponse(BaseModel):
+    id: str
+    title: str
+    status: str = Field(..., pattern=r"^(SETUP|ACTIVE|LOCKED|FINALIZED)$")
+    is_paused: bool
+    paused_at: str | None = None
+    is_deadlocked: bool
+    announcement: str | None = None
+    announcement_updated_at: str | None = None
+    deadline: str | None = None
+    created_at: str
+
+
+@app.get("/api/sessions/{session_id}", response_model=SessionResponse)
+@limiter.limit("60/minute")
+async def get_session_details(
+    request: Request,
+    session_id: str,
+    response: Response,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Retrieve session details by ID.
+    """
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return SessionResponse(
+        id=str(session.id),
+        title=session.title,
+        status=session.status,
+        is_paused=session.is_paused,
+        paused_at=session.paused_at.isoformat() if session.paused_at else None,
+        is_deadlocked=session.is_deadlocked,
+        announcement=session.announcement,
+        announcement_updated_at=session.announcement_updated_at.isoformat() if session.announcement_updated_at else None,
+        deadline=session.deadline.isoformat() if session.deadline else None,
+        created_at=session.created_at.isoformat() if session.created_at else "",
+    )
+
+
+@app.get("/api/sessions", response_model=list[SessionResponse])
+@limiter.limit("60/minute")
+async def list_sessions(
+    request: Request,
+    response: Response,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    List all sessions (accessible to Admin or Heir).
+    """
+    if current_user.get("role") == "ADMIN":
+        sessions = db.query(SessionModel).all()
+    else:
+        session_id = current_user.get("session_id")
+        sessions = db.query(SessionModel).filter(SessionModel.id == session_id).all() if session_id else []
+
+    return [
+        SessionResponse(
+            id=str(s.id),
+            title=s.title,
+            status=s.status,
+            is_paused=s.is_paused,
+            paused_at=s.paused_at.isoformat() if s.paused_at else None,
+            is_deadlocked=s.is_deadlocked,
+            announcement=s.announcement,
+            announcement_updated_at=s.announcement_updated_at.isoformat() if s.announcement_updated_at else None,
+            deadline=s.deadline.isoformat() if s.deadline else None,
+            created_at=s.created_at.isoformat() if s.created_at else "",
+        )
+        for s in sessions
+    ]
+
+
 @app.post("/api/sessions")
 @limiter.limit("30/minute")
 async def create_session(

@@ -91,7 +91,9 @@ def client(mock_db):
     def _override_get_current_admin():
         return _make_admin_payload()
 
+    from app.auth import get_current_user
     app.dependency_overrides[get_current_admin] = _override_get_current_admin
+    app.dependency_overrides[get_current_user] = lambda: {"user_id": str(HEIR_ID), "role": "ADMIN"}
 
     async def _async_noop(*args, **kwargs):
         pass
@@ -435,3 +437,44 @@ class TestSessionAnnouncement:
             json={"announcement": "Test"},
         )
         assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# GET /api/sessions/{session_id} & GET /api/sessions
+# ---------------------------------------------------------------------------
+
+
+class TestGetSessionDetails:
+
+    def test_get_session_details_success(self, client):
+        test_client, mock_db, _ = client
+        session = _build_session(status="ACTIVE")
+        session.created_at = datetime.now(timezone.utc)
+        mock_db.query.return_value.filter.return_value.first.return_value = session
+
+        resp = test_client.get(f"/api/sessions/{SESSION_ID}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["id"] == str(SESSION_ID)
+        assert data["status"] == "ACTIVE"
+        assert data["is_paused"] is False
+
+    def test_get_session_details_not_found(self, client):
+        test_client, mock_db, _ = client
+        mock_db.query.return_value.filter.return_value.first.return_value = None
+
+        resp = test_client.get(f"/api/sessions/{SESSION_ID}")
+        assert resp.status_code == 404
+
+    def test_list_sessions_admin(self, client):
+        test_client, mock_db, _ = client
+        session = _build_session(status="SETUP")
+        session.created_at = datetime.now(timezone.utc)
+        mock_db.query.return_value.all.return_value = [session]
+
+        resp = test_client.get("/api/sessions")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, list)
+        assert len(data) == 1
+        assert data[0]["id"] == str(SESSION_ID)
