@@ -33,9 +33,9 @@ from .models import User, Session as SessionModel, Asset, Valuation, AuditLog, S
 from .websocket_manager import manager
 from .services.storage import get_storage_driver, preprocess_image
 from .services.llm_provider import get_provider, reset_provider
-from .services.smtp_service import send_email_background, Attachment
+from .services.smtp_service import send_email, send_email_background, Attachment
 from .solver import solve_mnw, SolverResult
-from .pdf_builder import build_keepsake_pdf, build_probate_ledger_pdf
+from .pdf_builder import build_keepsake_pdf, build_probate_ledger_pdf, build_waiver_receipt_pdf
 from .notice_log import build_notice_log
 
 logging.basicConfig(
@@ -2717,6 +2717,277 @@ from fastapi.responses import StreamingResponse
 
 class KeepsakeEmailRequest(BaseModel):
     heir_id: str | None = None
+
+
+class AbstainRequest(BaseModel):
+    legal_name_signature: str = Field(..., min_length=3, max_length=200)
+
+
+# ---------------------------------------------------------------------------
+# T33 — Active Abstention Waiver PDF Receipt & Email
+# ---------------------------------------------------------------------------
+
+
+def _generate_waiver_hash(session_id: str, heir_id: str, signature: str, prev_hash: str) -> str:
+    """Generate a SHA-256 hash for the abstention waiver audit log entry."""
+    raw_data = f"{session_id}:{heir_id}:ABSTENTION_WAIVER:{signature}:{prev_hash}"
+    return hashlib.sha256(raw_data.encode()).hexdigest()
+
+
+@app.post("/api/heirs/me/abstain")
+@limiter.limit("10/minute")
+async def abstain(
+    request: Request,
+    body: AbstainRequest,
+    response: Response,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Active Abstention / Waiver of Rights.
+
+    Per Backend Spec §9.5 (POST /api/heirs/me/abstain):
+    1. Verifies Heir status is ACTIVE or SUBMITTED.
+    2. Logs ABSTENTION_WAIVER event block in audit_logs.
+    3. Updates status to ABSTAINED, cascade-deletes valuations.
+    4. Queues SMTP receipt email. On failure, sets waiver_email_failed=True
+       and auto-generates a support request.
+    5. Broadcasts WebSocket status frame.
+    """
+    if current_user.get("role") != "HEIR":
+        raise HTTPException(status_code=403, detail="Heir access required")
+
+    heir_id = current_user.get("user_id")
+    heir = (
+        db.query(User)
+        .filter(User.id == heir_id, User.role == "HEIR")
+        .with_for_update()
+        .first()
+    )
+    if not heir:
+        raise HTTPException(status_code=401, detail="Heir not found")
+
+    if heir.status not in ("ACTIVE", "SUBMITTED"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot abstain — current status is '{heir.status}'.",
+        )
+
+    now_utc = datetime.now(timezone.utc)
+    client_ip = request.client.host if request.client else "unknown"
+
+    # 2. Write ABSTENTION_WAIVER audit log entry
+    prev_hash = "0" * 64
+    last_log = (
+        db.query(AuditLog)
+        .filter(AuditLog.session_id == heir.session_id)
+        .order_by(AuditLog.id.desc())
+        .first()
+    )
+    if last_log:
+        prev_hash = last_log.sha256_hash
+
+    state_snapshot = {
+        "event": "ABSTENTION_WAIVER",
+        "heir_id": str(heir.id),
+        "heir_username": heir.username,
+        "legal_name_signature": body.legal_name_signature,
+        "ip_address": client_ip,
+        "timestamp_utc": now_utc.isoformat(),
+    }
+    waiver_hash = _generate_waiver_hash(
+        str(heir.session_id) if heir.session_id else "",
+        str(heir.id),
+        body.legal_name_signature,
+        prev_hash,
+    )
+
+    audit_entry = AuditLog(
+        session_id=heir.session_id,
+        event_type="ABSTENTION_WAIVER",
+        state_snapshot=state_snapshot,
+        prev_hash=prev_hash,
+        sha256_hash=waiver_hash,
+    )
+    db.add(audit_entry)
+
+    # 3. Update status and cascade-delete valuations
+    heir.status = "ABSTAINED"
+    heir.is_submitted = False
+    # Delete all valuations for this heir (both default 0-pt and submitted values)
+    db.query(Valuation).filter(Valuation.heir_id == heir_id).delete()
+
+    # 4. E-SIGN/UETA compliance email dispatch
+    if heir.email:
+        full_name = " ".join(
+            p for p in [
+                heir.legal_first_name,
+                heir.legal_middle_name,
+                heir.legal_last_name,
+            ] if p
+        ) or heir.username
+
+        subject = f"Abstention Waiver Receipt — {full_name}"
+        email_body = (
+            f"Dear {full_name},\n\n"
+            f"This email confirms that you have electronically signed an abstention "
+            f"waiver, voluntarily withdrawing from the asset distribution proceedings.\n\n"
+            f"Signed: {body.legal_name_signature}\n"
+            f"Date: {now_utc.strftime('%B %d, %Y at %H:%M UTC')}\n"
+            f"IP Address: {client_ip}\n\n"
+            f"Per the Electronic Signatures in Global and National Commerce Act "
+            f"(E-SIGN, 15 U.S.C. § 7001) and the Uniform Electronic Transactions Act "
+            f"(UETA), your electronic signature carries the same legal weight as a "
+            f"handwritten signature.\n\n"
+            f"To obtain a PDF copy of your signed waiver receipt, visit your dashboard "
+            f"and download it from the 'My Abstention' section.\n\n"
+            f"The Estate Steward"
+        )
+
+        # Session for the subject description
+        session = (
+            db.query(SessionModel)
+            .filter(SessionModel.id == heir.session_id)
+            .first()
+        )
+        session_title = session.title if session else "Estate"
+
+        email_success = await send_email(
+            to=heir.email,
+            subject=subject,
+            body=email_body,
+        )
+
+        if not email_success:
+            # SMTP failed after all retries — set flag and auto-generate support ticket
+            heir.waiver_email_failed = True
+            fallback_msg = (
+                f"SYSTEM WARNING: Electronic waiver confirmation email to "
+                f"{heir.email} failed to deliver. Executor must physically "
+                f"deliver a printed copy of the signed waiver receipt to "
+                f"satisfy E-SIGN/UETA regulations."
+            )
+            logger.warning(fallback_msg)
+            support_ticket = SupportRequest(
+                session_id=heir.session_id,
+                heir_id=heir.id,
+                message=fallback_msg,
+                status="OPEN",
+            )
+            db.add(support_ticket)
+
+    db.commit()
+
+    # 5. Broadcast WebSocket status frame
+    if heir.session_id:
+        await manager.broadcast_session_status(
+            str(heir.session_id),
+            {
+                "type": "heir_abstained",
+                "heir_id": str(heir.id),
+                "heir_username": heir.username,
+            },
+        )
+
+    return JSONResponse(
+        content={
+            "status": "success",
+            "message": "Waiver signed and abstention registered",
+        }
+    )
+
+
+@app.get("/api/heirs/me/abstain/receipt")
+@limiter.limit("20/minute")
+async def download_abstain_receipt(
+    request: Request,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Download the signed waiver receipt PDF.
+
+    Per Backend Spec §9.5 (GET /api/heirs/me/abstain/receipt):
+    Generates and downloads a single-page ReportLab PDF receipt containing
+    the full E-SIGN disclosure, signed waiver text, Heir's legal name,
+    IP address, timestamp, and database SHA-256 block hash seal.
+    """
+    if current_user.get("role") != "HEIR":
+        raise HTTPException(status_code=403, detail="Heir access required")
+
+    heir_id = current_user.get("user_id")
+    heir = db.query(User).filter(
+        User.id == heir_id,
+        User.role == "HEIR",
+        User.status == "ABSTAINED",
+    ).first()
+    if not heir:
+        raise HTTPException(
+            status_code=400,
+            detail="No abstention waiver found. Your account is not in ABSTAINED status.",
+        )
+
+    session = (
+        db.query(SessionModel)
+        .filter(SessionModel.id == heir.session_id)
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Retrieve the ABSTENTION_WAIVER audit log entry for this heir
+    waiver_log = (
+        db.query(AuditLog)
+        .filter(
+            AuditLog.session_id == heir.session_id,
+            AuditLog.event_type == "ABSTENTION_WAIVER",
+        )
+        .order_by(AuditLog.id.desc())
+        .first()
+    )
+    if not waiver_log:
+        raise HTTPException(
+            status_code=500,
+            detail="Waiver audit log entry not found.",
+        )
+
+    snapshot = waiver_log.state_snapshot or {}
+    legal_name_signature = snapshot.get("legal_name_signature", heir.username)
+    ip_address = snapshot.get("ip_address", "unknown")
+    timestamp_str = snapshot.get("timestamp_utc", "")
+    if timestamp_str:
+        try:
+            timestamp_utc = datetime.fromisoformat(timestamp_str)
+        except ValueError:
+            timestamp_utc = waiver_log.created_at or datetime.now(timezone.utc)
+    else:
+        timestamp_utc = waiver_log.created_at or datetime.now(timezone.utc)
+    sha256_hash = waiver_log.sha256_hash
+
+    try:
+        pdf_buf = build_waiver_receipt_pdf(
+            session=session,
+            heir=heir,
+            legal_name_signature=legal_name_signature,
+            ip_address=ip_address,
+            timestamp_utc=timestamp_utc,
+            sha256_hash=sha256_hash,
+        )
+    except Exception as e:
+        logger.exception("Failed to build waiver receipt PDF")
+        raise HTTPException(
+            status_code=500,
+            detail=f"PDF generation failed: {str(e)}",
+        )
+
+    pdf_bytes = pdf_buf.getvalue()
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="waiver_receipt_{heir_id}.pdf"',
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

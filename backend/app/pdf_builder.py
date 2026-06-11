@@ -1236,3 +1236,189 @@ def _build_mathematical_proof(
         )
 
     return elements
+
+
+# ---------------------------------------------------------------------------
+# T33 — Active Abstention Waiver PDF Receipt
+# ---------------------------------------------------------------------------
+
+
+def _wrap_text(text: str, canvas_obj, max_width: float) -> list[str]:
+    """Wrap a text string to fit within a given width on a ReportLab canvas."""
+    words = text.split()
+    lines: list[str] = []
+    current_line = ""
+    for word in words:
+        test_line = f"{current_line} {word}".strip()
+        if canvas_obj.stringWidth(test_line, "Times-Roman", 11) <= max_width:
+            current_line = test_line
+        else:
+            if current_line:
+                lines.append(current_line)
+            current_line = word
+    if current_line:
+        lines.append(current_line)
+    return lines if lines else [text]
+
+
+def build_waiver_receipt_pdf(
+    session: SessionModel,
+    heir: UserModel,
+    legal_name_signature: str,
+    ip_address: str,
+    timestamp_utc: datetime,
+    sha256_hash: str,
+) -> io.BytesIO:
+    """Build a single-page waiver receipt PDF per Backend Spec §9.5.
+
+    Contains the E-SIGN disclosure, signed waiver text, Heir's legal name,
+    IP address, timestamp, and SHA-256 block hash seal.
+    """
+    buf = io.BytesIO()
+
+    c = NumberedCanvas(buf, pagesize=letter)
+    c.setTitle(f"Abstention Waiver Receipt — {heir.username}")
+
+    # Cream background
+    c.setFillColor(CREAM_BG)
+    c.rect(0, 0, 8.5 * 72, 11 * 72, fill=True, stroke=False)
+
+    y = 10.25 * inch  # Starting Y position from top
+
+    # Title
+    c.setFont("Times-Bold", 24)
+    c.setFillColor(SLATE_900)
+    c.drawCentredString(4.25 * inch, y, "Abstention Waiver Receipt")
+    y -= 0.5 * inch
+
+    # Horizontal rule
+    c.setStrokeColor(WARM_GREY)
+    c.setLineWidth(1)
+    c.line(1.0 * inch, y, 7.5 * inch, y)
+    y -= 0.35 * inch
+
+    # Session info
+    c.setFont("Helvetica-Bold", 11)
+    c.setFillColor(SLATE_900)
+    c.drawString(1.0 * inch, y, f"Session: {session.title or session.id}")
+    y -= 0.22 * inch
+    c.setFont("Helvetica", 10)
+    c.setFillColor(MUTED_SLATE)
+    c.drawString(1.0 * inch, y, f"Session ID: {session.id}")
+    y -= 0.35 * inch
+
+    # Heir info section
+    c.setFont("Helvetica-Bold", 12)
+    c.setFillColor(SLATE_900)
+    c.setStrokeColor(WARM_GREY)
+    c.setLineWidth(0.5)
+    c.line(1.0 * inch, y, 7.5 * inch, y)
+    y -= 0.28 * inch
+    c.drawString(1.0 * inch, y, "Participant Information")
+    y -= 0.28 * inch
+    c.setFont("Helvetica", 10)
+    full_name = " ".join(
+        p for p in [heir.legal_first_name, heir.legal_middle_name, heir.legal_last_name] if p
+    ) or heir.username
+    c.drawString(1.0 * inch, y, f"Legal Name: {full_name}")
+    y -= 0.20 * inch
+    if heir.email:
+        c.drawString(1.0 * inch, y, f"Email: {heir.email}")
+        y -= 0.20 * inch
+    c.drawString(1.0 * inch, y, f"Participant ID: {heir.id}")
+    y -= 0.35 * inch
+
+    # Waiver declaration
+    c.setFont("Helvetica-Bold", 12)
+    c.setFillColor(SLATE_900)
+    c.line(1.0 * inch, y, 7.5 * inch, y)
+    y -= 0.28 * inch
+    c.drawString(1.0 * inch, y, "Waiver Declaration")
+    y -= 0.30 * inch
+    c.setFont("Times-Roman", 11)
+    c.setFillColor(SLATE_900)
+
+    waiver_text = (
+        f'I, {full_name}, hereby voluntarily abstain from all asset distribution '
+        f'proceedings for session "{session.title or session.id}". '
+        f'I understand that this waiver is binding and irrevocable under the '
+        f'Electronic Signatures in Global and National Commerce Act (E-SIGN, 15 U.S.C. § 7001) '
+        f'and the Uniform Electronic Transactions Act (UETA). I acknowledge that by '
+        f'providing my legal name signature below, I am signing this waiver electronically '
+        f'with the same legal effect as a handwritten signature.'
+    )
+    waiver_lines = _wrap_text(waiver_text, c, 6.5 * inch)
+    for line in waiver_lines:
+        c.drawString(1.0 * inch, y, line)
+        y -= 0.18 * inch
+
+    y -= 0.15 * inch
+
+    # Digital signature block
+    c.setFont("Helvetica-Bold", 12)
+    c.setFillColor(SLATE_900)
+    c.line(1.0 * inch, y, 7.5 * inch, y)
+    y -= 0.28 * inch
+    c.drawString(1.0 * inch, y, "Digital Signature")
+    y -= 0.28 * inch
+    c.setFont("Helvetica", 10)
+    c.drawString(1.0 * inch, y, f"Signed: {legal_name_signature}")
+    y -= 0.22 * inch
+    timestamp_str = timestamp_utc.strftime("%B %d, %Y at %H:%M UTC")
+    c.drawString(1.0 * inch, y, f"Date: {timestamp_str}")
+    y -= 0.22 * inch
+    c.drawString(1.0 * inch, y, f"IP Address: {ip_address}")
+    y -= 0.35 * inch
+
+    # E-SIGN disclosure
+    c.setFont("Helvetica-Bold", 12)
+    c.setFillColor(SLATE_900)
+    c.line(1.0 * inch, y, 7.5 * inch, y)
+    y -= 0.28 * inch
+    c.drawString(1.0 * inch, y, "E-SIGN / UETA Disclosure")
+    y -= 0.30 * inch
+    c.setFont("Helvetica", 9)
+    c.setFillColor(MUTED_SLATE)
+
+    disclosure_text = (
+        "This document serves as your official receipt confirming that you have "
+        "electronically signed an abstention waiver under the Electronic Signatures "
+        "in Global and National Commerce Act (E-SIGN, 15 U.S.C. § 7001 et seq.) and "
+        "the Uniform Electronic Transactions Act (UETA). Your electronic signature "
+        "carries the same legal weight and enforceability as a handwritten signature "
+        "on paper. Retain this PDF for your records. If you believe this abstention "
+        "was recorded in error, contact the Executor immediately via the Help/Support "
+        "system."
+    )
+    disclosure_lines = _wrap_text(disclosure_text, c, 6.5 * inch)
+    for line in disclosure_lines:
+        c.drawString(1.0 * inch, y, line)
+        y -= 0.16 * inch
+
+    y -= 0.25 * inch
+
+    # Hash seal
+    c.setFont("Helvetica-Bold", 12)
+    c.setFillColor(SLATE_900)
+    c.line(1.0 * inch, y, 7.5 * inch, y)
+    y -= 0.28 * inch
+    c.drawString(1.0 * inch, y, "Tamper-Proof Audit Seal")
+    y -= 0.28 * inch
+    c.setFont("Courier", 7)
+    c.setFillColor(MUTED_SLATE)
+    c.drawString(1.0 * inch, y, f"SHA-256: {sha256_hash}")
+    y -= 0.40 * inch
+
+    # Legal disclaimer at bottom
+    c.setFont("Helvetica-Oblique", 8)
+    c.setFillColor(MUTED_SLATE)
+    disc_lines = _wrap_text(LEGAL_DISCLAIMER, c, 6.5 * inch)
+    for line in disc_lines:
+        c.drawString(1.0 * inch, y, line)
+        y -= 0.14 * inch
+
+    c.showPage()
+    c.save()
+
+    buf.seek(0)
+    return buf
