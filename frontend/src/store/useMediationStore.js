@@ -55,6 +55,7 @@ export const useMediationStore = create((set, get) => ({
     isDeadlocked: sessionData.is_deadlocked,
     is_hitl_suspended: sessionData.is_hitl_suspended || false,
     isSubmitted: sessionData.is_submitted,
+    isAuthenticated: sessionData.isAuthenticated ?? false,
     draft_version: sessionData.draft_version || 0,
     sessionStatus: sessionData.status,
   }),

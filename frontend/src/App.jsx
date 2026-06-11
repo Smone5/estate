@@ -3,6 +3,7 @@ import InvitePage from './routes/Invite'
 import OptOutPage from './routes/OptOut'
 import DashboardGuard from './components/DashboardGuard'
 import IDScanner from './components/IDScanner'
+import SemanticSearch from './components/SemanticSearch'
 
 const PUBLIC_PATHS = ['/invite', '/opt-out']
 
@@ -10,12 +11,7 @@ function DashboardPlaceholder() {
   return (
     <DashboardGuard variant="heir">
       <IDScanner />
-      <div className="flex items-center justify-center" style={{ flex: 1 }}>
-        <div className="archival-card" style={{ maxWidth: 520, width: '100%' }}>
-          <h2 style={{ marginBottom: 'var(--space-lg)' }}>Dashboard</h2>
-          <p className="text-muted">Your mediation workspace will appear here.</p>
-        </div>
-      </div>
+      <SemanticSearch />
     </DashboardGuard>
   )
 }

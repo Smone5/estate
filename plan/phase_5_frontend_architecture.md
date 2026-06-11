@@ -68,27 +68,27 @@ Structure the React Vite application shell, Zustand global stores, custom client
 
 ## Phase Checklist & Tasks
 
-### [ ] Task T17: Frontend Vite Base & Vanilla CSS
+### [x] Task T17: Frontend Vite Base & Vanilla CSS
 * **Objective**: Configure Vite, React index files, and define Vanilla CSS global tokens and archival layout cards. **Must include `@media print` CSS rules for printable paper records per DB Spec §7.**
 * **Verification**: Verify visual index card layouts render with rigid offset shadows. Verify that `window.print()` produces legible printer-friendly output with visible cryptographic seals.
 
-### [ ] Task T18: Zustand store & cache keys
+### [x] Task T18: Zustand store & cache keys
 * **Objective**: Build `useMediationStore` implementing state variables (including `is_hitl_suspended`), points calculation math, and debounced draft saving.
 * **Verification**: Verify slider changes deduct points from the 1000-point unallocated pool in state, and confirm the store successfully holds and updates `is_hitl_suspended`.
 
-### [ ] Task T19: Client Routing & Onboarding views
+### [x] Task T19: Client Routing & Onboarding views
 * **Objective**: Program React Router pages, onboarding checkbox gates, the Session Resumption layout, and the Onboarding Consent card layout containing the legally required E-SIGN Act Consumer Disclosure Banner. **Additionally, implement the pre-filled legal profile summary card (rendered as editable text inputs to support typo correction) with confirmation checkbox per Compliance Spec §3.1. Also implement the Executor acknowledgment checkbox during session initialization confirming the advisory nature of algorithm results per Legal Spec §5.**
 * **Verification**: Verify that used tokens bypass consent screens, mounting resumption cards. Check that E-SIGN disclosures render correctly on onboarding. Verify that the legal profile summary card displays pre-filled details as editable text inputs with a confirmation checkbox. Verify that the executor acknowledgment checkbox is required before session creation is unlocked.
 
-### [ ] Task T20: Heir & Admin Dashboard View Guards
+### [x] Task T20: Heir & Admin Dashboard View Guards
 * **Objective**: Code layout wrappers enforcing Setup, Hold, Pause, Sum Validation Hold (HITL_GUARD suspension), and Submission locks. Render the permanent low-contrast SB 1001 Bot Disclosure banners ("Chatting with AI Mediator" top banner on mobile, and "AI Mediator Agent" header on desktop), and the Sum Validation Hold warning banner (*"Points submission suspended. Your allocations require review and correction by the Executor."*). **(Note: SB 942 'Synthesized AI Voice' synthetic voice labels are NOT owned by T20 — this responsibility is consolidated under T25.)**
 * **Verification**: Verify that setting isPaused = true or is_hitl_suspended = true in state disables sliders and chat, and check that the AI Mediator banner renders permanently on the respective views. Verify that draft saving remains enabled during Sum Validation Hold.
 
-### [ ] Task T73_UI: Legal Disclaimer Footer Component
+### [x] Task T73_UI: Legal Disclaimer Footer Component
 * **Objective**: Build the permanent legal disclaimer footer component rendered on all dashboard views (Heir and Admin). Display the full disclaimer text per Legal Spec §5. Must be non-dismissable and visible on every route after authentication (not on the public onboarding page to avoid clutter, but on `/dashboard`, `/admin`, and all sub-routes).
 * **Verification**: Verify that the disclaimer footer is rendered on both Heir and Admin dashboard views and contains all required disclaimer language. Verify it does not appear on the public `/invite/:token` onboarding page.
 
-### [ ] Task T32: Government ID Scanner & File Drop UI
+### [x] Task T32: Government ID Scanner & File Drop UI
 * **Objective**: Build the HTML5 rear-camera overlay guide and desktop drag-and-drop ID scan file upload UI cards on the frontend dashboard. Ensure it renders only under `'PROFILE_HOLD'` status, and not on the public onboarding page. Depends on `T31` for ID uploads.
 * **Verification**: Mount the uploader on `/dashboard` with status `'PROFILE_HOLD'`, and verify that the HTML5 camera scanner opens and uploader drag-and-drop actions trigger file transmission.
 
@@ -96,7 +96,7 @@ Structure the React Vite application shell, Zustand global stores, custom client
 * **Objective**: Construct the Executor dashboard "Force Allocation Console" UI where the Executor can view deadlocked items, select winning beneficiaries, write fiduciary override reasons, and submit them via `POST /api/sessions/{session_id}/override`. Depends on `T44` for the override endpoint.
 * **Verification**: Verify that under session deadlock status, the console displays contested assets and enables manual allocations.
 
-### [ ] Task T46: Semantic Search UI
+### [x] Task T46: Semantic Search UI
 * **Objective**: Build the asset gallery search bar, filter panel (category, allocation, provenance, shared stories toggles), sorting controls, confidence badge rendering, and zero-match fallback state with the "Ask the Mediator" chat injection button.
 * **Verification**: Enter a search query and verify filtered results render with confidence pills. Verify zero results show the fallback card and the "Ask the Mediator" button pre-fills the chat input.
 
