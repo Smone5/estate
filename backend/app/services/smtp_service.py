@@ -30,16 +30,30 @@ import aiosmtplib
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Configuration (environment-driven)
+# Configuration (environment-driven, read fresh on every call — not cached at
+# import time — so admin-panel settings changes apply without a restart)
 # ---------------------------------------------------------------------------
 
-SMTP_HOST = os.environ.get("SMTP_HOST", "localhost")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
-SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "true").lower() in ("1", "true", "yes")
-SMTP_SENDER = os.environ.get("SMTP_SENDER", "estate-steward@localhost")
-SMTP_TIMEOUT = int(os.environ.get("SMTP_TIMEOUT", "30"))
+
+def _get_smtp_config() -> dict:
+    return {
+        "host": os.environ.get("SMTP_HOST", "localhost"),
+        "port": int(os.environ.get("SMTP_PORT", "587")),
+        "username": (
+            os.environ["SMTP_USERNAME"]
+            if "SMTP_USERNAME" in os.environ
+            else os.environ.get("SMTP_USER", "")
+        ),
+        "password": os.environ.get("SMTP_PASSWORD", ""),
+        "use_tls": os.environ.get("SMTP_USE_TLS", "true").lower() in ("1", "true", "yes"),
+        "sender": (
+            os.environ.get("SMTP_SENDER")
+            or os.environ.get("SMTP_FROM")
+            or "estate-steward@localhost"
+        ),
+        "timeout": int(os.environ.get("SMTP_TIMEOUT", "30")),
+    }
+
 
 RETRY_DELAYS = [1.0, 4.0, 16.0]  # Exponential backoff in seconds
 MAX_RETRIES = len(RETRY_DELAYS)
@@ -91,11 +105,12 @@ async def send_email(
     if not to or not subject or not body:
         raise ValueError("Recipient, subject, and body are required")
 
-    msg = _build_message(to=to, subject=subject, body=body, attachments=attachments)
+    config = _get_smtp_config()
+    msg = _build_message(to=to, subject=subject, body=body, sender=config["sender"], attachments=attachments)
 
     for attempt in range(MAX_RETRIES):
         try:
-            await _dispatch(msg)
+            await _dispatch(msg, config)
             logger.info(
                 "Email sent to %s (attempt %d/%d)", to, attempt + 1, MAX_RETRIES
             )
@@ -123,7 +138,7 @@ async def send_email_background(
     body: str,
     attachments: Optional[List[Attachment]] = None,
     on_failure_message: Optional[str] = None,
-) -> None:
+) -> bool:
     """Fire-and-forget async email dispatch.
 
     This is the preferred entry point for callers that must not block
@@ -144,17 +159,19 @@ async def send_email_background(
     success = await send_email(to=to, subject=subject, body=body, attachments=attachments)
     if not success and on_failure_message:
         logger.warning(on_failure_message)
+    return success
 
 
 def _build_message(
     to: str,
     subject: str,
     body: str,
+    sender: str,
     attachments: Optional[List[Attachment]] = None,
 ) -> MIMEMultipart:
     """Construct an RFC-compliant multipart/mixed email message."""
     msg = MIMEMultipart("mixed")
-    msg["From"] = SMTP_SENDER
+    msg["From"] = sender
     msg["To"] = to
     msg["Subject"] = subject
 
@@ -176,30 +193,30 @@ def _build_message(
     return msg
 
 
-async def _dispatch(msg: MIMEMultipart) -> None:
+async def _dispatch(msg: MIMEMultipart, config: dict) -> None:
     """Connect to SMTP server and send the message.
 
     Uses STARTTLS when SMTP_USE_TLS is true; falls back to plaintext
     for local dev / mailcatcher.
     """
     smtp = aiosmtplib.SMTP(
-        hostname=SMTP_HOST,
-        port=SMTP_PORT,
+        hostname=config["host"],
+        port=config["port"],
         use_tls=False,  # We'll STARTTLS manually below
-        timeout=SMTP_TIMEOUT,
+        timeout=config["timeout"],
     )
 
     await smtp.connect()
 
     try:
-        if not SMTP_USE_TLS:
+        if not config["use_tls"]:
             # Mailpit / local dev — skip STARTTLS
             pass
         else:
             await smtp.starttls()
 
-        if SMTP_USERNAME:
-            await smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+        if config["username"]:
+            await smtp.login(config["username"], config["password"])
 
         await smtp.send_message(msg)
     finally:

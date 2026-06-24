@@ -307,3 +307,70 @@ class TestSessionCreation:
             cookies={"estate_session": heir_token},
         )
         assert resp.status_code == 403
+
+
+class TestSessionUpdate:
+    """PATCH /api/sessions/{session_id} — update session title."""
+
+    def test_update_session_requires_auth(self, client, mock_db_session, test_env):
+        """Unauthenticated request must return 401."""
+        resp = client.patch(
+            "/api/sessions/577fe071-afd0-4181-b546-8ee904233242",
+            json={"title": "New Title"},
+        )
+        assert resp.status_code == 401
+
+    def test_update_session_heir_token_rejected(self, client, mock_db_session, test_env):
+        """A HEIR token must not be allowed to update sessions."""
+        heir_token = create_access_token(
+            user_id=str(uuid.uuid4()),
+            username="heir_bob",
+            role="HEIR",
+            session_id=str(uuid.uuid4()),
+        )
+        resp = client.patch(
+            "/api/sessions/577fe071-afd0-4181-b546-8ee904233242",
+            json={"title": "New Title"},
+            cookies={"estate_session": heir_token},
+        )
+        assert resp.status_code == 403
+
+    def test_update_session_not_found(self, client, mock_db_session, test_env):
+        """If session does not exist, return 404."""
+        token = _make_admin_token()
+        mock_db_session.query.return_value.filter.return_value.first.return_value = None
+
+        resp = client.patch(
+            f"/api/sessions/{uuid.uuid4()}",
+            json={"title": "New Title"},
+            cookies={"estate_session": token},
+        )
+        assert resp.status_code == 404
+        assert "not found" in resp.json()["detail"].lower()
+
+    def test_update_session_returns_200(self, client, mock_db_session, test_env):
+        """Verify successful update calls commit and returns updated object."""
+        token = _make_admin_token()
+        session_obj = _make_session_obj(title="Old Title")
+
+        mock_db_session.query.return_value.filter.return_value.first.return_value = session_obj
+
+        resp = client.patch(
+            f"/api/sessions/{session_obj.id}",
+            json={"title": "  Updated Title  "},
+            cookies={"estate_session": token},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["title"] == "Updated Title"
+        assert session_obj.title == "Updated Title"
+        mock_db_session.commit.assert_called_once()
+
+    def test_update_session_empty_title_returns_422(self, client, mock_db_session, test_env):
+        token = _make_admin_token()
+        resp = client.patch(
+            f"/api/sessions/{uuid.uuid4()}",
+            json={"title": ""},
+            cookies={"estate_session": token},
+        )
+        assert resp.status_code == 422

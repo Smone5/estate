@@ -1,7 +1,7 @@
 import os
 import io
 from abc import ABC, abstractmethod
-from PIL import Image
+from PIL import Image, ImageOps
 import pillow_heif
 
 # Register HEIF opener to support HEIC files
@@ -208,6 +208,7 @@ def preprocess_image(content: bytes) -> bytes:
     """
     try:
         image = Image.open(io.BytesIO(content))
+        image = ImageOps.exif_transpose(image)
     except Exception as e:
         raise ValueError(f"Invalid image format or corrupt file: {e}")
 

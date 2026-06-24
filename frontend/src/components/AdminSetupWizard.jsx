@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import BIP39MnemonicScreen from './BIP39MnemonicScreen';
 
-export default function AdminSetupWizard({ onSetupComplete }) {
+export default function AdminSetupWizard({ onSetupComplete, onSkipToLogin }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState(null);
@@ -180,6 +180,17 @@ export default function AdminSetupWizard({ onSetupComplete }) {
           >
             {loading ? 'Creating Account...' : 'Create Administrator Account'}
           </button>
+          {onSkipToLogin && (
+            <button
+              type="button"
+              className="btn btn-link"
+              style={{ textAlign: 'center' }}
+              onClick={onSkipToLogin}
+              data-testid="setup-skip-to-login-btn"
+            >
+              Already have an administrator account? Log in
+            </button>
+          )}
         </div>
       </form>
     </div>

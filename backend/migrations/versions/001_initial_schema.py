@@ -19,8 +19,30 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _tables_exist() -> bool:
+    """Return True if the 'users' table already exists, indicating a prior run.
+
+    Uses SQLAlchemy's inspector to check for the table. Wrapped in try/except
+    because in Alembic offline mode (``--sql``) the binding may not support
+    ``get_table_names()`` — in that case we return False so the migration runs
+    normally and emits the expected DDL.
+    """
+    try:
+        conn = op.get_bind()
+        inspector = sa.inspect(conn)
+        return "users" in inspector.get_table_names()
+    except Exception:
+        return False
+
+
 def upgrade() -> None:
-    """Create all tables, constraints, and indexes."""
+    """Create all tables, constraints, and indexes (idempotent)."""
+
+    # If tables already exist (e.g. from a prior run on a persistent volume),
+    # skip creation to avoid DuplicateTable errors. This makes the migration
+    # safe to re-run after docker compose down/up reuses the same pgdata volume.
+    if _tables_exist():
+        return
 
     # -- pgvector extension -------------------------------------------------
     op.execute("CREATE EXTENSION IF NOT EXISTS vector;")
@@ -83,6 +105,12 @@ def upgrade() -> None:
         sa.Column("email", sa.String(255), nullable=True),
         sa.Column("phone", sa.String(20), nullable=True),
         sa.Column("physical_address", sa.Text(), nullable=True),
+        sa.Column("address_line1", sa.String(255), nullable=True),
+        sa.Column("address_line2", sa.String(255), nullable=True),
+        sa.Column("address_city", sa.String(100), nullable=True),
+        sa.Column("address_region", sa.String(100), nullable=True),
+        sa.Column("address_postal_code", sa.String(40), nullable=True),
+        sa.Column("address_country", sa.String(100), nullable=True),
         sa.Column(
             "invite_token", postgresql.UUID(as_uuid=True), nullable=True, unique=True
         ),

@@ -5,21 +5,29 @@ services:
     build: ./backend
     restart: always
     environment:
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      - FAST_THINKER_MODEL=qwen2.5:8b-instruct
-      - SLOW_THINKER_MODEL=qwen2.5:14b-instruct
-      - VISION_MODEL=llava:7b
-      - EMBEDDING_MODEL=nomic-embed-text
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-ollama}
+      - VISION_PROVIDER=${VISION_PROVIDER:-ollama}
+      - FAST_THINKER_MODEL=${FAST_THINKER_MODEL:-qwen2.5:8b-instruct}
+      - SLOW_THINKER_MODEL=${SLOW_THINKER_MODEL:-qwen2.5:14b-instruct}
+      - VISION_MODEL=${VISION_MODEL:-llava:7b}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
+      - NVIDIA_BASE_URL=${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}
       - DB_URL=postgresql+psycopg2://postgres:postgres@db:5432/estate
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-g6J29S5P6R4V5mN_W_TEST_KEY_MUST_BE_32_BYTES_BASE64=}
+      - 'ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY is required. Run scripts/start_local.sh or generate one with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"}'
+      - JWT_SECRET=${JWT_SECRET:-dev-jwt-secret-change-in-production}
       - STORAGE_DRIVER=LOCAL
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - DB_ECHO=${DB_ECHO:-false}
-      - SMTP_HOST=${SMTP_HOST}
-      - SMTP_PORT=${SMTP_PORT:-587}
-      - SMTP_USER=${SMTP_USER}
+      - SMTP_HOST=${SMTP_HOST:-mailpit}
+      - SMTP_PORT=${SMTP_PORT:-1025}
+      - SMTP_USERNAME=${SMTP_USERNAME:-}
       - SMTP_PASSWORD=${SMTP_PASSWORD}
-      - SMTP_FROM=${SMTP_FROM}
+      - SMTP_USE_TLS=${SMTP_USE_TLS:-false}
+      - SMTP_SENDER=${SMTP_SENDER:-${SMTP_FROM:-estate-steward@localhost}}
       - KOKORO_MODEL_PATH=/app/models/kokoro-v1.0.onnx
       - KOKORO_VOICES_PATH=/app/models/voices.json
     ports:
@@ -29,13 +37,13 @@ services:
       - ./backend/app/models:/app/models
     depends_on:
       - db
+      - mailpit
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
   db:
     image: pgvector/pgvector:pg15
     restart: always
-    command: ["postgres", "-c", "shared_preload_libraries=pgvector"]
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres
@@ -45,13 +53,20 @@ services:
     ports:
       - "5432:5432"
 
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: always
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
   langfuse:
     image: langfuse/langfuse:2
     restart: always
     ports:
       - "3000:3000"
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres@db:5432/estate
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/langfuse
       - NEXTAUTH_SECRET=my-secret-key-must-be-very-secure
       - NEXTAUTH_URL=http://localhost:3000
       - TELEMETRY_ENABLED=false
@@ -62,7 +77,7 @@ services:
     volumes:
       - ./frontend/dist:/usr/share/nginx/html:ro
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - uploads_data:/usr/share/nginx/html/static/uploads:ro
+      - uploads_data:/usr/share/nginx/uploads:ro
     ports:
       - "80:80"
     depends_on:

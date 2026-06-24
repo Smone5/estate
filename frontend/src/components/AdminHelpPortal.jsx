@@ -52,6 +52,7 @@ export default function AdminHelpPortal({ isOpen, onClose, sessionId }) {
 
       const res = await fetch(url, {
         method,
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question, answer }),
       });
@@ -79,6 +80,7 @@ export default function AdminHelpPortal({ isOpen, onClose, sessionId }) {
     try {
       const res = await fetch(`/api/sessions/${sessionId}/faqs/${faqId}`, {
         method: 'DELETE',
+        credentials: 'same-origin',
       });
       if (!res.ok) throw new Error('Failed to delete FAQ');
       await fetchFaqs();

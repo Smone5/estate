@@ -1,8 +1,20 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useMediationStore } from '../store/useMediationStore';
+import AssetGallery from './AssetGallery';
+import AdminVoiceRecorder from './AdminVoiceRecorder';
+import ImageEditModal from './ImageEditModal';
+import {
+  saveStagingItem,
+  loadStagingItems,
+  loadPendingStagingItems,
+  deleteStagingItem,
+  updateStagingItemStatus,
+} from '../utils/stagingDB';
+import { autoCompress } from '../utils/imageCompression';
 
 const LEGAL_NOTICE = 'This system is strictly for personal property and keepsakes. Do not upload real estate, vehicles, or bank/financial accounts.';
 
+// Default categories used for fallback/initialization
 const CATEGORIES = ['Jewelry', 'Furniture', 'Art', 'Other'];
 
 const VALUATION_SOURCES = [
@@ -10,18 +22,172 @@ const VALUATION_SOURCES = [
   'Tax Assessment',
   'Estate Sale Estimator',
   'Personal Estimate',
+  'AI Appraisal',
 ];
 
-export default function AdminInventoryDashboard({ sessionId }) {
+// Default room/location options
+const DEFAULT_ROOMS = [
+  'Living Room',
+  'Kitchen',
+  'Dining Room',
+  'Master Bedroom',
+  'Guest Bedroom',
+  'Bathroom',
+  'Home Office',
+  'Basement',
+  'Attic',
+  'Garage',
+  'Yard / Garden',
+];
+
+const ROOM_STORAGE_KEY = 'estate_steward_staging_room';
+const MAX_STAGING_PHOTOS = 12;
+const PHOTO_LABEL_SUGGESTIONS = ['Front', 'Back', 'Maker mark', 'Damage', 'Scale', 'Detail'];
+
+function getDisplayDescription(asset) {
+  const description = asset?.description?.trim();
+  if (!description) return '';
+
+  const normalized = description.toLowerCase();
+  if (
+    normalized === 'ocr extracting details...' ||
+    normalized === 'ai appraising...' ||
+    normalized.startsWith('ocr extracting details')
+  ) {
+    return '';
+  }
+
+  return description;
+}
+
+function parseDescriptionJson(asset) {
+  try {
+    if (!asset?.description_json) return {};
+    return typeof asset.description_json === 'string'
+      ? JSON.parse(asset.description_json)
+      : asset.description_json;
+  } catch {
+    return {};
+  }
+}
+
+function normalizeDetailValue(value) {
+  if (Array.isArray(value)) {
+    return value.filter(Boolean).join('\n');
+  }
+  if (value && typeof value === 'object') {
+    return Object.entries(value)
+      .filter(([, detail]) => detail != null && `${detail}`.trim())
+      .map(([key, detail]) => `${key}: ${detail}`)
+      .join('\n');
+  }
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function getStructuredAssetDetails(asset) {
+  const djson = parseDescriptionJson(asset);
+  return {
+    specifications: normalizeDetailValue(asset?.specifications || djson.specifications),
+    conditionReport: normalizeDetailValue(asset?.condition_report || djson.condition_report),
+    keywords: normalizeDetailValue(asset?.keywords || djson.keywords),
+  };
+}
+
+function hasStructuredAssetDetails(details) {
+  return Boolean(details.specifications || details.conditionReport || details.keywords);
+}
+
+function StructuredAssetDetails({ details, compact = false }) {
+  const rows = [
+    ['Specifications', details.specifications],
+    ['Condition Report', details.conditionReport],
+    ['Search Keywords', details.keywords],
+  ].filter(([, value]) => value);
+
+  if (rows.length === 0) return null;
+
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      gap: compact ? '6px' : 'var(--space-sm)',
+      marginTop: compact ? 'var(--space-xs)' : 0,
+    }}>
+      {rows.map(([label, value]) => (
+        <div key={label}>
+          <p className="text-xs" style={{
+            marginBottom: '2px',
+            color: 'var(--color-text)',
+            fontWeight: 700,
+          }}>
+            {label}
+          </p>
+          <p className="text-sm text-muted" style={{
+            margin: 0,
+            lineHeight: 1.45,
+            whiteSpace: 'pre-line',
+          }}>
+            {value}
+          </p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Retrieve the persisted room selection from localStorage, or default to 'Living Room'.
+ */
+function getPersistedRoom() {
+  try {
+    const stored = localStorage.getItem(ROOM_STORAGE_KEY);
+    if (stored && stored.trim().length > 0) return stored.trim();
+  } catch { /* ignore */ }
+  return 'Living Room';
+}
+
+export default function AdminInventoryDashboard({
+  sessionId,
+  assets: propAssets,
+  heirs: propHeirs,
+  onRefreshAssets,
+  onRefreshHeirs,
+}) {
   const store = useMediationStore();
   const sessionStatus = useMediationStore((s) => s.sessionStatus);
 
-  const [assets, setAssets] = useState([]);
-  const [heirs, setHeirs] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [internalAssets, setInternalAssets] = useState([]);
+  const [internalHeirs, setInternalHeirs] = useState([]);
+  const [loading, setLoading] = useState(propAssets === undefined);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState(null);
   const [editingAssetId, setEditingAssetId] = useState(null);
+
+  // Redesign states
+  const [isCategoryManagerOpen, setIsCategoryManagerOpen] = useState(false);
+  const [viewMode, setViewMode] = useState('grid');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterCategory, setFilterCategory] = useState('All');
+  const [filterStatus, setFilterStatus] = useState('All');
+  const [sortOption, setSortOption] = useState('id_desc');
+  const [searchResults, setSearchResults] = useState(null);
+  const [searching, setSearching] = useState(false);
+
+  const assets = propAssets !== undefined ? propAssets : internalAssets;
+  const heirs = propHeirs !== undefined ? propHeirs : internalHeirs;
+
+  // ── Mobile Camera Hub States ──────────────────────────────────────────
+  const [stagingRoom, setStagingRoom] = useState(getPersistedRoom);
+  const [customRoom, setCustomRoom] = useState('');
+  const [showCustomRoomInput, setShowCustomRoomInput] = useState(false);
+  const [stagingPhotos, setStagingPhotos] = useState([]);
+  const [editingStagingPhotoId, setEditingStagingPhotoId] = useState(null);
+  const [autoDescribeImages, setAutoDescribeImages] = useState(true);
+  const [audioBlob, setAudioBlob] = useState(null);
+  const [stageSuccess, setStageSuccess] = useState(null); // { asset_id, title }
+  const [isStaging, setIsStaging] = useState(false);
+  const [uploadQueue, setUploadQueue] = useState([]); // items from IndexedDB pending upload
+  const [uploadingIndexed, setUploadingIndexed] = useState(null); // asset_id currently uploading
 
   // Edit form state
   const [editForm, setEditForm] = useState({
@@ -40,46 +206,347 @@ export default function AdminInventoryDashboard({ sessionId }) {
 
   // Audio upload state
   const [audioAssetId, setAudioAssetId] = useState(null);
-  const [audioUploading, setAudioUploading] = useState(false);
-  const audioInputRef = useRef(null);
 
-  const isSetup = sessionStatus === 'SETUP';
+  // Secondary images upload state
+  const [secondaryUploading, setSecondaryUploading] = useState(false);
+  const [secondaryAngleLabel, setSecondaryAngleLabel] = useState('');
+  const [secondaryFile, setSecondaryFile] = useState(null);
+  const [secondaryError, setSecondaryError] = useState(null);
+  const [editingImage, setEditingImage] = useState(null);
+  const [imageEditSaving, setImageEditSaving] = useState(false);
+  const [previewAsset, setPreviewAsset] = useState(null);
+  const [expandedDescriptionIds, setExpandedDescriptionIds] = useState(() => new Set());
+
+  // Category manager states
+  const [categories, setCategories] = useState(CATEGORIES);
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [categoryCreating, setCategoryCreating] = useState(false);
+
+  // AI Details generation state
+  const [generatingDetails, setGeneratingDetails] = useState({});
+
+  // Pending batch updates
+  const [pendingUpdatesCount, setPendingUpdatesCount] = useState(0);
+  const [publishingUpdates, setPublishingUpdates] = useState(false);
+
+  const toggleDescriptionExpanded = (assetId) => {
+    setExpandedDescriptionIds((current) => {
+      const next = new Set(current);
+      if (next.has(assetId)) {
+        next.delete(assetId);
+      } else {
+        next.add(assetId);
+      }
+      return next;
+    });
+  };
+
+  const fetchCategories = useCallback(async () => {
+    if (!sessionId) return;
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/categories`, {
+        credentials: 'same-origin',
+      });
+      if (res && res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.every(item => typeof item === 'string')) {
+          setCategories(data);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch categories', err);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    const isTest = typeof process !== 'undefined' && process.env.NODE_ENV === 'test';
+    if (isTest && !global.__TEST_ENABLE_CATEGORIES_FETCH__) {
+      return;
+    }
+    fetchCategories();
+  }, [fetchCategories]);
+
+  async function handleCreateCategory(e) {
+    e.preventDefault();
+    const name = newCategoryName.trim();
+    if (!name) return;
+    setCategoryCreating(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/categories`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Failed to create category: ${res.status}`);
+      }
+      setNewCategoryName('');
+      await fetchCategories();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setCategoryCreating(false);
+    }
+  }
+
+  async function handleDeleteCategory(name) {
+    if (!window.confirm(`Are you sure you want to delete the category "${name}"?`)) {
+      return;
+    }
+    setError(null);
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/categories/${encodeURIComponent(name)}`, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Failed to delete category: ${res.status}`);
+      }
+      await fetchCategories();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function handleGenerateDetails(assetId) {
+    setGeneratingDetails((prev) => ({ ...prev, [assetId]: true }));
+    setError(null);
+    try {
+      const res = await fetch(`/api/assets/${assetId}/generate-details`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `AI Generation failed: ${res.status}`);
+      }
+      const data = await res.json();
+      setEditForm((prev) => ({
+        ...prev,
+        title: data.title || prev.title,
+        description: data.item_overview || data.description || prev.description,
+        item_overview: data.item_overview || prev.item_overview || '',
+        specifications: data.specifications || prev.specifications || '',
+        condition_report: data.condition_report || prev.condition_report || '',
+        keywords: data.keywords || prev.keywords || '',
+        valuation_min: data.valuation_min ?? prev.valuation_min,
+        valuation_max: data.valuation_max ?? prev.valuation_max,
+        valuation_source: data.valuation_source || 'AI Appraisal',
+        sentiment_tag: data.sentiment_tags || prev.sentiment_tag,
+      }));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setGeneratingDetails((prev) => ({ ...prev, [assetId]: false }));
+    }
+  }
+
+  function getCategoryColor(category) {
+    const colors = {
+      Jewelry: '#C29F53',
+      Furniture: '#8E7558',
+      Art: '#7E6C84',
+      Other: '#64748B',
+    };
+    if (colors[category]) return colors[category];
+    let hash = 0;
+    for (let i = 0; i < category.length; i++) {
+      hash = category.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    const hue = Math.abs(hash % 360);
+    return `hsl(${hue}, 40%, 45%)`;
+  }
+
+  async function handleSecondaryUpload(assetId) {
+    if (!secondaryFile) {
+      setSecondaryError('Please select a file to upload.');
+      return;
+    }
+
+    setSecondaryUploading(true);
+    setSecondaryError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', secondaryFile);
+      if (secondaryAngleLabel.trim()) {
+        formData.append('angle_label', secondaryAngleLabel.trim());
+      }
+
+      const res = await fetch(`/api/assets/${assetId}/images`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Upload failed: ${res.status}`);
+      }
+
+      setSecondaryFile(null);
+      setSecondaryAngleLabel('');
+      await fetchAssets();
+    } catch (err) {
+      setSecondaryError(err.message);
+    } finally {
+      setSecondaryUploading(false);
+    }
+  }
+
+  async function handleSecondaryDelete(assetId, imageId) {
+    if (!window.confirm('Are you sure you want to delete this secondary view?')) {
+      return;
+    }
+
+    setSecondaryError(null);
+    try {
+      const res = await fetch(`/api/assets/${assetId}/images/${imageId}`, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Delete failed: ${res.status}`);
+      }
+
+      await fetchAssets();
+    } catch (err) {
+      setSecondaryError(err.message);
+    }
+  }
+
+  async function handleSaveEditedImage(blob) {
+    if (!editingImage) return;
+
+    setImageEditSaving(true);
+    setSecondaryError(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', blob, 'edited-photo.webp');
+
+      const res = await fetch(`/api/assets/${editingImage.assetId}/images/${editingImage.image.id}/replace`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Image edit failed: ${res.status}`);
+      }
+
+      setEditingImage(null);
+      await fetchAssets();
+    } catch (err) {
+      setSecondaryError(err.message);
+      throw err;
+    } finally {
+      setImageEditSaving(false);
+    }
+  }
+
+  const isSetupOrActive = sessionStatus === 'SETUP' || sessionStatus === 'ACTIVE';
 
   // ── Fetch assets and heirs ──────────────────────────────────────────────
   const fetchAssets = useCallback(async () => {
     if (!sessionId) return;
+    if (onRefreshAssets) {
+      await onRefreshAssets();
+      try {
+        const pRes = await fetch(`/api/sessions/${sessionId}/pending-updates`, {
+          credentials: 'same-origin',
+        });
+        if (pRes && pRes.ok) {
+          const pData = await pRes.json();
+          setPendingUpdatesCount(pData.pending_count || 0);
+        }
+      } catch (e) {}
+      return;
+    }
     try {
       setLoading(true);
-      const res = await fetch(`/api/sessions/${sessionId}/assets`);
+      const res = await fetch(`/api/sessions/${sessionId}/assets`, {
+        credentials: 'same-origin',
+      });
       if (res.ok) {
         const data = await res.json();
-        setAssets(Array.isArray(data) ? data : data.assets || []);
+        setInternalAssets(Array.isArray(data) ? data : data.assets || []);
       }
+      try {
+        const pRes = await fetch(`/api/sessions/${sessionId}/pending-updates`, {
+          credentials: 'same-origin',
+        });
+        if (pRes && pRes.ok) {
+          const pData = await pRes.json();
+          setPendingUpdatesCount(pData.pending_count || 0);
+        }
+      } catch (e) {}
     } catch (err) {
       console.error('Failed to fetch assets', err);
       setError('Failed to load assets.');
     } finally {
       setLoading(false);
     }
-  }, [sessionId]);
+  }, [sessionId, onRefreshAssets]);
+
+  async function handlePublishUpdates() {
+    if (pendingUpdatesCount === 0) return;
+    if (!window.confirm(`Are you sure you want to publish all ${pendingUpdatesCount} pending updates to beneficiaries? This will send them email notifications and update their dashboards.`)) {
+      return;
+    }
+    setPublishingUpdates(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/publish-updates`, {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Publish updates failed: ${res.status}`);
+      }
+      await fetchAssets();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setPublishingUpdates(false);
+    }
+  }
 
   const fetchHeirs = useCallback(async () => {
     if (!sessionId) return;
+    if (onRefreshHeirs) {
+      await onRefreshHeirs();
+      return;
+    }
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/heirs`);
+      const res = await fetch(`/api/sessions/${sessionId}/heirs`, {
+        credentials: 'same-origin',
+      });
       if (res.ok) {
         const data = await res.json();
-        setHeirs(Array.isArray(data) ? data : []);
+        setInternalHeirs(Array.isArray(data) ? data : []);
       }
     } catch (err) {
       console.error('Failed to fetch heirs', err);
     }
-  }, [sessionId]);
+  }, [sessionId, onRefreshHeirs]);
 
   useEffect(() => {
-    fetchAssets();
-    fetchHeirs();
-  }, [fetchAssets, fetchHeirs]);
+    if (propAssets === undefined) {
+      fetchAssets();
+    }
+    if (propHeirs === undefined) {
+      fetchHeirs();
+    }
+  }, [fetchAssets, fetchHeirs, propAssets, propHeirs]);
 
   // Poll for OCR status updates on PROCESSING assets
   useEffect(() => {
@@ -93,21 +560,548 @@ export default function AdminInventoryDashboard({ sessionId }) {
     return () => clearInterval(interval);
   }, [assets, fetchAssets]);
 
-  // ── File Upload / Stage ─────────────────────────────────────────────────
-  async function handleFileUpload(e) {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // ── Room Selector ────────────────────────────────────────────────────────
+  function handleRoomChange(newRoom) {
+    if (newRoom === '__custom__') {
+      setShowCustomRoomInput(true);
+      setCustomRoom('');
+      return;
+    }
+    setStagingRoom(newRoom);
+    setShowCustomRoomInput(false);
+    try {
+      localStorage.setItem(ROOM_STORAGE_KEY, newRoom);
+    } catch { /* ignore */ }
+  }
 
-    // Validate file type
-    if (!file.type.startsWith('image/')) {
-      setError('Only image files are accepted.');
+  function handleCustomRoomSubmit() {
+    const trimmed = customRoom.trim();
+    if (!trimmed) return;
+    setStagingRoom(trimmed);
+    setShowCustomRoomInput(false);
+    setCustomRoom('');
+    try {
+      localStorage.setItem(ROOM_STORAGE_KEY, trimmed);
+    } catch { /* ignore */ }
+  }
+
+  // ── Quick Capture Photo Stack ───────────────────────────────────────────
+  function triggerCameraCapture() {
+    if (stagingPhotos.length >= MAX_STAGING_PHOTOS) {
+      setError(`You can add up to ${MAX_STAGING_PHOTOS} photos for one item.`);
       return;
     }
 
-    // 10MB limit
-    if (file.size > 10 * 1024 * 1024) {
-      setError('Image must be under 10MB.');
+    // Call getUserMedia synchronously inside the click handler so the browser
+    // recognizes it as a user-gesture-initiated media request.
+    // On failure, fall back to file input picker.
+    let mediaStream = null;
+    let videoEl = null;
+    let overlayEl = null;
+
+    function cleanupCamera() {
+      if (overlayEl && document.body.contains(overlayEl)) {
+        document.body.removeChild(overlayEl);
+      }
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((t) => t.stop());
+      }
+    }
+
+    function buildOverlay(stream) {
+      mediaStream = stream;
+
+      videoEl = document.createElement('video');
+      videoEl.srcObject = stream;
+      videoEl.autoplay = true;
+      videoEl.playsInline = true;
+      videoEl.muted = true;
+      videoEl.style.cssText = 'width:100%;height:100%;object-fit:cover;';
+
+      overlayEl = document.createElement('div');
+      overlayEl.style.cssText =
+        'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:99999;background:#000;display:flex;flex-direction:column;';
+
+      const videoContainer = document.createElement('div');
+      videoContainer.style.cssText =
+        'flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;';
+      videoContainer.appendChild(videoEl);
+
+      const controls = document.createElement('div');
+      controls.style.cssText =
+        'display:flex;gap:16px;justify-content:center;padding:16px;background:#000;';
+
+      const snapBtn = document.createElement('button');
+      snapBtn.textContent = '📸 Snap';
+      snapBtn.style.cssText =
+        'width:72px;height:72px;border-radius:50%;border:4px solid #fff;background:rgba(255,255,255,0.15);color:#fff;font-size:14px;cursor:pointer;';
+
+      const cancelBtn = document.createElement('button');
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.style.cssText =
+        'background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.3);color:#fff;padding:12px 24px;border-radius:8px;font-size:16px;cursor:pointer;';
+
+      controls.appendChild(cancelBtn);
+      controls.appendChild(snapBtn);
+      overlayEl.appendChild(videoContainer);
+      overlayEl.appendChild(controls);
+      document.body.appendChild(overlayEl);
+
+      return new Promise((resolve) => {
+        snapBtn.onclick = () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = videoEl.videoWidth || 2048;
+          canvas.height = videoEl.videoHeight || 2048;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+
+          canvas.toBlob(
+            (blob) => {
+              cleanupCamera();
+              if (blob) {
+                blob.name = 'camera-snap.webp';
+                resolve(blob);
+              } else {
+                resolve(null);
+              }
+            },
+            'image/webp',
+            0.9
+          );
+        };
+        cancelBtn.onclick = () => {
+          cleanupCamera();
+          resolve(null);
+        };
+      });
+    }
+
+    function fallbackFilePicker() {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*';
+      input.setAttribute('capture', 'environment');
+      input.onchange = async (e) => {
+        const picked = e.target.files?.[0];
+        if (!picked) return;
+        await finalizeCapture(picked);
+      };
+      input.click();
+    }
+
+    async function finalizeCapture(f) {
+      try {
+        const { blob: compressedBlob } = await autoCompress(f, 2048, 0.85);
+        const previewUrl = URL.createObjectURL(compressedBlob);
+        const photoId = crypto.randomUUID
+          ? crypto.randomUUID()
+          : `photo-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        setStagingPhotos((prev) => [
+          ...prev,
+          {
+            id: photoId,
+            blob: compressedBlob,
+            previewUrl,
+            originalName: f.name || 'capture.webp',
+            label: prev.length === 0 ? 'Front' : '',
+          },
+        ]);
+        if (navigator.vibrate) {
+          navigator.vibrate([50, 50]);
+        }
+      } catch (err) {
+        console.error('Failed to compress image:', err);
+        setError('Failed to process image. Please try again.');
+      }
+    }
+
+    // Try getUserMedia synchronously (within the user-gesture click handler)
+    try {
+      navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 2048 }, height: { ideal: 2048 } },
+        audio: false,
+      }).then((stream) => {
+        // Camera opened successfully — show live preview overlay
+        buildOverlay(stream).then((file) => {
+          if (file) {
+            finalizeCapture(file);
+          } else {
+            // User cancelled camera — fall back to file picker
+            fallbackFilePicker();
+          }
+        });
+      }).catch(() => {
+        // getUserMedia failed — fall back to file picker
+        fallbackFilePicker();
+      });
+    } catch (_) {
+      // navigator.mediaDevices undefined — fall back to file picker
+      fallbackFilePicker();
+    }
+  }
+
+  function removeStagingPhoto(photoId) {
+    setStagingPhotos((prev) => {
+      const photo = prev.find((item) => item.id === photoId);
+      if (photo?.previewUrl) {
+        URL.revokeObjectURL(photo.previewUrl);
+      }
+      return prev.filter((item) => item.id !== photoId);
+    });
+  }
+
+  function updateStagingPhotoLabel(photoId, label) {
+    setStagingPhotos((prev) => prev.map((photo) => (
+      photo.id === photoId ? { ...photo, label } : photo
+    )));
+  }
+
+  function setPrimaryStagingPhoto(photoId) {
+    setStagingPhotos((prev) => {
+      const selected = prev.find((photo) => photo.id === photoId);
+      if (!selected) return prev;
+      return [selected, ...prev.filter((photo) => photo.id !== photoId)];
+    });
+  }
+
+  function clearStagingPhotos() {
+    stagingPhotos.forEach((photo) => {
+      if (photo.previewUrl) URL.revokeObjectURL(photo.previewUrl);
+    });
+    setStagingPhotos([]);
+  }
+
+  async function handleSaveEditedStagingPhoto(blob) {
+    const photoId = editingStagingPhotoId;
+    if (!photoId) return;
+
+    const previewUrl = URL.createObjectURL(blob);
+    setStagingPhotos((prev) => prev.map((photo) => {
+      if (photo.id !== photoId) return photo;
+      if (photo.previewUrl) URL.revokeObjectURL(photo.previewUrl);
+      return {
+        ...photo,
+        blob,
+        previewUrl,
+        originalName: 'edited-capture.webp',
+      };
+    }));
+    setEditingStagingPhotoId(null);
+  }
+
+  // ── Audio Recording for Staging ──────────────────────────────────────────
+  function handleRecordingSaved(blob) {
+    setAudioBlob(blob);
+    if (navigator.vibrate) {
+      navigator.vibrate([50, 50]);
+    }
+  }
+
+  function clearAudio() {
+    setAudioBlob(null);
+  }
+
+  // ── Stage Photo Stack ────────────────────────────────────────────────────
+  async function handleStageFromSlots() {
+    if (stagingPhotos.length === 0) {
+      setError('Capture at least one photo before staging.');
       return;
+    }
+    if (!isSetupOrActive) {
+      setError('Assets can only be staged during the Setup or Active phase.');
+      return;
+    }
+
+    setIsStaging(true);
+    setError(null);
+
+    try {
+      // Generate client-side UUID
+      const assetId = crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0;
+        const v = c === 'x' ? r : (r & 0x3) | 0x8;
+        return v.toString(16);
+      });
+
+      const primaryPhoto = stagingPhotos[0];
+      const secondaryPhotos = stagingPhotos.slice(1);
+
+      // First, save everything to IndexedDB for offline resilience
+      await saveStagingItem({
+        asset_id: assetId,
+        session_id: sessionId,
+        location: stagingRoom,
+        photos: stagingPhotos.map((photo, idx) => ({
+          blob: photo.blob,
+          label: photo.label || (idx === 0 ? 'Primary' : `View ${idx + 1}`),
+          is_primary: idx === 0,
+        })),
+        primary_blob: primaryPhoto?.blob || null,
+        secondary_blobs: secondaryPhotos.map((photo) => photo.blob),
+        audio_blob: audioBlob || null,
+        auto_appraise: autoDescribeImages,
+        upload_status: 'pending',
+      });
+
+      // Attempt immediate upload
+      const formData = new FormData();
+      formData.append('asset_id', assetId);
+      formData.append('location', stagingRoom);
+      formData.append('auto_appraise', autoDescribeImages ? 'true' : 'false');
+      formData.append('angle_labels', JSON.stringify(
+        stagingPhotos.map((photo, idx) => photo.label || (idx === 0 ? 'Primary' : `View ${idx + 1}`))
+      ));
+
+      stagingPhotos.forEach((photo, idx) => {
+        const name = idx === 0 ? 'primary.webp' : `view_${idx + 1}.webp`;
+        formData.append('files', photo.blob, name);
+      });
+
+      if (audioBlob) {
+        formData.append('audio', audioBlob, 'recording.webm');
+      }
+
+      const res = await fetch(`/api/sessions/${sessionId}/assets/stage`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        body: formData,
+      });
+
+      if (!res.ok) {
+        // Server upload failed — item stays in IndexedDB as pending for background retry
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Upload failed: ${res.status}`);
+      }
+
+      const data = await res.json();
+
+      // Mark as uploaded in IndexedDB
+      await updateStagingItemStatus(assetId, 'uploaded');
+
+      // Clear staging photos
+      clearStagingPhotos();
+      setAudioBlob(null);
+
+      // Show success
+      setStageSuccess({ asset_id: data.asset_id });
+      if (navigator.vibrate) {
+        navigator.vibrate([50, 50]);
+      }
+
+      // Refresh assets list
+      await fetchAssets();
+
+      // Clear success message after 3s
+      setTimeout(() => setStageSuccess(null), 3000);
+    } catch (err) {
+      // If immediate upload fails, item remains in IndexedDB for background retry
+      console.warn('Staging upload failed (queued in IndexedDB):', err.message);
+      setError(`Staged locally — will retry upload automatically. ${err.message}`);
+
+      // Clear photo stack anyway so the user can keep capturing the next item.
+      clearStagingPhotos();
+      setAudioBlob(null);
+
+      if (navigator.vibrate) {
+        navigator.vibrate([50, 50]);
+      }
+
+      // Refresh upload queue
+      loadUploadQueue();
+    } finally {
+      setIsStaging(false);
+    }
+  }
+
+  // ── Background Upload Queue ─────────────────────────────────────────────
+  const loadUploadQueue = useCallback(async () => {
+    try {
+      const pending = await loadPendingStagingItems();
+      setUploadQueue(pending);
+    } catch (err) {
+      console.warn('Failed to load upload queue:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadUploadQueue();
+  }, [loadUploadQueue]);
+
+  // Background upload processor — runs sequentially
+  const uploadQueueRef = useRef(uploadQueue);
+  uploadQueueRef.current = uploadQueue;
+
+  const uploadingRef = useRef(false);
+
+  const processUploadQueue = useCallback(async () => {
+    if (uploadingRef.current) return;
+    if (uploadQueueRef.current.length === 0) return;
+
+    uploadingRef.current = true;
+    const item = uploadQueueRef.current[0];
+
+    try {
+      setUploadingIndexed(item.asset_id);
+      await updateStagingItemStatus(item.asset_id, 'uploading');
+
+      const formData = new FormData();
+      formData.append('asset_id', item.asset_id);
+      formData.append('location', item.location || 'Unknown');
+      formData.append('auto_appraise', item.auto_appraise === false ? 'false' : 'true');
+
+      const queuedPhotos = item.photos?.length
+        ? item.photos
+        : [
+            item.primary_blob ? { blob: item.primary_blob, label: 'Primary' } : null,
+            ...(item.secondary_blobs || []).map((blob, idx) => ({ blob, label: `View ${idx + 2}` })),
+          ].filter(Boolean);
+
+      formData.append('angle_labels', JSON.stringify(
+        queuedPhotos.map((photo, idx) => photo.label || (idx === 0 ? 'Primary' : `View ${idx + 1}`))
+      ));
+
+      queuedPhotos.forEach((photo, idx) => {
+        if (photo?.blob) {
+          formData.append('files', photo.blob, idx === 0 ? 'primary.webp' : `view_${idx + 1}.webp`);
+        }
+      });
+
+      if (item.audio_blob) {
+        formData.append('audio', item.audio_blob, 'recording.webm');
+      }
+
+      const res = await fetch(`/api/sessions/${item.session_id}/assets/stage`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        body: formData,
+      });
+
+      if (!res.ok) {
+        // Mark as failed but keep for retry
+        await updateStagingItemStatus(item.asset_id, 'failed');
+        throw new Error(`Upload returned ${res.status}`);
+      }
+
+      // Success — remove from IndexedDB queue
+      await deleteStagingItem(item.asset_id);
+      await fetchAssets();
+    } catch (err) {
+      console.warn('Background upload failed for', item.asset_id, ':', err.message);
+    } finally {
+      setUploadingIndexed(null);
+      uploadingRef.current = false;
+      await loadUploadQueue();
+    }
+  }, [fetchAssets, loadUploadQueue]);
+
+  // Auto-process queue every 5 seconds
+  useEffect(() => {
+    const interval = setInterval(() => {
+      processUploadQueue();
+    }, 5000);
+
+    // Also process immediately on mount
+    processUploadQueue();
+
+    return () => clearInterval(interval);
+  }, [processUploadQueue]);
+
+  // ── WebSocket Listener for OCR Completion ───────────────────────────────
+  useEffect(() => {
+    if (!sessionId) return;
+
+    let ws = null;
+    let reconnectAttempts = 0;
+    const maxReconnect = 5;
+    let reconnectTimer = null;
+
+    function connect() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/api/sessions/${encodeURIComponent(sessionId)}/ws`;
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        reconnectAttempts = 0;
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const frame = JSON.parse(event.data);
+          if (frame.type === 'asset_ocr_completed') {
+            // Update local asset list with the completed asset
+            setInternalAssets((prev) => {
+              const idx = prev.findIndex((a) => a.id === frame.id);
+              if (idx === -1) {
+                return [frame, ...prev];
+              }
+              const updated = [...prev];
+              updated[idx] = { ...updated[idx], ...frame };
+              return updated;
+            });
+            // If we're using propAssets, refresh via the callback
+            if (onRefreshAssets) {
+              onRefreshAssets();
+            }
+          }
+        } catch { /* ignore parse errors */ }
+      };
+
+      ws.onclose = (event) => {
+        ws = null;
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+
+        if (event.code === 1000 || event.code === 1001) return;
+        if (reconnectAttempts < maxReconnect) {
+          const delay = 1000 * Math.pow(2, reconnectAttempts);
+          reconnectAttempts++;
+          reconnectTimer = setTimeout(connect, delay);
+        }
+      };
+
+      ws.onerror = () => {
+        // onclose will fire next
+      };
+    }
+
+    connect();
+
+    return () => {
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws) {
+        ws.onopen = null;
+        ws.onclose = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.close();
+        ws = null;
+      }
+    };
+  }, [sessionId, onRefreshAssets]);
+
+  // ── File Upload / Stage (original desktop flow preserved) ────────────────
+  async function handleFileUpload(e) {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    if (files.length > 10) {
+      setError('You can upload a maximum of 10 images at once.');
+      return;
+    }
+
+    for (const file of files) {
+      const lowerName = file.name.toLowerCase();
+      const isImage = file.type.startsWith('image/') ||
+        ['.jpg', '.jpeg', '.png', '.webp', '.heic', '.heif', '.bmp', '.tiff', '.gif']
+          .some((ext) => lowerName.endsWith(ext));
+      if (!isImage) {
+        setError(`Only image files are accepted (JPG, PNG, WebP, HEIC, TIFF, BMP, GIF). File "${file.name}" is invalid.`);
+        return;
+      }
+
+      if (file.size > 10 * 1024 * 1024) {
+        setError(`Image "${file.name}" must be under 10MB.`);
+        return;
+      }
     }
 
     setError(null);
@@ -115,10 +1109,13 @@ export default function AdminInventoryDashboard({ sessionId }) {
 
     try {
       const formData = new FormData();
-      formData.append('file', file);
+      files.forEach((file) => {
+        formData.append('files', file);
+      });
 
       const res = await fetch(`/api/sessions/${sessionId}/assets/stage`, {
         method: 'POST',
+        credentials: 'same-origin',
         body: formData,
       });
 
@@ -128,7 +1125,6 @@ export default function AdminInventoryDashboard({ sessionId }) {
       }
 
       await fetchAssets();
-      // eslint-disable-next-line no-undef
       e.target.value = ''; // Reset file input
     } catch (err) {
       setError(err.message);
@@ -139,6 +1135,16 @@ export default function AdminInventoryDashboard({ sessionId }) {
 
   // ── Edit Metadata ───────────────────────────────────────────────────────
   function startEditing(asset) {
+    // Parse description_json for AI-generated structured fields
+    let djson = {};
+    try {
+      if (asset.description_json) {
+        djson = typeof asset.description_json === 'string'
+          ? JSON.parse(asset.description_json)
+          : asset.description_json;
+      }
+    } catch (e) { /* ignore */ }
+
     setEditingAssetId(asset.id);
     setEditForm({
       title: asset.title || '',
@@ -148,8 +1154,15 @@ export default function AdminInventoryDashboard({ sessionId }) {
       valuation_max: asset.valuation_max ?? 0,
       valuation_source: asset.valuation_source || 'Personal Estimate',
       sentiment_tag: asset.sentiment_tag || '',
+      item_overview: djson.item_overview || '',
+      specifications: djson.specifications || '',
+      condition_report: djson.condition_report || '',
+      keywords: djson.keywords || '',
     });
     setError(null);
+    setSecondaryAngleLabel('');
+    setSecondaryFile(null);
+    setSecondaryError(null);
   }
 
   function cancelEditing() {
@@ -163,14 +1176,24 @@ export default function AdminInventoryDashboard({ sessionId }) {
   // ── Publish Asset ───────────────────────────────────────────────────────
   async function handlePublish(assetId) {
     setError(null);
-
     try {
-      // If currently editing, use editForm; otherwise build from asset data
+      const asset = assets.find((a) => a.id === assetId);
+      const isMajor = sessionStatus === 'ACTIVE';
+      let reason = null;
+
+      if (isMajor) {
+        reason = window.prompt("A reason is required when publishing a new asset post-launch (during ACTIVE phase):");
+        if (reason === null) return; // Cancelled
+        if (!reason.trim()) {
+          setError("A reason is required when publishing a new asset post-launch.");
+          return;
+        }
+      }
+
       const assetData =
         editingAssetId === assetId
-          ? editForm
+          ? { ...editForm, reason: reason || undefined }
           : (() => {
-              const asset = assets.find((a) => a.id === assetId);
               return {
                 title: asset?.title || '',
                 description: asset?.description || '',
@@ -179,10 +1202,10 @@ export default function AdminInventoryDashboard({ sessionId }) {
                 valuation_max: asset?.valuation_max ?? 0,
                 valuation_source: asset?.valuation_source || 'Personal Estimate',
                 sentiment_tag: asset?.sentiment_tag || '',
+                reason: reason || undefined,
               };
             })();
 
-      // Validate all fields are filled
       const missing = [];
       if (!assetData.title?.trim()) missing.push('title');
       if (!assetData.description?.trim()) missing.push('description');
@@ -198,6 +1221,7 @@ export default function AdminInventoryDashboard({ sessionId }) {
 
       const res = await fetch(`/api/assets/${assetId}/publish`, {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(assetData),
       });
@@ -214,15 +1238,70 @@ export default function AdminInventoryDashboard({ sessionId }) {
     }
   }
 
+  async function handleSave(assetId) {
+    setError(null);
+    try {
+      const originalAsset = assets.find((a) => a.id === assetId);
+      const isTitleChanged = editForm.title !== originalAsset.title;
+      const isValMinChanged = Number(editForm.valuation_min) !== Number(originalAsset.valuation_min);
+      const isValMaxChanged = Number(editForm.valuation_max) !== Number(originalAsset.valuation_max);
+      const isMajor = (isTitleChanged || isValMinChanged || isValMaxChanged) && (originalAsset.status === 'LIVE' && sessionStatus === 'ACTIVE');
+      let reason = null;
+
+      if (isMajor) {
+        reason = window.prompt("A reason for the change is required for major asset edits (value/title changes) post-launch:");
+        if (reason === null) return; // Cancelled
+        if (!reason.trim()) {
+          setError("A reason is required to save major edits.");
+          return;
+        }
+      }
+
+      const payload = { ...editForm, reason: reason || undefined };
+
+      const res = await fetch(`/api/assets/${assetId}/save`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Save failed: ${res.status}`);
+      }
+      setEditingAssetId(null);
+      await fetchAssets();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   // ── Delete Asset ────────────────────────────────────────────────────────
   async function handleDelete(assetId) {
-    if (!window.confirm('Are you sure you want to permanently delete this asset and its associated image? This action cannot be undone.')) {
-      return;
+    const originalAsset = assets.find((a) => a.id === assetId);
+    const isMajor = originalAsset.status === 'LIVE' || sessionStatus === 'ACTIVE';
+    let reason = null;
+
+    if (isMajor) {
+      reason = window.prompt("A reason is required when deleting an asset post-launch or after publishing:");
+      if (reason === null) return; // Cancelled
+      if (!reason.trim()) {
+        setError("A reason is required to delete the asset.");
+        return;
+      }
+    } else {
+      if (!window.confirm('Are you sure you want to permanently delete this asset and its associated image? This action cannot be undone.')) {
+        return;
+      }
     }
 
     setError(null);
     try {
-      const res = await fetch(`/api/assets/${assetId}`, { method: 'DELETE' });
+      const url = reason ? `/api/assets/${assetId}?reason=${encodeURIComponent(reason)}` : `/api/assets/${assetId}`;
+      const res = await fetch(url, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+      });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.detail || `Delete failed: ${res.status}`);
@@ -252,6 +1331,7 @@ export default function AdminInventoryDashboard({ sessionId }) {
     try {
       const res = await fetch(`/api/assets/${preAllocatingAssetId}/pre-allocate`, {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ heir_id: selectedHeirId }),
       });
@@ -269,46 +1349,13 @@ export default function AdminInventoryDashboard({ sessionId }) {
     }
   }
 
-  // ── Audio Upload ────────────────────────────────────────────────────────
-  function handleAudioSelect(e) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    uploadAudio(audioAssetId, file);
-    // eslint-disable-next-line no-undef
-    e.target.value = '';
-  }
-
-  async function uploadAudio(assetId, file) {
-    setError(null);
-    setAudioUploading(true);
-
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-
-      const res = await fetch(`/api/assets/${assetId}/audio`, {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || `Audio upload failed: ${res.status}`);
-      }
-
-      await fetchAssets();
-      setAudioAssetId(null);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setAudioUploading(false);
-    }
-  }
-
   async function handleDeleteAudio(assetId) {
     setError(null);
     try {
-      const res = await fetch(`/api/assets/${assetId}/audio`, { method: 'DELETE' });
+      const res = await fetch(`/api/assets/${assetId}/audio`, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+      });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.detail || `Audio deletion failed: ${res.status}`);
@@ -321,16 +1368,11 @@ export default function AdminInventoryDashboard({ sessionId }) {
 
   // ── Category badge color ────────────────────────────────────────────────
   function categoryBadgeStyle(category) {
-    const colors = {
-      Jewelry: '#C29F53',
-      Furniture: '#8E7558',
-      Art: '#7E6C84',
-      Other: '#64748B',
-    };
+    const color = getCategoryColor(category);
     return {
       display: 'inline-block',
-      border: `1px solid ${colors[category] || colors.Other}`,
-      color: colors[category] || colors.Other,
+      border: `1px solid ${color}`,
+      color: color,
       padding: '2px 8px',
       borderRadius: '4px',
       fontSize: '0.75rem',
@@ -339,13 +1381,112 @@ export default function AdminInventoryDashboard({ sessionId }) {
     };
   }
 
+  const handleSearch = useCallback(async () => {
+    if (!searchQuery.trim()) {
+      setSearchResults(null);
+      return;
+    }
+    setSearching(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      params.set('q', searchQuery.trim());
+      if (filterCategory !== 'All') {
+        params.set('category', filterCategory);
+      }
+      const res = await fetch(`/api/sessions/${sessionId}/assets?${params.toString()}`, {
+        credentials: 'same-origin',
+      });
+      if (!res.ok) throw new Error(`Search failed: ${res.status}`);
+      const data = await res.json();
+      setSearchResults(data);
+      setSortOption('relevance');
+    } catch (err) {
+      setError(err.message);
+      setSearchResults(null);
+    } finally {
+      setSearching(false);
+    }
+  }, [searchQuery, filterCategory, sessionId]);
+
+  const handleClearSearch = useCallback(() => {
+    setSearchQuery('');
+    setSearchResults(null);
+  }, []);
+
+  const displayAssets = searchResults !== null ? searchResults : assets;
+
+  const processedAssets = React.useMemo(() => {
+    let list = [...displayAssets];
+
+    if (filterStatus !== 'All') {
+      list = list.filter((a) => a.status === filterStatus);
+    }
+
+    if (filterCategory !== 'All' && searchResults === null) {
+      list = list.filter((a) => a.category === filterCategory);
+    }
+
+    list.sort((a, b) => {
+      const aValMin = a.valuation_min ?? 0;
+      const bValMin = b.valuation_min ?? 0;
+      const aValMax = a.valuation_max ?? 0;
+      const bValMax = b.valuation_max ?? 0;
+      const aValAvg = (aValMin + aValMax) / 2;
+      const bValAvg = (bValMin + bValMax) / 2;
+
+      switch (sortOption) {
+        case 'title_asc':
+          return (a.title || '').localeCompare(b.title || '');
+        case 'title_desc':
+          return (b.title || '').localeCompare(a.title || '');
+        case 'category_asc':
+          return (a.category || '').localeCompare(b.category || '');
+        case 'category_desc':
+          return (b.category || '').localeCompare(a.category || '');
+        case 'value_high':
+          return bValAvg - aValAvg;
+        case 'value_low':
+          return aValAvg - bValAvg;
+        case 'relevance':
+          return (b._similarity ?? 0) - (a._similarity ?? 0);
+        case 'id_desc':
+        default:
+          return (b.id || '').localeCompare(a.id || '');
+      }
+    });
+
+    return list;
+  }, [displayAssets, filterStatus, filterCategory, sortOption, searchResults]);
+
+  // ── Recent Activity Reel (last 10 completed items) ──────────────────────
+  const recentCompletedAssets = React.useMemo(() => {
+    return (assets || [])
+      .filter((a) => a.ocr_status === 'COMPLETED')
+      .sort((a, b) => (b.id || '').localeCompare(a.id || ''))
+      .slice(0, 10);
+  }, [assets]);
+
+  // Check for review_required flag
+  function hasReviewFlag(asset) {
+    let djson = {};
+    try {
+      if (asset.description_json) {
+        djson = typeof asset.description_json === 'string'
+          ? JSON.parse(asset.description_json)
+          : asset.description_json;
+      }
+    } catch { /* ignore */ }
+    return djson.review_required === true;
+  }
+
   // ── Render ──────────────────────────────────────────────────────────────
-  if (!isSetup) {
+  if (!isSetupOrActive) {
     return (
       <div className="archival-card" style={{ textAlign: 'center', padding: 'var(--space-xl)' }}>
         <h3 style={{ marginBottom: 'var(--space-md)' }}>Inventory Dashboard Locked</h3>
         <p className="text-muted">
-          The inventory dashboard is only available during the Setup phase. Assets cannot be modified once the session is launched.
+          The inventory dashboard is only available during the Setup and Active phases. Assets cannot be modified once the session is completed or archived.
         </p>
       </div>
     );
@@ -386,247 +1527,778 @@ export default function AdminInventoryDashboard({ sessionId }) {
         ⚠️ Scope Limit Notice: {LEGAL_NOTICE}
       </div>
 
-      {/* Upload area */}
-      <div className="archival-card" style={{ marginBottom: 'var(--space-lg)' }}>
-        <h3 style={{ marginBottom: 'var(--space-sm)', fontFamily: 'var(--font-serif)' }}>
-          Stage New Asset
-        </h3>
-        <p className="text-muted text-sm" style={{ marginBottom: 'var(--space-md)' }}>
-          Upload a photo of the item. Background OCR will identify details you can review and edit before publishing.
-        </p>
-
+      {/* Pending Updates Batch Publish Banner */}
+      {pendingUpdatesCount > 0 && (
         <div
+          className="archival-card"
+          data-testid="pending-updates-banner"
           style={{
-            border: '2px dashed var(--color-border)',
+            border: '1px solid var(--color-primary)',
+            background: 'var(--color-primary-light)',
+            padding: 'var(--space-md)',
             borderRadius: 'var(--radius-sm)',
-            padding: 'var(--space-xl)',
-            textAlign: 'center',
-            cursor: 'pointer',
-            position: 'relative',
+            marginBottom: 'var(--space-md)',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 'var(--space-md)',
+            flexWrap: 'wrap',
           }}
-          onClick={() => document.getElementById('asset-file-upload')?.click()}
         >
-          {uploading ? (
-            <p className="text-muted">Uploading — background OCR in progress...</p>
+          <div>
+            <h4 style={{ margin: 0, fontFamily: 'var(--font-serif)', color: 'var(--color-primary)' }}>
+              📢 Unpublished Inventory Changes
+            </h4>
+            <p className="text-sm text-muted" style={{ margin: '4px 0 0 0' }}>
+              You have <strong>{pendingUpdatesCount}</strong> pending update{pendingUpdatesCount > 1 ? 's' : ''} to the inventory.
+              Beneficiaries will not see or be notified of these changes until you publish them.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={handlePublishUpdates}
+            disabled={publishingUpdates}
+            data-testid="publish-updates-btn"
+          >
+            {publishingUpdates ? 'Publishing...' : '📣 Publish Updates to Heirs'}
+          </button>
+        </div>
+      )}
+
+      {/* ── Mobile Camera Hub: Room Selector ─────────────────────────── */}
+      <div
+        className="archival-card"
+        data-testid="staging-room-selector"
+        style={{
+          marginBottom: 'var(--space-lg)',
+          padding: 'var(--space-md)',
+          background: 'var(--color-primary-light)',
+          border: '1px solid var(--color-primary)',
+        }}
+      >
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--space-md)',
+          flexWrap: 'wrap',
+        }}>
+          <label
+            htmlFor="staging-room-select"
+            style={{ fontWeight: 600, fontSize: '0.9rem', whiteSpace: 'nowrap' }}
+          >
+            📍 Staging in:
+          </label>
+          {showCustomRoomInput ? (
+            <div style={{ display: 'flex', gap: 'var(--space-sm)', alignItems: 'center', flex: 1 }}>
+              <input
+                type="text"
+                className="form-input"
+                placeholder="Enter custom location..."
+                value={customRoom}
+                onChange={(e) => setCustomRoom(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleCustomRoomSubmit()}
+                style={{ flex: 1, maxWidth: '300px' }}
+                data-testid="custom-room-input"
+              />
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                onClick={handleCustomRoomSubmit}
+                disabled={!customRoom.trim()}
+                data-testid="custom-room-submit"
+              >
+                Set
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => setShowCustomRoomInput(false)}
+              >
+                Cancel
+              </button>
+            </div>
           ) : (
-            <>
-              <p style={{ marginBottom: 'var(--space-xs)', fontWeight: 600 }}>
-                Click to upload or drag-and-drop an image
-              </p>
-              <p className="text-muted text-sm">JPEG, PNG, HEIC (max 10MB)</p>
-            </>
+            <select
+              id="staging-room-select"
+              className="form-input"
+              value={stagingRoom}
+              onChange={(e) => handleRoomChange(e.target.value)}
+              style={{ flex: 1, maxWidth: '320px' }}
+              data-testid="staging-room-dropdown"
+            >
+              {DEFAULT_ROOMS.map((room) => (
+                <option key={room} value={room}>{room}</option>
+              ))}
+              <option value="__custom__">+ Add Custom Location</option>
+            </select>
           )}
-          <input
-            id="asset-file-upload"
-            type="file"
-            accept="image/*"
-            capture="environment"
-            style={{ display: 'none' }}
-            onChange={handleFileUpload}
-            data-testid="asset-file-input"
-          />
         </div>
       </div>
 
-      {/* Asset Grid */}
-      {assets.length === 0 ? (
-        <div className="archival-card" style={{ textAlign: 'center', padding: 'var(--space-xl)' }}>
-          <h3 style={{ marginBottom: 'var(--space-sm)' }}>No Assets Staged</h3>
-          <p className="text-muted">
-            Upload photos of keepsakes, furniture, jewelry, and other personal property to begin building the estate catalog.
-          </p>
-        </div>
-      ) : (
+      {/* ── Mobile Camera Hub: Flexible Photo Stack ───────────────────── */}
+      <div
+        className="archival-card"
+        data-testid="staging-slots"
+        style={{
+          marginBottom: 'var(--space-lg)',
+          padding: 'var(--space-md)',
+        }}
+      >
+        <h3 style={{ marginBottom: 'var(--space-sm)', fontFamily: 'var(--font-serif)' }}>
+          📸 Quick Capture
+        </h3>
+        <p className="text-muted text-sm" style={{ marginBottom: 'var(--space-md)' }}>
+          Capture as many useful photos as this item needs. Stage it once the photo set is ready.
+        </p>
+
+        <label
+          className="form-label"
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 'var(--space-xs)',
+            marginBottom: 'var(--space-sm)',
+            cursor: 'pointer',
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={autoDescribeImages}
+            onChange={(e) => setAutoDescribeImages(e.target.checked)}
+            data-testid="auto-describe-toggle"
+          />
+          AI describe after upload
+        </label>
+
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))',
-            gap: 'var(--space-md)',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+            gap: 'var(--space-sm)',
+            marginBottom: 'var(--space-md)',
           }}
         >
-          {assets.map((asset) => {
-            const isEditing = editingAssetId === asset.id;
-            const isPreAllocating = preAllocatingAssetId === asset.id;
+          {stagingPhotos.map((photo, idx) => (
+            <div
+              key={photo.id}
+              data-testid={`staging-photo-${idx}`}
+              style={{
+                border: idx === 0 ? '1px solid var(--color-primary)' : '1px solid var(--color-border)',
+                borderRadius: 'var(--radius-sm)',
+                overflow: 'hidden',
+                background: 'var(--color-card-bg)',
+              }}
+            >
+              <div style={{ aspectRatio: '4/3', position: 'relative', overflow: 'hidden', background: 'var(--color-bg)' }}>
+                <img
+                  src={photo.previewUrl}
+                  alt={photo.label || `Captured view ${idx + 1}`}
+                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                />
+                {idx === 0 && (
+                  <span
+                    style={{
+                      position: 'absolute',
+                      top: 8,
+                      left: 8,
+                      padding: '2px 8px',
+                      borderRadius: 4,
+                      background: 'rgba(30, 41, 59, 0.75)',
+                      color: '#FFFFFF',
+                      fontSize: '0.7rem',
+                      fontWeight: 700,
+                    }}
+                  >
+                    Primary
+                  </span>
+                )}
+              </div>
+              <div style={{ padding: 'var(--space-xs)', display: 'flex', flexDirection: 'column', gap: 'var(--space-xs)' }}>
+                <input
+                  className="form-input"
+                  value={photo.label}
+                  onChange={(e) => updateStagingPhotoLabel(photo.id, e.target.value)}
+                  placeholder={idx === 0 ? 'Primary view' : 'View label'}
+                  data-testid={`staging-photo-label-${idx}`}
+                  style={{ padding: '4px 8px', fontSize: '0.75rem' }}
+                />
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                  {PHOTO_LABEL_SUGGESTIONS.map((label) => (
+                    <button
+                      key={label}
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => updateStagingPhotoLabel(photo.id, label)}
+                      style={{ padding: '1px 6px', fontSize: '0.65rem' }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: 'var(--space-xs)', alignItems: 'center' }}>
+                  {idx !== 0 && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => setPrimaryStagingPhoto(photo.id)}
+                      style={{ padding: '2px 6px', fontSize: '0.7rem' }}
+                      data-testid={`set-primary-photo-${idx}`}
+                    >
+                      Set Primary
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setEditingStagingPhotoId(photo.id)}
+                    style={{ padding: '2px 6px', fontSize: '0.7rem' }}
+                    data-testid={`edit-staging-photo-${idx}`}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => removeStagingPhoto(photo.id)}
+                    style={{ padding: '2px 6px', fontSize: '0.7rem', color: 'var(--color-alert)', marginLeft: 'auto' }}
+                    data-testid={`remove-staging-photo-${idx}`}
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
 
-            return (
+          {stagingPhotos.length < MAX_STAGING_PHOTOS && (
+            <button
+              type="button"
+              data-testid="add-staging-photo"
+              onClick={triggerCameraCapture}
+              style={{
+                border: '2px dashed var(--color-border)',
+                borderRadius: 'var(--radius-sm)',
+                aspectRatio: '4/3',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 4,
+                cursor: 'pointer',
+                background: 'var(--color-bg)',
+                color: 'var(--color-text-muted)',
+              }}
+            >
+              <span style={{ fontSize: '2rem' }}>📷</span>
+              <span style={{ fontSize: '0.8rem', fontWeight: 600 }}>
+                {stagingPhotos.length === 0 ? 'Add first photo' : 'Add another photo'}
+              </span>
+            </button>
+          )}
+        </div>
+
+        {/* Audio Recording for Staging */}
+        <div style={{ marginBottom: 'var(--space-md)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-sm)', marginBottom: 'var(--space-xs)' }}>
+            <span style={{ fontWeight: 600, fontSize: '0.85rem' }}>🎙 Oral Provenance</span>
+            {audioBlob && (
+              <span style={{ fontSize: '0.75rem', color: 'var(--color-primary)' }}>
+                ✅ Recording captured
+              </span>
+            )}
+          </div>
+          <AdminVoiceRecorder
+            assetId="staging"
+            onSaved={(blob) => handleRecordingSaved(blob)}
+          />
+          {audioBlob && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={clearAudio}
+              style={{ marginTop: 4, fontSize: '0.7rem' }}
+              data-testid="clear-staging-audio"
+            >
+              Remove Recording
+            </button>
+          )}
+        </div>
+
+        {/* Stage Button */}
+        <div style={{ display: 'flex', gap: 'var(--space-sm)', alignItems: 'center' }}>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={handleStageFromSlots}
+            disabled={isStaging || stagingPhotos.length === 0}
+            data-testid="stage-from-slots-btn"
+          >
+            {isStaging ? 'Staging...' : '📤 Stage Item'}
+          </button>
+          {stageSuccess && (
+            <span style={{ color: 'var(--color-primary)', fontWeight: 600, fontSize: '0.85rem' }}>
+              ✅ Staged!
+            </span>
+          )}
+          {uploadQueue.length > 0 && (
+            <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>
+              📶 {uploadQueue.length} pending upload
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* ── Recent Activity Reel ──────────────────────────────────────── */}
+      {recentCompletedAssets.length > 0 && (
+        <div
+          className="archival-card"
+          data-testid="recent-activity-reel"
+          style={{ marginBottom: 'var(--space-lg)', padding: 'var(--space-md)' }}
+        >
+          <h3 style={{ marginBottom: 'var(--space-sm)', fontFamily: 'var(--font-serif)', fontSize: '0.9rem' }}>
+            🕐 Recently Staged
+          </h3>
+          <div style={{
+            display: 'flex',
+            gap: 'var(--space-sm)',
+            overflowX: 'auto',
+            paddingBottom: 'var(--space-sm)',
+            WebkitOverflowScrolling: 'touch',
+          }}>
+            {recentCompletedAssets.map((asset) => (
               <div
                 key={asset.id}
-                className="archival-card"
-                data-testid={`asset-card-${asset.id}`}
-                style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)' }}
+                data-testid={`recent-item-${asset.id}`}
+                style={{
+                  minWidth: '140px',
+                  maxWidth: '160px',
+                  border: '1px solid var(--color-border)',
+                  borderRadius: 'var(--radius-sm)',
+                  overflow: 'hidden',
+                  flexShrink: 0,
+                  background: 'var(--color-card-bg)',
+                }}
               >
-                {/* Image */}
-                {asset.image_uri && (
-                  <div
-                    style={{
-                      aspectRatio: '4/3',
-                      overflow: 'hidden',
-                      borderRadius: 'var(--radius-sm)',
-                      border: '1px solid var(--color-border)',
-                      background: 'var(--color-bg)',
-                    }}
-                  >
+                <div style={{ aspectRatio: '4/3', overflow: 'hidden', background: 'var(--color-bg)' }}>
+                  {asset.image_uri ? (
                     <img
                       src={asset.image_uri}
-                      alt={asset.title || 'Staged asset'}
+                      alt={asset.title || 'Staged item'}
                       style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                     />
-                  </div>
-                )}
-
-                {/* OCR Status */}
-                {asset.ocr_status === 'PROCESSING' && (
-                  <p className="text-muted text-sm" data-testid={`ocr-processing-${asset.id}`}>
-                    OCR extracting details...
-                  </p>
-                )}
-                {asset.ocr_status === 'FAILED' && (
-                  <p className="text-muted text-sm" style={{ color: 'var(--color-alert)' }}>
-                    OCR could not identify details. Please enter them manually.
-                  </p>
-                )}
-
-                {/* Status badge */}
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span style={categoryBadgeStyle(asset.category || 'Other')}>
-                    {asset.category || 'Other'}
-                  </span>
-                  <span
-                    className="text-sm"
-                    style={{
-                      padding: '2px 8px',
-                      borderRadius: '4px',
-                      background: asset.status === 'LIVE' ? 'var(--color-primary-light)' : 'var(--color-bg)',
-                      color: asset.status === 'LIVE' ? 'var(--color-primary)' : 'var(--color-text-muted)',
-                      fontWeight: 600,
-                      fontSize: '0.7rem',
-                      textTransform: 'uppercase',
-                    }}
-                  >
-                    {asset.status || 'STAGED'}
-                  </span>
+                  ) : (
+                    <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--color-text-muted)' }}>
+                      📷
+                    </div>
+                  )}
                 </div>
+                <div style={{ padding: '6px 8px' }}>
+                  <p style={{
+                    fontSize: '0.7rem',
+                    fontWeight: 600,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    margin: 0,
+                  }}>
+                    {asset.title || 'Staged Item'}
+                  </p>
+                  {asset.valuation_min != null && asset.valuation_max != null && (
+                    <p style={{ fontSize: '0.6rem', color: 'var(--color-text-muted)', margin: 0 }}>
+                      ${asset.valuation_min}–${asset.valuation_max}
+                    </p>
+                  )}
+                  {hasReviewFlag(asset) && (
+                    <span style={{
+                      display: 'inline-block',
+                      marginTop: 2,
+                      padding: '1px 4px',
+                      borderRadius: '3px',
+                      background: '#FEF3C7',
+                      color: '#92400E',
+                      fontSize: '0.55rem',
+                      fontWeight: 700,
+                    }}>
+                      ⚠ Review
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
-                {/* Edit form or display */}
-                {isEditing ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)' }}>
-                    <div>
-                      <label className="form-label">Title</label>
-                      <input
-                        className="form-input"
-                        value={editForm.title}
-                        onChange={(e) => handleEditFieldChange('title', e.target.value)}
-                        placeholder="Item title"
-                        data-testid={`edit-title-${asset.id}`}
-                      />
-                    </div>
-                    <div>
-                      <label className="form-label">Description</label>
-                      <textarea
-                        className="form-input"
-                        value={editForm.description}
-                        onChange={(e) => handleEditFieldChange('description', e.target.value)}
-                        rows={3}
-                        placeholder="Describe the item..."
-                        data-testid={`edit-description-${asset.id}`}
-                      />
-                    </div>
-                    <div>
-                      <label className="form-label">Category</label>
-                      <select
-                        className="form-input"
-                        value={editForm.category}
-                        onChange={(e) => handleEditFieldChange('category', e.target.value)}
-                        data-testid={`edit-category-${asset.id}`}
+      {/* Collapsible Category Manager */}
+      <div className="category-manager-accordion">
+        <button
+          type="button"
+          className="category-manager-trigger"
+          onClick={() => setIsCategoryManagerOpen(!isCategoryManagerOpen)}
+          aria-expanded={isCategoryManagerOpen}
+          data-testid="category-manager-toggle"
+        >
+          <span>📂 Category Manager ({categories.length})</span>
+          <span>{isCategoryManagerOpen ? '▲' : '▼'}</span>
+        </button>
+        {isCategoryManagerOpen && (
+          <div className="category-manager-content">
+            <p className="text-muted text-sm" style={{ marginBottom: 'var(--space-md)' }}>
+              Manage your session's keepsake categories. Categories in use by keepsakes cannot be deleted.
+            </p>
+            
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-sm)', marginBottom: 'var(--space-md)' }}>
+              {categories.map((cat) => (
+                <div
+                  key={cat}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    padding: '4px 12px',
+                    border: `1px solid ${getCategoryColor(cat)}`,
+                    color: getCategoryColor(cat),
+                    borderRadius: '16px',
+                    fontSize: '0.85rem',
+                    background: 'transparent',
+                  }}
+                >
+                  <span>{cat}</span>
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteCategory(cat)}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--color-alert)',
+                      cursor: 'pointer',
+                      fontSize: '1rem',
+                      padding: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                    }}
+                    data-testid={`delete-category-${cat}`}
+                    title={`Delete ${cat}`}
+                  >
+                    &times;
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            <form onSubmit={handleCreateCategory} style={{ display: 'flex', gap: 'var(--space-sm)', alignItems: 'center' }}>
+              <input
+                type="text"
+                className="form-input"
+                placeholder="New category name (e.g. Books, Documents)"
+                value={newCategoryName}
+                onChange={(e) => setNewCategoryName(e.target.value)}
+                style={{ flex: 1, maxWidth: '300px' }}
+                data-testid="new-category-input"
+              />
+              <button
+                type="submit"
+                className="btn btn-secondary"
+                disabled={categoryCreating || !newCategoryName.trim()}
+                data-testid="add-category-btn"
+              >
+                {categoryCreating ? 'Adding...' : 'Add Category'}
+              </button>
+            </form>
+          </div>
+        )}
+      </div>
+
+      {/* Desktop file-upload fallback – hidden by default, shown only as a secondary link in the Quick Capture card */}
+      <input
+        id="asset-file-upload"
+        type="file"
+        accept="image/*"
+        multiple
+        style={{ display: 'none' }}
+        onChange={handleFileUpload}
+        data-testid="asset-file-input"
+      />
+
+      {/* RAG Search, Filter, and Sort Toolbar */}
+      <div className="archival-card" style={{ marginBottom: 'var(--space-lg)', padding: 'var(--space-md)' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-md)', alignItems: 'center' }}>
+          
+          {/* Search bar with Enter support */}
+          <div style={{ flex: 1, minWidth: '240px', position: 'relative', display: 'flex', gap: 'var(--space-sm)' }}>
+            <div style={{ position: 'relative', flex: 1 }}>
+              <input
+                type="text"
+                className="form-input"
+                placeholder="Semantic RAG Search (e.g. mahogany table, gilded vase)..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+                style={{ paddingRight: searchQuery ? '2.5rem' : undefined }}
+                data-testid="admin-search-input"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={handleClearSearch}
+                  style={{
+                    position: 'absolute',
+                    right: 8,
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    color: 'var(--color-text)',
+                    opacity: 0.5,
+                    fontSize: '1rem',
+                    padding: 4,
+                  }}
+                  aria-label="Clear search"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={handleSearch}
+              disabled={searching || !searchQuery.trim()}
+              data-testid="admin-search-submit"
+            >
+              {searching ? 'Searching...' : 'Search'}
+            </button>
+          </div>
+
+          {/* Category Filter */}
+          <div>
+            <label className="form-label text-xs">Category</label>
+            <select
+              className="form-input"
+              value={filterCategory}
+              onChange={(e) => setFilterCategory(e.target.value)}
+              style={{ minWidth: '140px', padding: '8px 10px' }}
+              data-testid="admin-filter-category"
+            >
+              <option value="All">All Categories</option>
+              {categories.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+
+          {/* Status Filter */}
+          <div>
+            <label className="form-label text-xs">Status</label>
+            <select
+              className="form-input"
+              value={filterStatus}
+              onChange={(e) => setFilterStatus(e.target.value)}
+              style={{ minWidth: '140px', padding: '8px 10px' }}
+              data-testid="admin-filter-status"
+            >
+              <option value="All">All Statuses</option>
+              <option value="STAGED">Staged (Draft)</option>
+              <option value="LIVE">Live Keepsakes</option>
+              <option value="PRE_ALLOCATED">Pre-Allocated</option>
+            </select>
+          </div>
+
+          {/* Sorting */}
+          <div>
+            <label className="form-label text-xs">Sort By</label>
+            <select
+              className="form-input"
+              value={sortOption}
+              onChange={(e) => setSortOption(e.target.value)}
+              style={{ minWidth: '160px', padding: '8px 10px' }}
+              data-testid="admin-sort-select"
+            >
+              <option value="id_desc">Date Created (Newest)</option>
+              {searchResults !== null && <option value="relevance">RAG Relevance Match</option>}
+              <option value="title_asc">Title (A-Z)</option>
+              <option value="title_desc">Title (Z-A)</option>
+              <option value="category_asc">Category (A-Z)</option>
+              <option value="category_desc">Category (Z-A)</option>
+              <option value="value_high">Valuation (High to Low)</option>
+              <option value="value_low">Valuation (Low to High)</option>
+            </select>
+          </div>
+
+          {/* Grid/List Toggle */}
+          <div className="view-toggle-container" style={{ margin: 0 }}>
+            <button
+              type="button"
+              className={`view-toggle-btn ${viewMode === 'grid' ? 'active-toggle' : ''}`}
+              onClick={() => setViewMode('grid')}
+              data-testid="toggle-grid-view"
+            >
+              Grid View
+            </button>
+            <button
+              type="button"
+              className={`view-toggle-btn ${viewMode === 'list' ? 'active-toggle' : ''}`}
+              onClick={() => setViewMode('list')}
+              data-testid="toggle-list-view"
+            >
+              List View
+            </button>
+          </div>
+
+        </div>
+      </div>
+
+      {/* Zero match state */}
+      {searchResults !== null && processedAssets.length === 0 && (
+        <div className="archival-card" style={{ textAlign: 'center', padding: 'var(--space-xl)', marginBottom: 'var(--space-lg)' }}>
+          <p className="text-muted">
+            We couldn't find any matches for <strong>"{searchQuery}"</strong> under your selected filters. Try broadening your terms or clearing the search.
+          </p>
+        </div>
+      )}
+
+      {/* Asset display */}
+      {processedAssets.length === 0 && searchResults === null ? (
+        <div className="archival-card" style={{ textAlign: 'center', padding: 'var(--space-xl)' }}>
+          <p className="text-muted">No items found matching the current filters.</p>
+        </div>
+      ) : (
+        <>
+          {viewMode === 'grid' ? (
+            /* GRID VIEW */
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))',
+                gap: 'var(--space-md)',
+              }}
+            >
+              {processedAssets.map((asset) => {
+                const isPreAllocating = preAllocatingAssetId === asset.id;
+                const showReviewPill = hasReviewFlag(asset);
+                const displayDescription = getDisplayDescription(asset);
+                const structuredDetails = getStructuredAssetDetails(asset);
+                const hasStructuredDetails = hasStructuredAssetDetails(structuredDetails);
+                const isDescriptionExpanded = expandedDescriptionIds.has(asset.id);
+                const canExpandDescription = displayDescription.length > 120 || hasStructuredDetails;
+                return (
+                  <div
+                    key={asset.id}
+                    className="archival-card"
+                    data-testid={`asset-card-${asset.id}`}
+                    style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)' }}
+                  >
+                    {/* Image Gallery */}
+                    {(asset.image_uri || (asset.images && asset.images.length > 0)) && (
+                      <div
+                        style={{
+                          aspectRatio: '4/3',
+                          overflow: 'hidden',
+                          borderRadius: 'var(--radius-sm)',
+                          border: '1px solid var(--color-border)',
+                          background: 'var(--color-bg)',
+                        }}
                       >
-                        {CATEGORIES.map((cat) => (
-                          <option key={cat} value={cat}>{cat}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-sm)' }}>
-                      <div>
-                        <label className="form-label">Min Value ($)</label>
-                        <input
-                          className="form-input"
-                          type="number"
-                          min={0}
-                          value={editForm.valuation_min}
-                          onChange={(e) => handleEditFieldChange('valuation_min', Number(e.target.value))}
-                          data-testid={`edit-min-${asset.id}`}
+                        <AssetGallery
+                          images={asset.images || [{ id: 'primary', image_uri: asset.image_uri, is_primary: true, angle_label: 'Primary' }]}
+                          title={asset.title}
+                          onEditImage={(image) => setEditingImage({ assetId: asset.id, image, title: asset.title })}
                         />
                       </div>
-                      <div>
-                        <label className="form-label">Max Value ($)</label>
-                        <input
-                          className="form-input"
-                          type="number"
-                          min={0}
-                          value={editForm.valuation_max}
-                          onChange={(e) => handleEditFieldChange('valuation_max', Number(e.target.value))}
-                          data-testid={`edit-max-${asset.id}`}
-                        />
+                    )}
+
+                    {/* Review Flag Pill */}
+                    {showReviewPill && (
+                      <div style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 4,
+                        padding: '2px 8px',
+                        borderRadius: '12px',
+                        background: '#FEF3C7',
+                        color: '#92400E',
+                        fontSize: '0.7rem',
+                        fontWeight: 700,
+                        alignSelf: 'flex-start',
+                      }}>
+                        ⚠️ Needs Review
+                      </div>
+                    )}
+
+                    {/* Badges */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={categoryBadgeStyle(asset.category || 'Other')}>
+                        {asset.category || 'Other'}
+                      </span>
+                      <div style={{ display: 'flex', gap: 'var(--space-xs)', alignItems: 'center' }}>
+                        {asset._similarity !== undefined && (
+                          <span className="badge badge-primary" style={{ fontSize: '0.65rem' }}>
+                            {Math.round(asset._similarity * 100)}% Match
+                          </span>
+                        )}
+                        <span
+                          className="text-sm"
+                          style={{
+                            padding: '2px 8px',
+                            borderRadius: '4px',
+                            background: asset.status === 'LIVE' ? 'var(--color-primary-light)' : 'var(--color-bg)',
+                            color: asset.status === 'LIVE' ? 'var(--color-primary)' : 'var(--color-text-muted)',
+                            fontWeight: 600,
+                            fontSize: '0.7rem',
+                            textTransform: 'uppercase',
+                          }}
+                        >
+                          {asset.status || 'STAGED'}
+                        </span>
                       </div>
                     </div>
-                    <div>
-                      <label className="form-label">Valuation Source</label>
-                      <select
-                        className="form-input"
-                        value={editForm.valuation_source}
-                        onChange={(e) => handleEditFieldChange('valuation_source', e.target.value)}
-                        data-testid={`edit-source-${asset.id}`}
-                      >
-                        {VALUATION_SOURCES.map((src) => (
-                          <option key={src} value={src}>{src}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="form-label">Sentiment Tag</label>
-                      <input
-                        className="form-input"
-                        value={editForm.sentiment_tag}
-                        onChange={(e) => handleEditFieldChange('sentiment_tag', e.target.value)}
-                        placeholder="e.g. Heirloom, Handmade..."
-                        data-testid={`edit-sentiment-${asset.id}`}
-                      />
-                    </div>
-                    <div style={{ display: 'flex', gap: 'var(--space-sm)', marginTop: 'var(--space-xs)' }}>
-                      <button
-                        className="btn btn-primary btn-sm"
-                        onClick={() => handlePublish(asset.id)}
-                        data-testid={`publish-btn-${asset.id}`}
-                      >
-                        Publish Live
-                      </button>
-                      <button
-                        className="btn btn-secondary btn-sm"
-                        onClick={cancelEditing}
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    {/* Display metadata */}
+
+                    {/* Metadata display */}
                     <div>
                       <h4 style={{ fontFamily: 'var(--font-serif)', marginBottom: '2px' }}>
                         {asset.title || 'Untitled Asset'}
                       </h4>
-                      {asset.description && (
-                        <p className="text-muted text-sm" style={{
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          display: '-webkit-box',
-                          WebkitLineClamp: 2,
-                          WebkitBoxOrient: 'vertical',
-                        }}>
-                          {asset.description}
-                        </p>
+                      {(displayDescription || hasStructuredDetails) && (
+                        <div style={{ marginBottom: 'var(--space-xs)' }}>
+                          {displayDescription && (
+                            <p className="text-muted text-sm" style={{
+                              overflow: isDescriptionExpanded ? 'visible' : 'hidden',
+                              textOverflow: isDescriptionExpanded ? 'clip' : 'ellipsis',
+                              display: isDescriptionExpanded ? 'block' : '-webkit-box',
+                              WebkitLineClamp: isDescriptionExpanded ? 'unset' : 2,
+                              WebkitBoxOrient: 'vertical',
+                              marginBottom: canExpandDescription ? '2px' : 'var(--space-xs)'
+                            }}>
+                              {displayDescription}
+                            </p>
+                          )}
+                          {isDescriptionExpanded && hasStructuredDetails && (
+                            <StructuredAssetDetails details={structuredDetails} compact />
+                          )}
+                          {canExpandDescription && (
+                            <button
+                              type="button"
+                              onClick={() => toggleDescriptionExpanded(asset.id)}
+                              className="btn-link"
+                              style={{
+                                border: 'none',
+                                background: 'transparent',
+                                color: 'var(--color-primary)',
+                                padding: 0,
+                                fontSize: '0.75rem',
+                                fontWeight: 600,
+                                cursor: 'pointer',
+                              }}
+                              aria-expanded={isDescriptionExpanded}
+                              data-testid={`toggle-description-${asset.id}`}
+                            >
+                              {isDescriptionExpanded ? 'Show less' : 'Show more'}
+                            </button>
+                          )}
+                        </div>
                       )}
                       {asset.valuation_min != null && asset.valuation_max != null && (
-                        <p className="text-sm" style={{ marginTop: '4px', color: 'var(--color-text)' }}>
+                        <p className="text-sm" style={{ color: 'var(--color-text)', margin: 0 }}>
                           ${asset.valuation_min.toLocaleString()} – ${asset.valuation_max.toLocaleString()}
                           {asset.valuation_source && (
                             <span className="text-muted"> · {asset.valuation_source}</span>
@@ -634,39 +2306,57 @@ export default function AdminInventoryDashboard({ sessionId }) {
                         </p>
                       )}
                       {asset.sentiment_tag && (
-                        <span style={{
-                          display: 'inline-block',
-                          marginTop: '4px',
-                          padding: '1px 6px',
-                          borderRadius: '3px',
-                          background: 'var(--color-bg)',
-                          fontSize: '0.7rem',
-                          fontStyle: 'italic',
-                          color: 'var(--color-text-muted)',
-                        }}>
-                          {asset.sentiment_tag}
-                        </span>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '6px' }}>
+                          {asset.sentiment_tag.split(',')
+                            .map((t) => t.trim())
+                            .filter(Boolean)
+                            .map((tag, idx) => (
+                              <span
+                                key={idx}
+                                style={{
+                                  display: 'inline-block',
+                                  padding: '1px 6px',
+                                  borderRadius: '12px',
+                                  background: 'var(--color-primary-light)',
+                                  color: 'var(--color-primary)',
+                                  fontSize: '0.65rem',
+                                  fontWeight: 500,
+                                }}
+                              >
+                                #{tag}
+                              </span>
+                            ))
+                          }
+                        </div>
                       )}
                     </div>
 
                     {/* Pre-allocated indicator */}
                     {asset.status === 'PRE_ALLOCATED' && asset.pre_allocated_to_heir_name && (
-                      <p className="text-sm" style={{ color: 'var(--color-primary)', fontWeight: 600 }}>
+                      <p className="text-sm" style={{ color: 'var(--color-primary)', fontWeight: 600, margin: 0 }}>
                         Pre-Allocated: {asset.pre_allocated_to_heir_name}
                       </p>
                     )}
 
                     {/* Audio indicator */}
                     {asset.audio_uri && (
-                      <p className="text-sm" style={{ color: 'var(--color-primary)' }}>
-                        🎙 Spoken Story Recorded
-                      </p>
+                      <div style={{ marginTop: 'var(--space-xs)', marginBottom: 'var(--space-sm)' }}>
+                        <p className="text-sm" style={{ color: 'var(--color-primary)', fontWeight: 600, marginBottom: 'var(--space-xs)' }}>
+                          🎙 Spoken Story Recorded
+                        </p>
+                        <audio
+                          src={asset.audio_uri.startsWith('/') ? asset.audio_uri : `/${asset.audio_uri}`}
+                          controls
+                          preload="none"
+                          style={{ width: '100%', height: '32px', borderRadius: '4px' }}
+                        />
+                      </div>
                     )}
 
-                    {/* Pre-allocation dropdown */}
+                    {/* Pre-allocation selection widget */}
                     {isPreAllocating && (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)' }}>
-                        <label className="form-label">Assign to Heir (Specific Devise)</label>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)', padding: 'var(--space-sm)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', background: 'var(--color-bg)' }}>
+                        <label className="form-label text-xs">Assign to Heir (Specific Devise)</label>
                         <select
                           className="form-input"
                           value={selectedHeirId}
@@ -699,26 +2389,6 @@ export default function AdminInventoryDashboard({ sessionId }) {
                       </div>
                     )}
 
-                    {/* Audio upload */}
-                    {audioAssetId === asset.id && (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)' }}>
-                        <label className="form-label">Upload Spoken Story (WebM/MP3/WAV, max 2 min)</label>
-                        <input
-                          type="file"
-                          accept="audio/webm,audio/mp3,audio/wav,.webm,.mp3,.wav"
-                          onChange={handleAudioSelect}
-                          data-testid={`audio-file-input-${asset.id}`}
-                        />
-                        {audioUploading && <p className="text-muted text-sm">Uploading audio...</p>}
-                        <button
-                          className="btn btn-secondary btn-sm"
-                          onClick={() => setAudioAssetId(null)}
-                        >
-                          Cancel Audio
-                        </button>
-                      </div>
-                    )}
-
                     {/* Action buttons */}
                     <div style={{
                       display: 'flex',
@@ -728,45 +2398,32 @@ export default function AdminInventoryDashboard({ sessionId }) {
                       paddingTop: 'var(--space-sm)',
                       borderTop: '1px solid var(--color-border)',
                     }}>
-                      {asset.status !== 'LIVE' && (
-                        <>
-                          <button
-                            className="btn btn-primary btn-sm"
-                            onClick={() => startEditing(asset)}
-                            data-testid={`edit-btn-${asset.id}`}
-                          >
-                            Edit & Publish
-                          </button>
-                          {asset.status !== 'PRE_ALLOCATED' && (
-                            <button
-                              className="btn btn-secondary btn-sm"
-                              onClick={() => startPreAllocating(asset.id)}
-                              data-testid={`pre-allocate-btn-${asset.id}`}
-                            >
-                              Pre-Allocate
-                            </button>
-                          )}
-                        </>
-                      )}
-                      {asset.status !== 'LIVE' && (
+                      <button
+                        className="btn btn-primary btn-sm"
+                        onClick={() => startEditing(asset)}
+                        data-testid={`edit-btn-${asset.id}`}
+                      >
+                        {asset.status === 'LIVE' ? 'Edit Details' : 'Edit & Publish'}
+                      </button>
+
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => setPreviewAsset(asset)}
+                        data-testid={`preview-heir-btn-${asset.id}`}
+                      >
+                        Preview as Heir
+                      </button>
+                      
+                      {asset.status !== 'LIVE' && asset.status !== 'PRE_ALLOCATED' && !isPreAllocating && (
                         <button
                           className="btn btn-secondary btn-sm"
-                          onClick={() => setAudioAssetId(asset.id)}
-                          data-testid={`audio-btn-${asset.id}`}
+                          onClick={() => startPreAllocating(asset.id)}
+                          data-testid={`pre-allocate-btn-${asset.id}`}
                         >
-                          {asset.audio_uri ? 'Replace Audio' : 'Add Voice Story'}
+                          Pre-Allocate
                         </button>
                       )}
-                      {asset.audio_uri && (
-                        <button
-                          className="btn btn-secondary btn-sm"
-                          onClick={() => handleDeleteAudio(asset.id)}
-                          style={{ color: 'var(--color-alert)' }}
-                          data-testid={`delete-audio-btn-${asset.id}`}
-                        >
-                          Remove Audio
-                        </button>
-                      )}
+                      
                       <button
                         className="btn btn-secondary btn-sm"
                         onClick={() => handleDelete(asset.id)}
@@ -776,13 +2433,686 @@ export default function AdminInventoryDashboard({ sessionId }) {
                         🗑 Delete
                       </button>
                     </div>
-                  </>
+
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            /* COMPACT LIST VIEW */
+            <div className="list-layout">
+              {processedAssets.map((asset) => {
+                const isPreAllocating = preAllocatingAssetId === asset.id;
+                return (
+                  <div key={asset.id} className="list-item-card" data-testid={`asset-card-${asset.id}`}>
+                    <div className="list-item-thumb">
+                      <img src={asset.image_uri || 'static/uploads/placeholder.webp'} alt={asset.title || 'Keepsake'} />
+                    </div>
+                    
+                    <div className="list-item-info">
+                      <div className="list-item-title">{asset.title || 'Untitled Asset'}</div>
+                      <div className="list-item-meta">
+                        <span style={categoryBadgeStyle(asset.category || 'Other')}>
+                          {asset.category || 'Other'}
+                        </span>
+                        <span className="badge" style={{ padding: '0px 6px', fontSize: '0.65rem' }}>
+                          {asset.status || 'STAGED'}
+                        </span>
+                        {asset.valuation_min != null && asset.valuation_max != null && (
+                          <span>${asset.valuation_min.toLocaleString()} – ${asset.valuation_max.toLocaleString()}</span>
+                        )}
+                        {asset.audio_uri && <span>🎤 Audio Story</span>}
+                        {asset._similarity !== undefined && (
+                          <span style={{ color: 'var(--color-primary)', fontWeight: 600 }}>
+                            {Math.round(asset._similarity * 100)}% Match
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {isPreAllocating && (
+                      <div style={{ display: 'flex', gap: 'var(--space-xs)', alignItems: 'center' }}>
+                        <select
+                          className="form-input"
+                          style={{ padding: '4px', fontSize: '0.75rem', maxWidth: '140px' }}
+                          value={selectedHeirId}
+                          onChange={(e) => setSelectedHeirId(e.target.value)}
+                          data-testid={`pre-allocate-select-${asset.id}`}
+                        >
+                          <option value="">Select heir...</option>
+                          {heirs.map((heir) => (
+                            <option key={heir.id} value={heir.id}>
+                              {heir.username}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          className="btn btn-primary btn-sm"
+                          style={{ padding: '4px 8px', fontSize: '0.75rem' }}
+                          onClick={handlePreAllocate}
+                          disabled={!selectedHeirId}
+                          data-testid={`confirm-pre-allocate-${asset.id}`}
+                        >
+                          Confirm
+                        </button>
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          style={{ padding: '4px 8px', fontSize: '0.75rem' }}
+                          onClick={cancelPreAllocating}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    )}
+
+                    <div className="list-item-actions">
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        style={{ padding: '4px 8px', fontSize: '0.75rem' }}
+                        onClick={() => startEditing(asset)}
+                        data-testid={`edit-btn-${asset.id}`}
+                      >
+                        Edit
+                      </button>
+
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        style={{ padding: '4px 8px', fontSize: '0.75rem' }}
+                        onClick={() => setPreviewAsset(asset)}
+                        data-testid={`preview-heir-btn-${asset.id}`}
+                      >
+                        Preview
+                      </button>
+                      
+                      {asset.status !== 'LIVE' && asset.status !== 'PRE_ALLOCATED' && !isPreAllocating && (
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          style={{ padding: '4px 8px', fontSize: '0.75rem' }}
+                          onClick={() => startPreAllocating(asset.id)}
+                          data-testid={`pre-allocate-btn-${asset.id}`}
+                        >
+                          Pre-Allocate
+                        </button>
+                      )}
+
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        style={{ padding: '4px 8px', fontSize: '0.75rem', color: '#DC2626' }}
+                        onClick={() => handleDelete(asset.id)}
+                        data-testid={`delete-btn-${asset.id}`}
+                      >
+                        🗑
+                      </button>
+                    </div>
+
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+
+      {previewAsset && (() => {
+        const displayDescription = getDisplayDescription(previewAsset);
+        const structuredDetails = getStructuredAssetDetails(previewAsset);
+        const hasStructuredDetails = hasStructuredAssetDetails(structuredDetails);
+        const previewImages = previewAsset.images?.length
+          ? previewAsset.images
+          : previewAsset.image_uri
+            ? [{ id: 'primary', image_uri: previewAsset.image_uri, is_primary: true, angle_label: 'Primary' }]
+            : [];
+
+        return (
+          <div
+            className="drawer-overlay"
+            onClick={() => setPreviewAsset(null)}
+            data-testid="heir-preview-modal"
+            style={{ alignItems: 'center', justifyContent: 'center', padding: '24px' }}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="heir-preview-title"
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                width: 'min(760px, calc(100vw - 32px))',
+                maxHeight: 'calc(100vh - 48px)',
+                overflowY: 'auto',
+                background: 'var(--color-card-bg)',
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--radius-md)',
+                boxShadow: '0 20px 50px rgba(15, 23, 42, 0.22)',
+              }}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 'var(--space-sm)',
+                  padding: 'var(--space-md)',
+                  borderBottom: '1px solid var(--color-border)',
+                }}
+              >
+                <div>
+                  <p className="text-xs text-muted" style={{ marginBottom: 2, fontWeight: 700, textTransform: 'uppercase' }}>
+                    Heir preview
+                  </p>
+                  <h3 id="heir-preview-title" style={{ fontFamily: 'var(--font-serif)', margin: 0 }}>
+                    {previewAsset.title || 'Untitled Asset'}
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setPreviewAsset(null)}
+                  aria-label="Close heir preview"
+                >
+                  Close
+                </button>
+              </div>
+
+              {previewImages.length > 0 && (
+                <div style={{ aspectRatio: '4/3', background: 'var(--color-bg)', borderBottom: '1px solid var(--color-border)' }}>
+                  <AssetGallery images={previewImages} title={previewAsset.title} />
+                </div>
+              )}
+
+              <div style={{ padding: 'var(--space-lg)', display: 'flex', flexDirection: 'column', gap: 'var(--space-md)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 'var(--space-sm)', flexWrap: 'wrap' }}>
+                  <span style={categoryBadgeStyle(previewAsset.category || 'Other')}>
+                    {previewAsset.category || 'Other'}
+                  </span>
+                  {previewAsset.status === 'PRE_ALLOCATED' && (
+                    <span className="badge" style={{ color: 'var(--color-alert)' }}>Pre-Allocated</span>
+                  )}
+                </div>
+
+                {displayDescription && (
+                  <p className="text-sm" style={{ color: 'var(--color-text-muted)', lineHeight: 1.55, margin: 0 }}>
+                    {displayDescription}
+                  </p>
+                )}
+
+                {hasStructuredDetails && (
+                  <StructuredAssetDetails details={structuredDetails} />
+                )}
+
+                {previewAsset.valuation_min != null && previewAsset.valuation_max != null && (
+                  <p className="text-sm" style={{ color: 'var(--color-text)', margin: 0, fontWeight: 600 }}>
+                    ${previewAsset.valuation_min.toLocaleString()} – ${previewAsset.valuation_max.toLocaleString()}
+                    {previewAsset.valuation_source && (
+                      <span className="text-muted" style={{ fontWeight: 400 }}> · {previewAsset.valuation_source}</span>
+                    )}
+                  </p>
+                )}
+
+                {previewAsset.sentiment_tag && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                    {previewAsset.sentiment_tag.split(',')
+                      .map((t) => t.trim())
+                      .filter(Boolean)
+                      .map((tag, idx) => (
+                        <span
+                          key={idx}
+                          style={{
+                            display: 'inline-block',
+                            padding: '1px 6px',
+                            borderRadius: '12px',
+                            background: 'var(--color-primary-light)',
+                            color: 'var(--color-primary)',
+                            fontSize: '0.65rem',
+                            fontWeight: 500,
+                          }}
+                        >
+                          #{tag}
+                        </span>
+                      ))}
+                  </div>
+                )}
+
+                {previewAsset.audio_uri && (
+                  <div>
+                    <p className="text-sm" style={{ color: 'var(--color-primary)', fontWeight: 600, marginBottom: 'var(--space-xs)' }}>
+                      🎙 Spoken Story
+                    </p>
+                    <audio
+                      src={previewAsset.audio_uri.startsWith('/') ? previewAsset.audio_uri : `/${previewAsset.audio_uri}`}
+                      controls
+                      preload="none"
+                      style={{ width: '100%', height: '32px', borderRadius: '4px' }}
+                    />
+                  </div>
                 )}
               </div>
-            );
-          })}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Slide-over Edit Drawer Modal */}
+      {editingAssetId && (
+        <div className="drawer-overlay" onClick={cancelEditing}>
+          <div className="drawer-content" onClick={(e) => e.stopPropagation()}>
+            <div className="drawer-header">
+              <h3>Edit Keepsake Details</h3>
+              <button type="button" className="close-btn" onClick={cancelEditing} aria-label="Close drawer">✕</button>
+            </div>
+            
+            <div className="drawer-body">
+              {/* ✨ Generate with AI button */}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 'var(--space-xs)' }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => handleGenerateDetails(editingAssetId)}
+                  disabled={generatingDetails[editingAssetId]}
+                  data-testid={`generate-ai-btn-${editingAssetId}`}
+                  style={{ display: 'flex', alignItems: 'center', gap: '4px' }}
+                >
+                  {generatingDetails[editingAssetId] ? 'Analyzing image...' : '✨ Generate with AI'}
+                </button>
+              </div>
+
+              <div>
+                <label className="form-label">Title</label>
+                <input
+                  className="form-input"
+                  value={editForm.title}
+                  onChange={(e) => handleEditFieldChange('title', e.target.value)}
+                  placeholder="Item title"
+                  data-testid={`edit-title-${editingAssetId}`}
+                />
+              </div>
+
+              <div>
+                <label className="form-label">Description (Short Summary)</label>
+                <textarea
+                  className="form-input"
+                  value={editForm.description}
+                  onChange={(e) => handleEditFieldChange('description', e.target.value)}
+                  rows={2}
+                  placeholder="Brief description for the asset card..."
+                  data-testid={`edit-description-${editingAssetId}`}
+                />
+              </div>
+
+              <div>
+                <label className="form-label">Specifications</label>
+                <textarea
+                  className="form-input"
+                  value={editForm.specifications || ''}
+                  onChange={(e) => handleEditFieldChange('specifications', e.target.value)}
+                  rows={3}
+                  placeholder="Bullet points: materials, dimensions, hardware..."
+                  data-testid={`edit-specifications-${editingAssetId}`}
+                />
+              </div>
+
+              <div>
+                <label className="form-label">Condition Report</label>
+                <textarea
+                  className="form-input"
+                  value={editForm.condition_report || ''}
+                  onChange={(e) => handleEditFieldChange('condition_report', e.target.value)}
+                  rows={2}
+                  placeholder="Visible wear, scratches, damage..."
+                  data-testid={`edit-condition-report-${editingAssetId}`}
+                />
+              </div>
+
+              <div>
+                <label className="form-label">Search Keywords</label>
+                <input
+                  className="form-input"
+                  value={editForm.keywords || ''}
+                  onChange={(e) => handleEditFieldChange('keywords', e.target.value)}
+                  placeholder="Comma-separated tags for search optimization..."
+                  data-testid={`edit-keywords-${editingAssetId}`}
+                />
+              </div>
+
+              <div>
+                <label className="form-label">Category</label>
+                <select
+                  className="form-input"
+                  value={editForm.category}
+                  onChange={(e) => handleEditFieldChange('category', e.target.value)}
+                  data-testid={`edit-category-${editingAssetId}`}
+                >
+                  {categories.map((cat) => (
+                    <option key={cat} value={cat}>{cat}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-sm)' }}>
+                <div>
+                  <label className="form-label">Min Value ($)</label>
+                  <input
+                    className="form-input"
+                    type="number"
+                    min={0}
+                    value={editForm.valuation_min}
+                    onChange={(e) => handleEditFieldChange('valuation_min', Number(e.target.value))}
+                    data-testid={`edit-min-${editingAssetId}`}
+                  />
+                </div>
+                <div>
+                  <label className="form-label">Max Value ($)</label>
+                  <input
+                    className="form-input"
+                    type="number"
+                    min={0}
+                    value={editForm.valuation_max}
+                    onChange={(e) => handleEditFieldChange('valuation_max', Number(e.target.value))}
+                    data-testid={`edit-max-${editingAssetId}`}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="form-label">Valuation Source</label>
+                <select
+                  className="form-input"
+                  value={editForm.valuation_source}
+                  onChange={(e) => handleEditFieldChange('valuation_source', e.target.value)}
+                  data-testid={`edit-source-${editingAssetId}`}
+                >
+                  {VALUATION_SOURCES.map((src) => (
+                    <option key={src} value={src}>{src}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="form-label">Sentiment Tags</label>
+                <input
+                  className="form-input"
+                  value={editForm.sentiment_tag}
+                  onChange={(e) => handleEditFieldChange('sentiment_tag', e.target.value)}
+                  placeholder="e.g. Heirloom, Handmade (comma-separated)..."
+                  data-testid={`edit-sentiment-${editingAssetId}`}
+                  style={{ marginBottom: '8px' }}
+                />
+
+                {editForm.sentiment_tag.trim() && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginBottom: '8px' }}>
+                    {editForm.sentiment_tag.split(',')
+                      .map((t) => t.trim())
+                      .filter(Boolean)
+                      .map((tag, idx) => (
+                        <span
+                          key={idx}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            padding: '2px 8px',
+                            borderRadius: '12px',
+                            background: 'var(--color-primary-light)',
+                            color: 'var(--color-primary)',
+                            fontSize: '0.75rem',
+                            fontWeight: 500,
+                          }}
+                        >
+                          {tag}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const updated = editForm.sentiment_tag.split(',')
+                                .map((t) => t.trim())
+                                .filter((t) => t !== tag)
+                                .join(', ');
+                              handleEditFieldChange('sentiment_tag', updated);
+                            }}
+                            style={{
+                              border: 'none',
+                              background: 'none',
+                              color: 'var(--color-primary)',
+                              cursor: 'pointer',
+                              fontSize: '0.85rem',
+                              padding: 0,
+                              lineHeight: 1,
+                            }}
+                            title="Remove tag"
+                          >
+                            &times;
+                          </button>
+                        </span>
+                      ))
+                    }
+                  </div>
+                )}
+
+                <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginBottom: 'var(--space-sm)' }}>
+                  <span style={{ marginRight: '6px' }}>Suggestions:</span>
+                  {['Memento', 'Heirloom', 'Practical', 'Antique', 'Handmade', 'Documents'].map((sug) => {
+                    const tagsArray = editForm.sentiment_tag.split(',').map(t => t.trim()).filter(Boolean);
+                    const isSelected = tagsArray.includes(sug);
+                    return (
+                      <button
+                        key={sug}
+                        type="button"
+                        onClick={() => {
+                          let updated;
+                          if (isSelected) {
+                            updated = tagsArray.filter(t => t !== sug).join(', ');
+                          } else {
+                            updated = [...tagsArray, sug].join(', ');
+                          }
+                          handleEditFieldChange('sentiment_tag', updated);
+                        }}
+                        style={{
+                          border: '1px solid var(--color-border)',
+                          borderRadius: '12px',
+                          padding: '2px 8px',
+                          marginRight: '4px',
+                          marginBottom: '4px',
+                          cursor: 'pointer',
+                          backgroundColor: isSelected ? 'var(--color-primary)' : 'transparent',
+                          color: isSelected ? '#FFFFFF' : 'var(--color-text)',
+                          fontSize: '0.7rem',
+                          transition: 'all 0.2s',
+                        }}
+                        data-testid={`suggested-tag-${sug}`}
+                      >
+                        {isSelected ? `✓ ${sug}` : `+ ${sug}`}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Keepsake Photo Angles & Views */}
+              <div style={{ marginTop: 'var(--space-sm)', padding: 'var(--space-sm)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', background: 'var(--color-primary-light)' }}>
+                <h5 style={{ fontFamily: 'var(--font-serif)', marginBottom: 'var(--space-xs)', fontSize: '0.85rem' }}>
+                  Keepsake Photo Angles & Views
+                </h5>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-xs)', marginBottom: 'var(--space-sm)' }}>
+                  {(() => {
+                    const currentAsset = assets.find(a => a.id === editingAssetId);
+                    const assetImages = currentAsset?.images?.length
+                      ? currentAsset.images
+                      : currentAsset?.image_uri
+                        ? [{ id: 'primary', image_uri: currentAsset.image_uri, is_primary: true, angle_label: 'Primary' }]
+                        : [];
+                    return assetImages.map((img) => (
+                      <div key={img.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: 'var(--space-xs)', background: 'var(--color-card-bg)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-sm)' }}>
+                          <img src={img.image_uri} alt={img.angle_label} style={{ width: 32, height: 32, objectFit: 'cover', borderRadius: 'var(--radius-sm)' }} />
+                          <span className="text-xs font-semibold">{img.angle_label || 'View'}</span>
+                          {img.is_primary && <span className="badge badge-primary" style={{ fontSize: '0.55rem', padding: '0px 3px' }}>Primary</span>}
+                        </div>
+                        <div style={{ display: 'flex', gap: 'var(--space-xs)', alignItems: 'center' }}>
+                          <button
+                            type="button"
+                            onClick={() => setEditingImage({ assetId: editingAssetId, image: img, title: currentAsset?.title })}
+                            className="btn btn-secondary btn-sm"
+                            style={{ padding: '2px 6px', fontSize: '0.7rem' }}
+                            data-testid={`edit-image-btn-${img.id}`}
+                          >
+                            Edit
+                          </button>
+                          {!img.is_primary && (
+                            <button
+                              type="button"
+                              onClick={() => handleSecondaryDelete(editingAssetId, img.id)}
+                              className="btn btn-danger btn-sm"
+                              style={{ padding: '2px 6px', fontSize: '0.7rem' }}
+                              data-testid={`delete-image-btn-${img.id}`}
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ));
+                  })()}
+                </div>
+
+                {secondaryError && (
+                  <div className="banner banner-error" style={{ marginBottom: 'var(--space-xs)', padding: 'var(--space-xs)', fontSize: '0.75rem' }}>
+                    {secondaryError}
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-xs)' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-xs)' }}>
+                    <div>
+                      <label className="form-label text-xs" style={{ marginBottom: '2px' }}>Choose Photo File</label>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) => setSecondaryFile(e.target.files?.[0] || null)}
+                        style={{ fontSize: '0.75rem', width: '100%' }}
+                        data-testid={`secondary-image-file-${editingAssetId}`}
+                      />
+                    </div>
+                    <div>
+                      <label className="form-label text-xs" style={{ marginBottom: '2px' }}>Angle / View Label</label>
+                      <input
+                        className="form-input"
+                        type="text"
+                        placeholder="Back view, markings..."
+                        value={secondaryAngleLabel}
+                        onChange={(e) => setSecondaryAngleLabel(e.target.value)}
+                        style={{ padding: '4px 8px', fontSize: '0.75rem' }}
+                        data-testid={`secondary-image-label-${editingAssetId}`}
+                      />
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    style={{ alignSelf: 'flex-end', padding: '4px 8px', fontSize: '0.75rem' }}
+                    disabled={secondaryUploading || !secondaryFile}
+                    onClick={() => handleSecondaryUpload(editingAssetId)}
+                    data-testid={`upload-secondary-btn-${editingAssetId}`}
+                  >
+                    {secondaryUploading ? 'Uploading view...' : 'Upload View'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Voice Story section in Drawer */}
+              <div style={{ marginTop: 'var(--space-sm)', padding: 'var(--space-sm)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', background: 'var(--color-primary-light)' }}>
+                <h5 style={{ fontFamily: 'var(--font-serif)', marginBottom: 'var(--space-xs)', fontSize: '0.85rem' }}>
+                  Voice Story Recording
+                </h5>
+                {(() => {
+                  const currentAsset = assets.find(a => a.id === editingAssetId);
+                  return (
+                    <>
+                      {currentAsset?.audio_uri && (
+                        <div style={{ marginBottom: 'var(--space-sm)' }}>
+                          <p className="text-xs text-muted" style={{ fontWeight: 600, marginBottom: '4px' }}>
+                            🎙 Current voice story:
+                          </p>
+                          <audio
+                            src={currentAsset.audio_uri.startsWith('/') ? currentAsset.audio_uri : `/${currentAsset.audio_uri}`}
+                            controls
+                            preload="none"
+                            style={{ width: '100%', height: '32px', borderRadius: '4px' }}
+                          />
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => handleDeleteAudio(editingAssetId)}
+                            style={{ color: 'var(--color-alert)', marginTop: '4px', fontSize: '0.7rem', padding: '2px 6px' }}
+                            data-testid={`delete-audio-btn-${editingAssetId}`}
+                          >
+                            Remove Audio
+                          </button>
+                        </div>
+                      )}
+                      
+                      <AdminVoiceRecorder
+                        assetId={editingAssetId}
+                        onSaved={async () => {
+                          await fetchAssets();
+                        }}
+                      />
+                    </>
+                  );
+                })()}
+              </div>
+
+            </div>
+
+            <div className="drawer-footer">
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => handlePublish(editingAssetId)}
+                data-testid={`publish-btn-${editingAssetId}`}
+              >
+                Publish Live
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => handleSave(editingAssetId)}
+                data-testid={`save-btn-${editingAssetId}`}
+              >
+                Save Draft
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={cancelEditing}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
         </div>
       )}
+
+      {editingStagingPhotoId && (() => {
+        const photo = stagingPhotos.find((item) => item.id === editingStagingPhotoId);
+        if (!photo) return null;
+        return (
+          <ImageEditModal
+            image={{ image_uri: photo.previewUrl, angle_label: photo.label || 'Captured photo' }}
+            title={photo.label || 'Captured photo'}
+            onCancel={() => setEditingStagingPhotoId(null)}
+            onSave={handleSaveEditedStagingPhoto}
+          />
+        );
+      })()}
+
+      {editingImage && (
+        <ImageEditModal
+          image={editingImage.image}
+          title={editingImage.title}
+          saving={imageEditSaving}
+          onCancel={() => setEditingImage(null)}
+          onSave={handleSaveEditedImage}
+        />
+      )}
+
     </div>
   );
 }

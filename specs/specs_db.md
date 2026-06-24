@@ -34,6 +34,12 @@ erDiagram
         string email
         string phone
         string physical_address
+        string address_line1
+        string address_line2
+        string address_city
+        string address_region
+        string address_postal_code
+        string address_country
         string role "ADMIN | HEIR"
         string pw_hash
         uuid invite_token UK
@@ -56,21 +62,32 @@ erDiagram
         uuid allocated_to_id FK
         string title
         text description
-        string category "Jewelry | Furniture | Art | Other"
+        string category "Dynamic VARCHAR(100)"
         double valuation_min
         double valuation_max
+        string valuation_source
         string sentiment_tag
         jsonb description_json
         string image_uri
+        string audio_uri
+        string ocr_status "PROCESSING | COMPLETED | FAILED"
         string status "STAGED | LIVE | PRE_ALLOCATED | DISTRIBUTED"
         vector embedding "768 dimensions"
+    }
+    asset_images {
+        uuid id PK
+        uuid asset_id FK
+        string image_uri
+        boolean is_primary
+        string angle_label
+        timestamp created_at
     }
     valuations {
         uuid id PK
         uuid asset_id FK
         uuid heir_id FK
         integer points "0-1000"
-        text reasoning
+        text reasoning "Encrypted JSON"
         boolean is_reasoning_shared
     }
     audit_logs {
@@ -86,8 +103,15 @@ erDiagram
         uuid id PK
         uuid session_id FK
         uuid heir_id FK
+        uuid responded_by_id FK
         text message
-        string status "OPEN | RESOLVED"
+        text admin_response
+        string heir_image_uri
+        string admin_image_uri
+        string initiator_role "HEIR | ADMIN"
+        string status "OPEN | RESPONDED | RESOLVED"
+        timestamp responded_at
+        timestamp resolved_at
         timestamp created_at
     }
     chat_messages {
@@ -95,9 +119,27 @@ erDiagram
         uuid session_id FK
         uuid heir_id FK
         string sender "heir | agent"
-        text message_text "Encrypted"
+        text message_text "Encrypted JSON"
         text scrubbed_text
         timestamp created_at
+    }
+    custom_faqs {
+        uuid id PK
+        uuid session_id FK
+        text question
+        text answer
+        timestamp created_at
+    }
+    categories {
+        uuid id PK
+        uuid session_id FK
+        string name
+    }
+    app_settings {
+        string key PK
+        text value "Encrypted JSON"
+        timestamp updated_at
+        uuid updated_by_id FK
     }
 
     sessions ||--o{ users : contains
@@ -105,10 +147,14 @@ erDiagram
     sessions ||--o{ audit_logs : logs
     sessions ||--o{ support_requests : tracks
     sessions ||--o{ chat_messages : records
+    sessions ||--o{ custom_faqs : templates
+    sessions ||--o{ categories : defines
     users ||--o{ valuations : places
     users ||--o{ support_requests : submits
     users ||--o{ chat_messages : sends
+    users ||--o{ app_settings : configures
     assets ||--o{ valuations : valued-in
+    assets ||--o{ asset_images : holds
 ```
 
 ---
@@ -144,7 +190,13 @@ Stores login credentials, session associations, and single-use invitation tokens
 *   `pw_hash`: `VARCHAR(255)` (Nullable). Argon2 hash for Admin credentials. Left null for token-based Heirs. Overwritten with `NULL` during soft anonymization.
 *   `email`: `VARCHAR(255)` (Nullable). Registered email address for notifications and reports. Overwritten with `NULL` during soft anonymization.
 *   `phone`: `VARCHAR(20)` (Nullable). Registered phone number for Executor contact. Overwritten with `NULL` during soft anonymization.
-*   `physical_address`: `TEXT` (Nullable). Physical mailing address of the Heir, used for paper service of notices and delivery/pickup of physical items. Overwritten with `NULL` during soft anonymization.
+*   `physical_address`: `TEXT` (Nullable). Physical mailing address of the Heir. Overwritten with `NULL` during soft anonymization.
+*   `address_line1`: `VARCHAR(255)` (Nullable). Street address line 1. Overwritten with `NULL` during soft anonymization.
+*   `address_line2`: `VARCHAR(255)` (Nullable). Street address line 2. Overwritten with `NULL` during soft anonymization.
+*   `address_city`: `VARCHAR(100)` (Nullable). City. Overwritten with `NULL` during soft anonymization.
+*   `address_region`: `VARCHAR(100)` (Nullable). State or region. Overwritten with `NULL` during soft anonymization.
+*   `address_postal_code`: `VARCHAR(40)` (Nullable). Postal code. Overwritten with `NULL` during soft anonymization.
+*   `address_country`: `VARCHAR(100)` (Nullable). Country. Overwritten with `NULL` during soft anonymization.
 *   `invite_token`: `UUID` (Unique, Nullable). Generated UUID for heir invitation dispatch. Overwritten with `NULL` during soft anonymization.
 *   `invite_token_expires_at`: `TIMESTAMP` (Nullable). Expiration limit for the token (configurable notice window, default 14 days from creation).
 *   `invite_token_used`: `BOOLEAN` (Not Null, Default: `false`). Set to `true` when Heir accepts the invite.
@@ -165,15 +217,15 @@ Stores the estate inventory metadata, images, and visual vector embeddings.
 *   `session_id`: `UUID4` (Foreign Key $\rightarrow$ `sessions.id`, ON DELETE CASCADE, Not Null).
 *   `title`: `VARCHAR(150)` (Nullable). Staging uploads can temporarily leave this null until OCR completes.
 *   `description`: `TEXT` (Nullable). Detailed description of the asset.
-*   `category`: `VARCHAR(20)` (Nullable, Checked Constraint: `category IN ('Jewelry', 'Furniture', 'Art', 'Other')`).
+*   `category`: `VARCHAR(100)` (Nullable). Dynamic category associated with this asset. Maps to the names defined in the session's `categories` table.
 *   `valuation_min`: `DOUBLE PRECISION` (Nullable). Minimum estimated monetary value.
 *   `valuation_max`: `DOUBLE PRECISION` (Nullable). Maximum estimated monetary value.
 *   `valuation_source`: `VARCHAR(150)` (Nullable). Explains the source of the appraisal range (e.g. 'Professional Appraisal', 'Tax Assessment').
 *   `sentiment_tag`: `VARCHAR(255)` (Nullable). Sentimental tag/description.
 *   `description_json`: `JSONB` (Nullable). Stores dynamic dictionary attributes extracted by OCR (e.g. `{"color": "mahogany", "dimensions": "3ft x 6ft", "estimated_age": "antique"}`).
-*   `image_uri`: `VARCHAR(255)` (Not Null). File path or URL to the WebP thumbnail.
+*   `image_uri`: `VARCHAR(255)` (Not Null). Primary thumbnail image location.
 *   `audio_uri`: `VARCHAR(255)` (Nullable). File path to the uploaded WebM/MP3 audio recording of the Admin telling the asset story.
-*   `ocr_status`: `VARCHAR(15)` (Nullable, Checked Constraint: `ocr_status IN ('PROCESSING', 'COMPLETED', 'FAILED')`). Tracks background Llava OCR processing state on staged assets.
+*   `ocr_status`: `VARCHAR(15)` (Nullable, Checked Constraint: `ocr_status IN ('PROCESSING', 'COMPLETED', 'FAILED')`). Tracks background OCR processing state on staged assets.
 *   `status`: `VARCHAR(20)` (Not Null, Default: `'STAGED'`, Checked Constraint: `status IN ('STAGED', 'LIVE', 'PRE_ALLOCATED', 'DISTRIBUTED')`).
 *   `allocated_to_id`: `UUID` (Foreign Key $\rightarrow$ `users.id`, ON DELETE SET NULL, Nullable). Stores the heir ID that is awarded this asset upon finalization. **Checked Constraint**: `CHECK (status NOT IN ('PRE_ALLOCATED', 'DISTRIBUTED') OR allocated_to_id IS NOT NULL)` ensures a target beneficiary is always defined for pre-allocated or distributed assets.
 *   `embedding`: `VECTOR(768)` (Nullable). Stores the 768-dimensional visual-semantic vector output from the `nomic-embed-text` inference engine.
@@ -211,12 +263,19 @@ A tamper-proof ledger of all state modifications (valuation submission, Admin ov
 *   `created_at`: `TIMESTAMP` (Not Null, Default: `timezone('utc'::text, now())`). Records the exact UTC timestamp when the audit event was logged. Required by the Final Distribution & Probate Audit Ledger PDF for rendering event timestamps in the Admin Intervention Log and Proof of Notice Log sections.
 
 ### 2.6 `support_requests` Table
-Tracks user assistance tickets and deadlock resolution pauses.
+Tracks user assistance tickets and deadlock resolution pauses. Supports direct responses and screenshot attachments.
 *   `id`: `UUID4` (Primary Key, default: `gen_random_uuid()`).
 *   `session_id`: `UUID4` (Foreign Key $\rightarrow$ `sessions.id`, ON DELETE CASCADE, Not Null).
 *   `heir_id`: `UUID4` (Foreign Key $\rightarrow$ `users.id`, ON DELETE CASCADE, Not Null).
-*   `message`: `TEXT` (Not Null).
-*   `status`: `VARCHAR(10)` (Not Null, Checked Constraint: `status IN ('OPEN', 'RESOLVED')`, Default: `'OPEN'`).
+*   `responded_by_id`: `UUID4` (Foreign Key $\rightarrow$ `users.id`, ON DELETE SET NULL, Nullable). The Admin user who responded.
+*   `message`: `TEXT` (Not Null). The ticket query submitted by the heir.
+*   `admin_response`: `TEXT` (Nullable). The response message written by the Executor.
+*   `heir_image_uri`: `VARCHAR(255)` (Nullable). File path to an image/screenshot uploaded by the heir.
+*   `admin_image_uri`: `VARCHAR(255)` (Nullable). File path to an image/screenshot uploaded by the admin in response.
+*   `initiator_role`: `VARCHAR(10)` (Not Null, Default: `'HEIR'`, Checked Constraint: `initiator_role IN ('HEIR', 'ADMIN')`).
+*   `status`: `VARCHAR(10)` (Not Null, Checked Constraint: `status IN ('OPEN', 'RESPONDED', 'RESOLVED')`, Default: `'OPEN'`).
+*   `responded_at`: `TIMESTAMP` (Nullable). UTC timestamp of admin response.
+*   `resolved_at`: `TIMESTAMP` (Nullable). UTC timestamp of resolution.
 *   `created_at`: `TIMESTAMP` (Not Null, Default: `timezone('utc'::text, now())`).
 
 ### 2.7 `chat_messages` Table
@@ -237,6 +296,29 @@ Stores custom, estate-specific guidelines and FAQs written by the Admin.
 *   `answer`: `TEXT` (Not Null).
 *   `created_at`: `TIMESTAMP` (Not Null, Default: `timezone('utc'::text, now())`).
 
+### 2.9 `asset_images` Table
+Stores secondary or additional view angle images uploaded for any catalog asset.
+*   `id`: `UUID4` (Primary Key, default: `gen_random_uuid()`).
+*   `asset_id`: `UUID4` (Foreign Key $\rightarrow$ `assets.id`, ON DELETE CASCADE, Not Null).
+*   `image_uri`: `VARCHAR(255)` (Not Null).
+*   `is_primary`: `BOOLEAN` (Not Null, Default: `false`).
+*   `angle_label`: `VARCHAR(50)` (Nullable, e.g., 'Detail', 'Back', 'Appraisal').
+*   `created_at`: `TIMESTAMP` (Not Null, Default: `timezone('utc'::text, now())`).
+
+### 2.10 `categories` Table
+Stores dynamic, executor-defined item categories for each estate session.
+*   `id`: `UUID4` (Primary Key, default: `gen_random_uuid()`).
+*   `session_id`: `UUID4` (Foreign Key $\rightarrow$ `sessions.id`, ON DELETE CASCADE, Not Null).
+*   `name`: `VARCHAR(100)` (Not Null).
+*   **Unique Index**: A unique composite index `uq_categories_session_name` is defined on `(session_id, name)` to enforce category uniqueness per session.
+
+### 2.11 `app_settings` Table
+Stores administrative application-wide variables (LLM configurations, email server credentials, storage settings) encrypted at rest.
+*   `key`: `VARCHAR(100)` (Primary Key).
+*   `value`: `EncryptedJSON` (Nullable). Uses transparent cryptographic Fernet encryption.
+*   `updated_at`: `TIMESTAMP` (Not Null, Default: UTC now).
+*   `updated_by_id`: `UUID4` (Foreign Key $\rightarrow$ `users.id`, ON DELETE SET NULL, Nullable). The Admin user who made the update.
+
 ---
 
 ## 3. Indexing Strategy & Vector Distance Operator
@@ -244,7 +326,8 @@ Stores custom, estate-specific guidelines and FAQs written by the Admin.
 1.  **B-Tree Indexes**:
     *   Unique Index on `users(session_id, username)`.
     *   Unique Index on `users(invite_token)` where token is not null.
-    *   Foreign Key Indexes: `users(session_id)`, `assets(session_id)`, `assets(allocated_to_id)`, `valuations(asset_id)`, `valuations(heir_id)`, `support_requests(session_id)`, `support_requests(heir_id)`, `audit_logs(session_id)`, `chat_messages(session_id)`, `chat_messages(heir_id)`.
+    *   Unique Index on `categories(session_id, name)`.
+    *   Foreign Key Indexes: `users(session_id)`, `assets(session_id)`, `assets(allocated_to_id)`, `valuations(asset_id)`, `valuations(heir_id)`, `support_requests(session_id)`, `support_requests(heir_id)`, `support_requests(responded_by_id)`, `audit_logs(session_id)`, `chat_messages(session_id)`, `chat_messages(heir_id)`, `asset_images(asset_id)`, `categories(session_id)`.
 2.  **pgvector Vector Similarity Index**:
     To accelerate semantic/hybrid vector queries, we configure an HNSW (Hierarchical Navigable Small World) index on the `embedding` column using cosine distance operators:
     ```sql

@@ -4,6 +4,7 @@ Tests for T42: Support Request & Help CRUD API.
 Covers:
 - POST /api/sessions/{session_id}/help  (Heir submits help request)
 - GET /api/sessions/{session_id}/help   (Admin lists help requests)
+- POST /api/help/{ticket_id}/reply      (Admin replies to ticket)
 - POST /api/help/{ticket_id}/resolve    (Admin resolves ticket)
 """
 
@@ -83,6 +84,9 @@ def _make_support_request(ticket_id=None, status="OPEN"):
         heir_id=uuid.uuid4(),
         message="I need help with my points allocation",
         status=status,
+        admin_response=None,
+        responded_at=None,
+        resolved_at=None,
         created_at=datetime.now(timezone.utc),
     )
 
@@ -112,8 +116,6 @@ class TestCreateHelpRequest:
         assert resp.status_code == 403
 
     def test_create_success_returns_201(self, client, mock_db_session, test_env):
-        heir_token = _make_heir_token()
-
         # Mock session lookup
         from app.models import Session as SessionModel
         session = SessionModel(
@@ -123,6 +125,7 @@ class TestCreateHelpRequest:
             is_paused=False,
             is_deadlocked=False,
         )
+        heir_token = _make_heir_token(session_id=str(session.id))
         mock_query = mock_db_session.query.return_value
         mock_filter = mock_query.filter.return_value
         mock_filter.first.return_value = session
@@ -227,6 +230,70 @@ class TestListHelpRequests:
         assert len(data) == 1
         assert data[0]["status"] == "OPEN"
         assert data[0]["username"] == "heir_test"
+        assert "admin_response" in data[0]
+        assert "responded_at" in data[0]
+
+
+# ---------------------------------------------------------------------------
+# POST /api/help/{ticket_id}/reply
+# ---------------------------------------------------------------------------
+
+
+class TestReplyToHelpRequest:
+    """POST /api/help/{ticket_id}/reply — Admin replies to a ticket."""
+
+    def test_reply_requires_auth(self, client, mock_db_session, test_env):
+        resp = client.post(
+            f"/api/help/{uuid.uuid4()}/reply",
+            json={"response": "Thanks, I will review this."},
+        )
+        assert resp.status_code == 401
+
+    def test_reply_requires_admin(self, client, mock_db_session, test_env):
+        heir_token = _make_heir_token()
+        resp = client.post(
+            f"/api/help/{uuid.uuid4()}/reply",
+            json={"response": "Thanks, I will review this."},
+            cookies={"estate_session": heir_token},
+        )
+        assert resp.status_code == 403
+
+    def test_reply_success_returns_ticket_record(self, client, mock_db_session, test_env):
+        token = _make_admin_token()
+        ticket = _make_support_request(status="OPEN")
+
+        mock_query = mock_db_session.query.return_value
+        mock_filter = mock_query.filter.return_value
+        mock_filter.first.return_value = ticket
+
+        resp = client.post(
+            f"/api/help/{ticket.id}/reply",
+            json={"response": "I adjusted the catalog note for that item."},
+            cookies={"estate_session": token},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "RESPONDED"
+        assert data["admin_response"] == "I adjusted the catalog note for that item."
+        assert ticket.status == "RESPONDED"
+        assert ticket.admin_response == "I adjusted the catalog note for that item."
+        assert ticket.responded_at is not None
+        mock_db_session.commit.assert_called_once()
+
+    def test_reply_to_resolved_ticket_returns_400(self, client, mock_db_session, test_env):
+        token = _make_admin_token()
+        ticket = _make_support_request(status="RESOLVED")
+
+        mock_query = mock_db_session.query.return_value
+        mock_filter = mock_query.filter.return_value
+        mock_filter.first.return_value = ticket
+
+        resp = client.post(
+            f"/api/help/{ticket.id}/reply",
+            json={"response": "Follow-up"},
+            cookies={"estate_session": token},
+        )
+        assert resp.status_code == 400
 
 
 # ---------------------------------------------------------------------------
@@ -278,3 +345,75 @@ class TestResolveHelpRequest:
             cookies={"estate_session": token},
         )
         assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# POST /api/sessions/{session_id}/help/direct
+# ---------------------------------------------------------------------------
+
+
+class TestCreateDirectHelpMessage:
+    """POST /api/sessions/{session_id}/help/direct — Admin sends direct message."""
+
+    def test_direct_requires_auth(self, client, mock_db_session, test_env):
+        resp = client.post(
+            f"/api/sessions/{uuid.uuid4()}/help/direct",
+            json={"heir_id": str(uuid.uuid4()), "message": "Direct message"},
+        )
+        assert resp.status_code == 401
+
+    def test_direct_requires_admin(self, client, mock_db_session, test_env):
+        heir_token = _make_heir_token()
+        resp = client.post(
+            f"/api/sessions/{uuid.uuid4()}/help/direct",
+            json={"heir_id": str(uuid.uuid4()), "message": "Direct message"},
+            cookies={"estate_session": heir_token},
+        )
+        assert resp.status_code == 403
+
+    def test_direct_success_returns_201(self, client, mock_db_session, test_env):
+        token = _make_admin_token()
+        session_id = uuid.uuid4()
+        heir_id = uuid.uuid4()
+
+        # Mock Session lookup
+        from app.models import Session as SessionModel
+        session_mock = SessionModel(
+            id=session_id,
+            title="Test Session",
+            status="ACTIVE",
+        )
+        
+        # Mock Heir lookup
+        heir_mock = User(
+            id=heir_id,
+            username="heir_test",
+            role="HEIR",
+            session_id=session_id,
+        )
+
+        mock_query = mock_db_session.query.return_value
+        
+        def query_side_effect(model):
+            m = mock.MagicMock()
+            if model == SessionModel:
+                m.filter.return_value.first.return_value = session_mock
+            elif model == User:
+                m.filter.return_value.first.return_value = heir_mock
+            else:
+                m.filter.return_value.first.return_value = None
+            return m
+
+        mock_db_session.query.side_effect = query_side_effect
+
+        resp = client.post(
+            f"/api/sessions/{session_id}/help/direct",
+            json={"heir_id": str(heir_id), "message": "Please confirm details"},
+            cookies={"estate_session": token},
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["status"] == "RESPONDED"
+        assert data["admin_response"] == "Please confirm details"
+        mock_db_session.commit.assert_called_once()
+

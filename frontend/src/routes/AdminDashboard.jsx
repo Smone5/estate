@@ -8,6 +8,7 @@ import AdminSetupWizard from '../components/AdminSetupWizard';
 import BIP39RestorePanel from '../components/BIP39RestorePanel';
 import AdminHelpPortal from '../components/AdminHelpPortal';
 import AdminAnnouncementConsole from '../components/AdminAnnouncementConsole';
+import AdminSettingsPanel from '../components/AdminSettingsPanel';
 
 export default function AdminDashboard() {
   const store = useMediationStore();
@@ -23,7 +24,32 @@ export default function AdminDashboard() {
   const [sessions, setSessions] = useState([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
-  const [showSetupWizard, setShowSetupWizard] = useState(true);
+  const [showSetupWizard, setShowSetupWizard] = useState(false);
+  const [checkingSetupStatus, setCheckingSetupStatus] = useState(true);
+
+  // Determine whether first-boot admin setup has already happened, so we
+  // don't show the setup wizard to an already-provisioned instance.
+  useEffect(() => {
+    if (store.isAuthenticated) {
+      setCheckingSetupStatus(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/setup/status');
+        if (res.ok) {
+          const data = await res.json();
+          if (!cancelled) setShowSetupWizard(!data.admin_exists);
+        }
+      } catch (err) {
+        console.error('Failed to check setup status', err);
+      } finally {
+        if (!cancelled) setCheckingSetupStatus(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [store.isAuthenticated]);
 
   // Load sessions if authenticated as admin
   useEffect(() => {
@@ -96,9 +122,20 @@ export default function AdminDashboard() {
   }
 
   // ── First-Boot Setup Wizard (Gate) ──────────────────────────────────────
+  if (!store.isAuthenticated && checkingSetupStatus) {
+    return (
+      <div className="app-main flex items-center justify-center" style={{ flex: 1, padding: 'var(--space-lg)' }}>
+        <p className="text-muted">Checking setup status...</p>
+      </div>
+    );
+  }
+
   if (!store.isAuthenticated && showSetupWizard) {
     return (
-      <AdminSetupWizard onSetupComplete={() => setShowSetupWizard(false)} />
+      <AdminSetupWizard
+        onSetupComplete={() => setShowSetupWizard(false)}
+        onSkipToLogin={() => setShowSetupWizard(false)}
+      />
     );
   }
 
@@ -209,6 +246,8 @@ export default function AdminDashboard() {
               {sessionId && <AdminAnnouncementConsole sessionId={sessionId} />}
 
               <BIP39RestorePanel />
+
+              <AdminSettingsPanel />
             </>
           )}
         </div>

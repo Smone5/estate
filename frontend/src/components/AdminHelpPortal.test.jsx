@@ -77,6 +77,7 @@ describe('AdminHelpPortal Component', () => {
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(`/api/sessions/${sessionId}/faqs`, {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question: 'New Question', answer: 'New Answer' }),
       });
@@ -123,6 +124,7 @@ describe('AdminHelpPortal Component', () => {
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(`/api/sessions/${sessionId}/faqs/f1`, {
         method: 'PUT',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question: 'Updated Question', answer: 'Before next Friday.' }),
       });
@@ -161,6 +163,7 @@ describe('AdminHelpPortal Component', () => {
       expect(global.window.confirm).toHaveBeenCalled();
       expect(global.fetch).toHaveBeenCalledWith(`/api/sessions/${sessionId}/faqs/f1`, {
         method: 'DELETE',
+        credentials: 'same-origin',
       });
     });
 

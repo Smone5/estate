@@ -12,10 +12,11 @@ from app.services.smtp_service import (
     send_email,
     send_email_background,
     Attachment,
-    SMTP_SENDER,
     MAX_RETRIES,
     _build_message,
 )
+
+SMTP_SENDER = "test@example.com"
 
 
 # ---------------------------------------------------------------------------
@@ -173,12 +174,13 @@ class TestSendEmailBackground:
     async def test_background_success_logs_nothing_extra(self, mock_send):
         mock_send.return_value = True
 
-        await send_email_background(
+        result = await send_email_background(
             to="heir@example.com",
             subject="Test",
             body="Body",
         )
         mock_send.assert_called_once()
+        assert result is True
 
     @pytest.mark.asyncio
     @mock.patch("app.services.smtp_service.send_email", new_callable=mock.AsyncMock)
@@ -186,13 +188,14 @@ class TestSendEmailBackground:
         mock_send.return_value = False
 
         with caplog.at_level("WARNING"):
-            await send_email_background(
+            result = await send_email_background(
                 to="heir@example.com",
                 subject="Test",
                 body="Body",
                 on_failure_message="PHYSICAL_DELIVERY_REQUIRED",
             )
         assert "PHYSICAL_DELIVERY_REQUIRED" in caplog.text
+        assert result is False
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +210,7 @@ class TestBuildMessage:
             to="heir@example.com",
             subject="Welcome",
             body="Hello there.",
+            sender=SMTP_SENDER,
         )
         assert msg["From"] == SMTP_SENDER
         assert msg["To"] == "heir@example.com"
@@ -222,6 +226,7 @@ class TestBuildMessage:
             to="heir@example.com",
             subject="PDF",
             body="See attached.",
+            sender=SMTP_SENDER,
             attachments=[att],
         )
         payload = msg.as_string()
@@ -234,5 +239,6 @@ class TestBuildMessage:
             to="heir@example.com",
             subject="Test",
             body="Hello",
+            sender=SMTP_SENDER,
         )
         assert msg.get_content_type() == "multipart/mixed"

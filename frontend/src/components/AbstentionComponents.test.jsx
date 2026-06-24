@@ -19,6 +19,7 @@ const mockStoreState = {
   submitValuations: vi.fn(),
   abstainSession: vi.fn(),
   downloadWaiverReceipt: vi.fn(),
+  inventoryUpdatedNotice: null,
 };
 
 vi.mock('../store/useMediationStore', () => {
@@ -29,6 +30,9 @@ vi.mock('../store/useMediationStore', () => {
     return mockStoreState;
   };
   useStoreMock.getState = () => mockStoreState;
+  useStoreMock.setState = vi.fn((newVal) => {
+    Object.assign(mockStoreState, newVal);
+  });
   return {
     useMediationStore: useStoreMock,
   };
@@ -44,6 +48,7 @@ describe('Abstention and Valuation UI Components', () => {
     mockStoreState.legal_first_name = 'John';
     mockStoreState.legal_middle_name = null;
     mockStoreState.legal_last_name = 'Doe';
+    mockStoreState.inventoryUpdatedNotice = null;
   });
 
   describe('AbstentionWaitScreen', () => {
@@ -183,6 +188,21 @@ describe('Abstention and Valuation UI Components', () => {
       fireEvent.click(abstainTrigger);
 
       expect(screen.getByTestId('abstention-modal-backdrop')).toBeInTheDocument();
+    });
+
+    it('displays inventory update warning banner when inventoryUpdatedNotice is present and allows dismissing it', async () => {
+      mockStoreState.inventoryUpdatedNotice = 'Item "Antique Desk" was deleted.';
+      render(<HeirValuationPanel />);
+
+      const banner = screen.getByTestId('inventory-update-warning-banner');
+      expect(banner).toBeInTheDocument();
+      expect(screen.getByText(/Item "Antique Desk" was deleted/i)).toBeInTheDocument();
+      expect(screen.getByText(/Your submission status has been reset/i)).toBeInTheDocument();
+
+      const dismissBtn = screen.getByRole('button', { name: /Dismiss/i });
+      fireEvent.click(dismissBtn);
+
+      expect(useMediationStore.setState).toHaveBeenCalledWith({ inventoryUpdatedNotice: null });
     });
   });
 });

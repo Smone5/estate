@@ -211,6 +211,131 @@ class TestAssetStage:
         )
         assert resp.status_code == 404
 
+    def test_stage_with_custom_asset_id_and_location(self, client):
+        test_client, mock_db, *_ = client
+        session = _build_session(status="SETUP")
+
+        # Mock session query first, then existing asset check returns None
+        mock_db.query.return_value.filter.return_value.first.side_effect = [session, None]
+        mock_db.add = mock.MagicMock()
+
+        image_bytes = _make_fake_webp_image()
+        custom_uuid = uuid.uuid4()
+        resp = test_client.post(
+            f"/api/sessions/{SESSION_ID}/assets/stage",
+            data={
+                "asset_id": str(custom_uuid),
+                "location": "Living Room",
+                "auto_appraise": "false",
+            },
+            files={"file": ("test.webp", io.BytesIO(image_bytes), "image/webp")},
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["asset_id"] == str(custom_uuid)
+        assert data["status"] == "STAGED"
+        assert data["ocr_status"] == "COMPLETED"
+
+    def test_stage_idempotency_existing_asset(self, client):
+        test_client, mock_db, *_ = client
+        session = _build_session(status="SETUP")
+        asset = _build_staged_asset(asset_id=ASSET_ID)
+
+        # Mock session query first, then existing asset check returns existing asset
+        mock_db.query.return_value.filter.return_value.first.side_effect = [session, asset]
+
+        image_bytes = _make_fake_webp_image()
+        resp = test_client.post(
+            f"/api/sessions/{SESSION_ID}/assets/stage",
+            data={"asset_id": str(ASSET_ID)},
+            files={"file": ("test.webp", io.BytesIO(image_bytes), "image/webp")},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["asset_id"] == str(ASSET_ID)
+
+    def test_stage_with_audio_file(self, client):
+        test_client, mock_db, *_ = client
+        session = _build_session(status="SETUP")
+
+        mock_db.query.return_value.filter.return_value.first.side_effect = [session, None]
+        mock_db.add = mock.MagicMock()
+
+        image_bytes = _make_fake_webp_image()
+        audio_bytes = b"fake-audio-payload"
+
+        resp = test_client.post(
+            f"/api/sessions/{SESSION_ID}/assets/stage",
+            data={"auto_appraise": "false"},
+            files={
+                "file": ("test.webp", io.BytesIO(image_bytes), "image/webp"),
+                "audio": ("voice.webm", io.BytesIO(audio_bytes), "audio/webm"),
+            },
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert "asset_id" in data
+        assert data["status"] == "STAGED"
+
+
+class TestBackgroundTasks:
+
+    @pytest.mark.asyncio
+    async def test_analyze_staged_asset_background_success(self):
+        from app.main import analyze_staged_asset_background, Asset
+        
+        mock_db = mock.MagicMock(spec=DBSession)
+        asset = Asset(
+            id=ASSET_ID,
+            session_id=SESSION_ID,
+            image_uri="static/uploads/test.webp",
+            ocr_status="PROCESSING",
+            images=[],
+            audio_uri="static/uploads/audio.wav",
+        )
+        mock_db.query.return_value.filter.return_value.first.return_value = asset
+        
+        mock_provider = mock.MagicMock()
+        mock_provider.generate_vision.return_value = '{"title": "Antique Chair", "item_overview": "Nice chair", "specifications": "- Wood\\n- Brown", "condition_report": "Good", "keywords": "chair, vintage", "valuation_min": 100, "valuation_max": 200, "sentiment_tags": "Heirloom", "valuation_confidence": "Medium"}'
+        mock_provider.get_embeddings.return_value = [0.1] * 768
+        
+        mock_storage = mock.MagicMock()
+        mock_storage.get.return_value = b"fake-image"
+        
+        with mock.patch("app.main._get_session_factory") as mock_factory, \
+             mock.patch("app.main.get_provider", return_value=mock_provider), \
+             mock.patch("app.main.get_storage_driver", return_value=mock_storage), \
+             mock.patch("app.main.manager") as mock_mgr:
+            
+            mock_factory.return_value = mock.MagicMock(return_value=mock_db)
+            mock_mgr.broadcast_asset_ocr_completed = mock.AsyncMock()
+            
+            await analyze_staged_asset_background(str(ASSET_ID), str(SESSION_ID), "Living Room")
+            
+            assert asset.title == "Antique Chair"
+            assert asset.ocr_status == "COMPLETED"
+            mock_db.commit.assert_called()
+            mock_mgr.broadcast_asset_ocr_completed.assert_called_once()
+
+    def test_cleanup_stuck_ocr_tasks(self):
+        from app.main import cleanup_stuck_ocr_tasks, Asset
+        mock_db = mock.MagicMock(spec=DBSession)
+        asset = Asset(
+            id=ASSET_ID,
+            session_id=SESSION_ID,
+            ocr_status="PROCESSING",
+            description_json=None,
+        )
+        mock_db.query.return_value.filter.return_value.all.return_value = [asset]
+        
+        with mock.patch("app.main._get_session_factory") as mock_factory:
+            mock_factory.return_value = mock.MagicMock(return_value=mock_db)
+            cleanup_stuck_ocr_tasks()
+            
+            assert asset.ocr_status == "FAILED"
+            assert "Task interrupted" in asset.description_json
+            mock_db.commit.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # POST /api/assets/{asset_id}/publish
@@ -529,3 +654,66 @@ class TestSessionAssets:
         data = resp.json()
         assert isinstance(data, list)
         assert len(data) == 1
+
+
+# ---------------------------------------------------------------------------
+# POST /api/assets/{asset_id}/save
+# ---------------------------------------------------------------------------
+
+
+class TestAssetSave:
+
+    def test_save_success_returns_200(self, client):
+        test_client, mock_db, mock_mgr, mock_provider, mock_storage = client
+        asset = _build_staged_asset()
+
+        mock_db.query.return_value.filter.return_value.first.return_value = asset
+
+        resp = test_client.post(
+            f"/api/assets/{ASSET_ID}/save",
+            json={
+                "title": "Vintage Watch Draft",
+                "description": "Draft description.",
+                "category": "Jewelry",
+                "valuation_min": 400.0,
+                "valuation_max": None,
+                "valuation_source": "Personal Estimate",
+                "sentiment_tag": None,
+                "specifications": "Specs text",
+                "condition_report": "Mint",
+                "keywords": "watch, gold",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["asset_id"] == str(ASSET_ID)
+        assert data["status"] == "STAGED"
+        assert data["message"] == "Asset details saved successfully."
+
+        assert asset.title == "Vintage Watch Draft"
+        assert asset.description == "Draft description."
+        assert asset.valuation_min == 400.0
+        assert asset.valuation_max is None
+
+    def test_save_asset_not_found_returns_404(self, client):
+        test_client, mock_db, *_ = client
+        mock_db.query.return_value.filter.return_value.first.return_value = None
+
+        resp = test_client.post(
+            f"/api/assets/{ASSET_ID}/save",
+            json={"title": "Draft"},
+        )
+        assert resp.status_code == 404
+
+    def test_save_not_staged_returns_400(self, client):
+        test_client, mock_db, *_ = client
+        asset = _build_staged_asset()
+        asset.status = "LIVE"
+
+        mock_db.query.return_value.filter.return_value.first.return_value = asset
+
+        resp = test_client.post(
+            f"/api/assets/{ASSET_ID}/save",
+            json={"title": "Draft"},
+        )
+        assert resp.status_code == 400

@@ -36,14 +36,17 @@ graph TB
         API -->|PII Filter| Presidio[Microsoft Presidio Engine]
         API -->|Math Solver| Fairpyx[Fairpyx Division Solver]
         API -->|PDF Builder| ReportLab[ReportLab PDF Engine]
+        API -->|Settings Manager| Settings[Settings Service]
     end
     
-    subgraph Local LLM Compute (Ollama)
-        API -->|Port 11434| Ollama[Ollama Server]
-        Ollama -->|Fast Chat| Qwen8B[Qwen-2.5-8B-Instruct]
-        Ollama -->|Slow Logic & Critique| Qwen14B[Qwen-2.5-14B-Instruct]
-        Ollama -->|Vision OCR| Llava[Llava Multimodal]
-        Ollama -->|Vector Embeddings| Nomic[nomic-embed-text]
+    subgraph LiteLLM Abstraction Layer
+        API -->|Unified Interface| LiteLLM[LiteLLM Router]
+        LiteLLM -->|Local compute| Ollama[Ollama Server]
+        LiteLLM -->|Cloud API| OpenAI[OpenAI API]
+        LiteLLM -->|Cloud API| Anthropic[Anthropic API]
+        LiteLLM -->|Cloud API| Gemini[Google Gemini API]
+        LiteLLM -->|Cloud API| OpenRouter[OpenRouter API]
+        LiteLLM -->|Cloud API| Nvidia[NVIDIA NIM API]
     end
 ```
 
@@ -67,8 +70,13 @@ estate_agent/
 │       ├── schemas.py     # Pydantic validation contracts
 │       ├── graph.py       # LangGraph Dual-Brain state machine
 │       ├── presidio.py    # Microsoft Presidio scrubbing logic
-│       ├── pdf_worker.py  # ReportLab Keepsake PDF builder
-│       └── division.py    # Fairpyx division integration helper
+│       ├── pdf_builder.py # ReportLab Keepsake PDF builder
+│       ├── solver.py      # Fairpyx division integration helper
+│       └── services/      # Unified backend service engines
+│           ├── llm_provider.py # LiteLLM unified AI driver
+│           ├── settings_service.py # Dynamic DB runtime settings
+│           ├── smtp_service.py  # Async SMTP dispatch
+│           └── storage.py      # File storage system
 └── frontend/
     ├── package.json       # Node package manager manifest
     ├── vite.config.js     # SPA bundler configurations
@@ -90,31 +98,55 @@ Create a `.env` file in the root workspace directory for environment configurati
 
 ```bash
 # Database Settings
-DB_URL=postgresql+psycopg2://user:pass@db:5432/estate
-ENCRYPTION_KEY=your-32-byte-base64-aes-fernet-key-here
+DB_URL=postgresql+psycopg2://postgres:postgres@db:5432/estate
+ENCRYPTION_KEY=your-32-byte-base64-aes-fernet-key-here # Generate via: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+JWT_SECRET=dev-jwt-secret-change-in-production
 
-# Ollama Configuration (Use host.docker.internal to bridge to host Ollama from docker)
-OLLAMA_BASE_URL=http://host.docker.internal:11434
-FAST_THINKER_MODEL=qwen2.5:latest
-SLOW_THINKER_MODEL=qwen2.5:14b
-VISION_MODEL=llava:latest
+# LLM Providers (Toggles: ollama | openai | anthropic | google | openrouter | nvidia)
+LLM_PROVIDER=ollama
+EMBEDDING_PROVIDER=ollama
+VISION_PROVIDER=ollama
+
+# Model Configurations (Depends on selected provider)
+FAST_THINKER_MODEL=qwen2.5:8b-instruct
+SLOW_THINKER_MODEL=qwen2.5:14b-instruct
+VISION_MODEL=llava:7b
 EMBEDDING_MODEL=nomic-embed-text
 
-# SMTP Server Configurations
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=executor@example.com
-SMTP_PASSWORD=app-specific-password
-SMTP_FROM=keepsakes@estate-steward.org
+# Ollama Base Configuration
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+
+# API Keys (Provide values if utilizing cloud providers)
+OPENAI_API_KEY=
+ANTHROPIC_API_KEY=
+GEMINI_API_KEY=
+OPENROUTER_API_KEY=
+NVIDIA_API_KEY=
+
+# SMTP Server Configurations (Local development uses Mailpit by default)
+SMTP_HOST=mailpit
+SMTP_PORT=1025
+SMTP_USERNAME=
+SMTP_PASSWORD=
+SMTP_USE_TLS=false
+SMTP_SENDER=estate-steward@localhost
 
 # Storage Config
-STORAGE_DRIVER=LOCAL # Toggles: LOCAL | GCS
+STORAGE_DRIVER=LOCAL # Toggles: LOCAL | S3 | GCS
 GCS_BUCKET_NAME=your-gcp-bucket-name
+S3_BUCKET_NAME=your-s3-bucket-name
+S3_ENDPOINT_URL=
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_REGION_NAME=
+
+# Security & CORS Settings
+COOKIE_SECURE=false # Set to true in HTTPS production deployments
+PUBLIC_BASE_URL=
 
 # Debugging & Observability Settings
 LOG_LEVEL=INFO      # Toggles: DEBUG | INFO | WARNING | ERROR
 DB_ECHO=false       # Toggles database query prints (True | False)
-
 ```
 
 ---
@@ -135,9 +167,9 @@ DB_ECHO=false       # Toggles database query prints (True | False)
 2.  **Verify Ollama Models**:
     Ensure the following models are pulled and ready on the local host:
     ```bash
-    ollama pull qwen2.5:latest
-    ollama pull qwen2.5:14b
-    ollama pull llava:latest
+    ollama pull qwen2.5:8b-instruct
+    ollama pull qwen2.5:14b-instruct
+    ollama pull llava:7b
     ollama pull nomic-embed-text
     ```
 3.  **Launch Local Infrastructure & DB Bootstrap**:

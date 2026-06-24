@@ -113,6 +113,20 @@ This specification defines the test suites, verification assertions, and mock bo
     *   Verify that restoration fails with `400 Bad Request` if the backup archive is corrupted or encrypted with a different key.
     *   Verify that the restore operation is executed as a single transaction: if any table fails to import, the entire database state rolls back to the pre-restore point.
 
+### 1.7 Staging UX, Dynamic Settings, & Dynamic Categories Verification
+*   **Test Dynamic Category Management**:
+    *   Verify `GET /api/sessions/{session_id}/categories` returns default seeded categories (`'Jewelry'`, `'Furniture'`, `'Art'`, `'Other'`) for a new session.
+    *   Verify `POST /api/sessions/{session_id}/categories` successfully creates a new category.
+    *   Verify `DELETE /api/sessions/{session_id}/categories/{name}` is rejected with `400 Bad Request` if there are published active assets assigned to that category.
+    *   Verify `DELETE /api/sessions/{session_id}/categories/{name}` succeeds and deletes the category if no assets are using it.
+*   **Test Multi-Image Staging**:
+    *   Verify `POST /api/sessions/{session_id}/assets/stage` accepts multiple image uploads, pre-processes/rescales them, creates an `AssetImage` row for each, and maps the primary flag.
+*   **Test Admin Settings Management**:
+    *   Verify `GET /api/admin/settings` returns allowed registry keys, masking secrets (`is_set: true/false`).
+    *   Verify `POST /api/admin/settings` writes encrypted values to `app_settings` and mirrors them directly into `os.environ` to dynamically update LLM provider and SMTP settings without a restart.
+*   **Test WebSocket Connection Routing**:
+    *   Verify that active WebSocket sessions receive broadcast notifications for pause states, and that disconnected sockets are cleanly discarded.
+
 ---
 
 ## 2. System & Integration Tests (E2E Flows)

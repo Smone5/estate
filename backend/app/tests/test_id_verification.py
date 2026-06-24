@@ -13,6 +13,7 @@ from unittest import mock
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session as DBSession
+from cryptography.fernet import Fernet
 
 from app.auth import create_access_token
 from app.models import User, Asset
@@ -133,6 +134,11 @@ class TestIdentityVerification:
         assert resp.status_code == 200
         assert heir.status == "ACTIVE"
         assert heir.identity_verified is True
+        data = resp.json()
+        assert data["heir"]["id"] == str(heir.id)
+        assert data["heir"]["status"] == "ACTIVE"
+        assert data["heir"]["identity_verified"] is True
+        assert data["heir"]["id_scan_uri"] is None
 
     def test_reject_clears_scan(self, client, mock_db_session, test_env):
         token = _make_admin_token()
@@ -158,3 +164,26 @@ class TestIdentityVerification:
             cookies={"estate_session": token},
         )
         assert resp.status_code == 422
+
+    def test_admin_can_preview_decrypted_id_scan(self, client, mock_db_session, monkeypatch):
+        key = Fernet.generate_key()
+        monkeypatch.setenv("ENCRYPTION_KEY", key.decode())
+        token = _make_admin_token()
+        heir = _make_heir(status="PROFILE_HOLD", id_scan_uri="static/uploads/identities/test.scan")
+        raw_scan = b"\xff\xd8\xfffake-jpeg-id"
+
+        mock_db_session.query.return_value.filter.return_value.first.return_value = heir
+
+        with mock.patch("app.main.get_storage_driver") as mock_storage:
+            storage = mock.MagicMock()
+            storage.get.return_value = Fernet(key).encrypt(raw_scan)
+            mock_storage.return_value = storage
+
+            resp = client.get(
+                f"/api/heirs/{heir.id}/id-scan",
+                cookies={"estate_session": token},
+            )
+
+        assert resp.status_code == 200
+        assert resp.content == raw_scan
+        assert resp.headers["content-type"].startswith("image/jpeg")

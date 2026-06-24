@@ -36,6 +36,8 @@ from app.models import (
     SupportRequest,
     ChatMessage,
     CustomFAQ,
+    AssetImage,
+    Category,
 )
 
 
@@ -167,8 +169,8 @@ class TestMainStartup:
 # ═════════════════════════════════════════════════════════════════════
 
 
-class TestAllEightTablesExist:
-    """T02: Confirm all 8 tables are registered with SQLAlchemy metadata."""
+class TestAllTenTablesExist:
+    """T02: Confirm all tables are registered with SQLAlchemy metadata."""
 
     def test_all_tables_present(self):
         table_names = sorted(Base.metadata.tables.keys())
@@ -181,6 +183,9 @@ class TestAllEightTablesExist:
             "chat_messages",
             "support_requests",
             "custom_faqs",
+            "asset_images",
+            "categories",
+            "app_settings",
         ])
         assert table_names == expected
 
@@ -215,6 +220,8 @@ class TestUsersModel:
             "relationship_to_decedent", "date_of_birth",
             "identity_verified", "id_scan_uri",
             "role", "pw_hash", "email", "phone", "physical_address",
+            "address_line1", "address_line2", "address_city",
+            "address_region", "address_postal_code", "address_country",
             "invite_token", "invite_token_expires_at", "invite_token_used",
             "consent_accepted", "age_verified", "consent_timestamp",
             "is_submitted", "submitted_at", "draft_version",
@@ -267,11 +274,6 @@ class TestAssetsModel:
         names = {c.name for c in checks}
         assert "ck_assets_status" in names
 
-    def test_category_check_constraint(self):
-        table = Base.metadata.tables["assets"]
-        checks = [c for c in table.constraints if isinstance(c, CheckConstraint)]
-        names = {c.name for c in checks}
-        assert "ck_assets_category" in names
 
     def test_allocated_to_required_check_constraint(self):
         table = Base.metadata.tables["assets"]
@@ -353,8 +355,9 @@ class TestSupportRequestsModel:
     def test_columns_present(self):
         table = Base.metadata.tables["support_requests"]
         expected_cols = {
-            "id", "session_id", "heir_id", "message",
-            "status", "created_at",
+            "id", "session_id", "heir_id", "responded_by_id",
+            "message", "admin_response", "initiator_role", "status",
+            "responded_at", "resolved_at", "created_at",
         }
         assert set(table.columns.keys()) == expected_cols
 
@@ -363,6 +366,7 @@ class TestSupportRequestsModel:
         checks = [c for c in table.constraints if isinstance(c, CheckConstraint)]
         names = {c.name for c in checks}
         assert "ck_support_requests_status" in names
+        assert "ck_support_requests_initiator_role" in names
 
     def test_session_id_index(self):
         table = Base.metadata.tables["support_requests"]
@@ -373,6 +377,11 @@ class TestSupportRequestsModel:
         table = Base.metadata.tables["support_requests"]
         idx_names = {idx.name for idx in table.indexes}
         assert "idx_support_requests_heir_id" in idx_names
+
+    def test_responded_by_id_index(self):
+        table = Base.metadata.tables["support_requests"]
+        idx_names = {idx.name for idx in table.indexes}
+        assert "idx_support_requests_responded_by_id" in idx_names
 
 
 class TestChatMessagesModel:
@@ -429,6 +438,7 @@ class TestRelationships:
         assert hasattr(Session, "support_requests")
         assert hasattr(Session, "chat_messages")
         assert hasattr(Session, "custom_faqs")
+        assert hasattr(Session, "categories")
 
     def test_user_relationships(self):
         assert hasattr(User, "session")
@@ -440,6 +450,13 @@ class TestRelationships:
         assert hasattr(Asset, "session")
         assert hasattr(Asset, "valuations")
         assert hasattr(Asset, "allocated_to")
+        assert hasattr(Asset, "images")
+
+    def test_asset_image_relationships(self):
+        assert hasattr(AssetImage, "asset")
+
+    def test_category_relationships(self):
+        assert hasattr(Category, "session")
 
     def test_valuation_relationships(self):
         assert hasattr(Valuation, "asset")
@@ -498,4 +515,12 @@ class TestRelationships:
 
     def test_asset_valuations_cascade_delete_orphan(self):
         rel = Asset.__mapper__.relationships["valuations"]
+        assert "delete-orphan" in rel.cascade
+
+    def test_asset_images_cascade_delete_orphan(self):
+        rel = Asset.__mapper__.relationships["images"]
+        assert "delete-orphan" in rel.cascade
+
+    def test_session_categories_cascade_delete_orphan(self):
+        rel = Session.__mapper__.relationships["categories"]
         assert "delete-orphan" in rel.cascade

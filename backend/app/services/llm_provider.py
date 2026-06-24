@@ -1,8 +1,12 @@
 """
 LLM Provider Abstraction Layer (T50)
 ====================================
-Unified factory abstracting all LLM calls behind a single interface.
-Supports: Ollama (default), OpenAI, Anthropic, Google Gemini, OpenRouter.
+Unified factory abstracting all LLM calls behind a single interface, powered by
+LiteLLM. Supports: Ollama (default), OpenAI, Anthropic, Google Gemini, OpenRouter,
+NVIDIA NIM — and, since every call is routed through `litellm.completion()` /
+`litellm.embedding()`, any other LiteLLM-supported provider (Groq, Mistral, Bedrock,
+Azure, Together, etc.) by simply pointing a model env var at that provider's
+`provider/model` string and setting its API key — no code change required.
 
 Environment-driven configuration — no hard-coded providers.
 
@@ -12,15 +16,26 @@ Includes:
   - Structured logging at entry/exit for every call
 """
 
+import io as _io
+import json
 import logging
 import os
 import time
 from typing import Any, Dict, List, Optional, Type
 
 import httpx
+import litellm
+from PIL import Image as _PILImage
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+# Let callers control verbosity via standard logging; don't let litellm spam stdout.
+litellm.suppress_debug_info = True
+# Not every provider supports every kwarg (e.g. response_format on ollama_chat) —
+# drop unsupported ones instead of raising, since generate_structured() always
+# embeds the JSON schema directly in the prompt as a provider-agnostic fallback.
+litellm.drop_params = True
 
 # ---------------------------------------------------------------------------
 # Provider identifiers
@@ -32,29 +47,47 @@ PROVIDER_GOOGLE = "google"
 PROVIDER_OPENROUTER = "openrouter"
 PROVIDER_NVIDIA = "nvidia"
 
-_VALID_TEXT_PROVIDERS = {
-    PROVIDER_OLLAMA,
-    PROVIDER_OPENAI,
-    PROVIDER_ANTHROPIC,
-    PROVIDER_GOOGLE,
-    PROVIDER_OPENROUTER,
-    PROVIDER_NVIDIA,
+# ---------------------------------------------------------------------------
+# Per-provider LiteLLM routing config: the model-string prefix LiteLLM expects,
+# and which env vars hold the API key / base URL for that provider. This table
+# is the entire surface area needed to support a provider — there is no longer
+# any provider-specific request/response handling code below.
+# ---------------------------------------------------------------------------
+_PROVIDER_CONFIG: Dict[str, Dict[str, str]] = {
+    PROVIDER_OLLAMA: {
+        "prefix": "ollama_chat/",
+        # Ollama's embedding endpoint isn't exposed under ollama_chat/ — only
+        # the plain ollama/ route supports litellm.embedding().
+        "embedding_prefix": "ollama/",
+        "api_base_env": "OLLAMA_BASE_URL",
+    },
+    PROVIDER_OPENAI: {
+        "prefix": "",
+        "api_key_env": "OPENAI_API_KEY",
+    },
+    PROVIDER_ANTHROPIC: {
+        "prefix": "anthropic/",
+        "api_key_env": "ANTHROPIC_API_KEY",
+    },
+    PROVIDER_GOOGLE: {
+        "prefix": "gemini/",
+        "api_key_env": "GEMINI_API_KEY",
+    },
+    PROVIDER_OPENROUTER: {
+        "prefix": "openrouter/",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "api_base_env": "OPENROUTER_BASE_URL",
+    },
+    PROVIDER_NVIDIA: {
+        "prefix": "nvidia_nim/",
+        "api_key_env": "NVIDIA_API_KEY",
+        "api_base_env": "NVIDIA_BASE_URL",
+    },
 }
-_VALID_EMBEDDING_PROVIDERS = {
-    PROVIDER_OLLAMA,
-    PROVIDER_OPENAI,
-    PROVIDER_GOOGLE,
-    PROVIDER_OPENROUTER,
-    PROVIDER_NVIDIA,
-}
-_VALID_VISION_PROVIDERS = {
-    PROVIDER_OLLAMA,
-    PROVIDER_OPENAI,
-    PROVIDER_GOOGLE,
-    PROVIDER_ANTHROPIC,
-    PROVIDER_OPENROUTER,
-    PROVIDER_NVIDIA,
-}
+
+_VALID_TEXT_PROVIDERS = set(_PROVIDER_CONFIG)
+_VALID_EMBEDDING_PROVIDERS = set(_PROVIDER_CONFIG)
+_VALID_VISION_PROVIDERS = set(_PROVIDER_CONFIG)
 
 # ---------------------------------------------------------------------------
 # Model keys used by LangGraph nodes
@@ -119,12 +152,6 @@ _VISION_MODEL = os.environ.get("VISION_MODEL", _PROFILE["vision"])
 _EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", _PROFILE["embedding"])
 
 _OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-_ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-_GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-_OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-_OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-_NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY", "")
-_NVIDIA_BASE_URL = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
 # Langfuse / Langtrace
 try:
@@ -242,7 +269,7 @@ def check_ollama_health() -> bool:
 # ===================================================================
 
 class LLMProvider:
-    """Unified LLM provider factory.
+    """Unified LLM provider factory, backed by LiteLLM.
 
     Usage::
 
@@ -252,8 +279,15 @@ class LLMProvider:
         ocr   = provider.generate_vision("vision", image_bytes, "Describe this")
         vec   = provider.get_embeddings("embedding", "query text")
 
-    The provider type and model names are read from environment variables
-    on instance creation and are immutable for the lifetime of the process.
+    The provider type and model names are read from environment variables on
+    instance creation and are immutable for the lifetime of the process.
+
+    Switching providers (or adding a new one not listed in `_PROVIDER_CONFIG`)
+    requires no code change: any LiteLLM-supported model string
+    (`"groq/llama-3.1-70b"`, `"mistral/mistral-large-latest"`,
+    `"bedrock/anthropic.claude-3-sonnet"`, ...) can be set directly as
+    FAST_THINKER_MODEL/SLOW_THINKER_MODEL/VISION_MODEL/EMBEDDING_MODEL —
+    LiteLLM reads that provider's own conventional API-key env var.
     """
 
     def __init__(self):
@@ -262,19 +296,11 @@ class LLMProvider:
         self.embedding_provider = os.environ.get("EMBEDDING_PROVIDER", PROVIDER_OLLAMA).strip().lower()
         self.vision_provider = os.environ.get("VISION_PROVIDER", PROVIDER_OLLAMA).strip().lower()
 
-        # Ollama-specific
         self._ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-        if self.llm_provider == PROVIDER_OLLAMA:
-            self._ollama_client = self._build_ollama_client()
-        else:
-            self._ollama_client = None
 
-        # Lazy-built clients for cloud providers
+        # Lazy OpenAI SDK client — used only for Whisper audio transcription,
+        # which LiteLLM does not abstract for our use case.
         self._openai_client = None
-        self._anthropic_client = None
-        self._google_client = None
-        self._openrouter_client = None
-        self._nvidia_client = None
 
         # Read model profiles & limits (T63 & T07b)
         self.profile_name = os.environ.get("MODEL_PROFILE", "default").strip().lower()
@@ -288,6 +314,12 @@ class LLMProvider:
 
         import threading
         self._semaphore = threading.Semaphore(self.concurrency_ceiling)
+
+        # Lazy model-name cache (populated on first _resolve_model call)
+        self._cached_fast = None
+        self._cached_slow = None
+        self._cached_vision = None
+        self._cached_embedding = None
 
         logger.info(
             "LLMProvider initialised: text=%s embedding=%s vision=%s profile=%s concurrency=%d timeout=%d",
@@ -308,6 +340,102 @@ class LLMProvider:
         }
 
     # ------------------------------------------------------------------
+    # LiteLLM routing helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _provider_kwargs(provider: str) -> Dict[str, Any]:
+        """Build the api_key / api_base kwargs LiteLLM needs for this provider."""
+        cfg = _PROVIDER_CONFIG.get(provider)
+        if cfg is None:
+            return {}
+        kwargs: Dict[str, Any] = {}
+        api_key_env = cfg.get("api_key_env")
+        if api_key_env:
+            value = os.environ.get(api_key_env, "")
+            if value:
+                kwargs["api_key"] = value
+        api_base_env = cfg.get("api_base_env")
+        if api_base_env:
+            value = os.environ.get(api_base_env, "")
+            if value:
+                kwargs["api_base"] = value
+        return kwargs
+
+    def _to_litellm_model(self, model_name: str, provider: str, is_embedding: bool = False) -> str:
+        """Prefix a bare model name with this provider's LiteLLM prefix.
+
+        If `model_name` already contains a `/`, it's treated as a fully
+        qualified LiteLLM route (e.g. a user dropped in
+        `FAST_THINKER_MODEL=groq/llama-3.1-70b`) and is passed through
+        unchanged.
+        """
+        if "/" in model_name:
+            return model_name
+        cfg = _PROVIDER_CONFIG.get(provider)
+        if not cfg:
+            return model_name
+        if is_embedding and "embedding_prefix" in cfg:
+            prefix = cfg["embedding_prefix"]
+        else:
+            prefix = cfg.get("prefix", "")
+        return f"{prefix}{model_name}"
+
+    def _completion(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        provider: str,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
+        response_format: Optional[Dict[str, str]] = None,
+    ):
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            **self._provider_kwargs(provider),
+        }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+        try:
+            return litellm.completion(**kwargs)
+        except Exception as exc:
+            logger.error("LiteLLM completion failed for model=%s: %s", model, exc)
+            raise
+
+    def _embed(
+        self,
+        model: str,
+        text: str,
+        provider: str,
+        timeout: Optional[float] = None,
+    ) -> List[float]:
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "input": [text],
+            **self._provider_kwargs(provider),
+        }
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        try:
+            resp = litellm.embedding(**kwargs)
+        except Exception as exc:
+            logger.error("LiteLLM embedding failed for model=%s: %s", model, exc)
+            raise
+        data = resp.data if hasattr(resp, "data") else resp["data"]
+        if not data:
+            raise ValueError("LiteLLM returned empty embeddings array")
+        item = data[0]
+        return item["embedding"] if isinstance(item, dict) else item.embedding
+
+    # ------------------------------------------------------------------
     # public API
     # ------------------------------------------------------------------
 
@@ -322,6 +450,9 @@ class LLMProvider:
         timeout: Optional[float] = None,
     ) -> str:
         """Generate a plain-text completion."""
+        if self.llm_provider not in _VALID_TEXT_PROVIDERS:
+            raise ValueError(f"Unsupported text provider: {self.llm_provider}")
+
         if max_tokens is None:
             if model_key == MODEL_KEY_FAST:
                 max_tokens = self.fast_token_limit
@@ -332,25 +463,22 @@ class LLMProvider:
         if timeout is None:
             timeout = self.timeout_seconds
 
+        model = self._to_litellm_model(self._resolve_model(model_key), self.llm_provider)
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": user_input})
+
         logger.debug(
-            "[LLMProvider] generate_text model_key=%s temperature=%.2f prompt_len=%d max_tokens=%s timeout=%s",
-            model_key, temperature, len(user_input), max_tokens, timeout,
+            "[LLMProvider] generate_text model_key=%s model=%s temperature=%.2f prompt_len=%d max_tokens=%s timeout=%s",
+            model_key, model, temperature, len(user_input), max_tokens, timeout,
         )
         with self._semaphore:
-            if self.llm_provider == PROVIDER_OLLAMA:
-                result = self._ollama_generate_text(model_key, system_prompt, user_input, temperature, history, max_tokens, timeout)
-            elif self.llm_provider == PROVIDER_OPENAI:
-                result = self._openai_generate_text(model_key, system_prompt, user_input, temperature, history, max_tokens, timeout)
-            elif self.llm_provider == PROVIDER_ANTHROPIC:
-                result = self._anthropic_generate_text(model_key, system_prompt, user_input, temperature, history, max_tokens, timeout)
-            elif self.llm_provider == PROVIDER_GOOGLE:
-                result = self._google_generate_text(model_key, system_prompt, user_input, temperature, history, max_tokens, timeout)
-            elif self.llm_provider == PROVIDER_OPENROUTER:
-                result = self._openrouter_generate_text(model_key, system_prompt, user_input, temperature, history, max_tokens, timeout)
-            elif self.llm_provider == PROVIDER_NVIDIA:
-                result = self._nvidia_generate_text(model_key, system_prompt, user_input, temperature, history, max_tokens, timeout)
-            else:
-                raise ValueError(f"Unsupported text provider: {self.llm_provider}")
+            resp = self._completion(
+                model, messages, self.llm_provider,
+                temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+            )
+        result = resp.choices[0].message.content.strip()
         logger.debug("[LLMProvider] generate_text result_len=%d", len(result))
         return result
 
@@ -365,6 +493,9 @@ class LLMProvider:
         timeout: Optional[float] = None,
     ) -> BaseModel:
         """Generate a structured (JSON) output validated against a Pydantic model."""
+        if self.llm_provider not in _VALID_TEXT_PROVIDERS:
+            raise ValueError(f"Unsupported text provider: {self.llm_provider}")
+
         if max_tokens is None:
             if model_key == MODEL_KEY_FAST:
                 max_tokens = self.fast_token_limit
@@ -375,37 +506,30 @@ class LLMProvider:
         if timeout is None:
             timeout = self.timeout_seconds
 
+        model = self._to_litellm_model(self._resolve_model(model_key), self.llm_provider)
+        schema_str = str(response_model.model_json_schema())
+        full_system = (
+            f"{system_prompt}\n\n"
+            f"Respond ONLY with a valid JSON object matching this schema:\n{schema_str}"
+        )
+        messages = [
+            {"role": "system", "content": full_system},
+            {"role": "user", "content": user_input},
+        ]
+
         logger.debug(
-            "[LLMProvider] generate_structured model_key=%s model=%s max_tokens=%s timeout=%s",
-            model_key, response_model.__name__, max_tokens, timeout,
+            "[LLMProvider] generate_structured model_key=%s model=%s response_model=%s max_tokens=%s timeout=%s",
+            model_key, model, response_model.__name__, max_tokens, timeout,
         )
         with self._semaphore:
-            if self.llm_provider == PROVIDER_OLLAMA:
-                result = self._ollama_generate_structured(
-                    model_key, system_prompt, user_input, response_model, temperature, max_tokens, timeout
-                )
-            elif self.llm_provider == PROVIDER_OPENAI:
-                result = self._openai_generate_structured(
-                    model_key, system_prompt, user_input, response_model, temperature, max_tokens, timeout
-                )
-            elif self.llm_provider == PROVIDER_ANTHROPIC:
-                result = self._anthropic_generate_structured(
-                    model_key, system_prompt, user_input, response_model, temperature, max_tokens, timeout
-                )
-            elif self.llm_provider == PROVIDER_GOOGLE:
-                result = self._google_generate_structured(
-                    model_key, system_prompt, user_input, response_model, temperature, max_tokens, timeout
-                )
-            elif self.llm_provider == PROVIDER_OPENROUTER:
-                result = self._openrouter_generate_structured(
-                    model_key, system_prompt, user_input, response_model, temperature, max_tokens, timeout
-                )
-            elif self.llm_provider == PROVIDER_NVIDIA:
-                result = self._nvidia_generate_structured(
-                    model_key, system_prompt, user_input, response_model, temperature, max_tokens, timeout
-                )
-            else:
-                raise ValueError(f"Unsupported text provider: {self.llm_provider}")
+            resp = self._completion(
+                model, messages, self.llm_provider,
+                temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+                response_format={"type": "json_object"},
+            )
+        content = resp.choices[0].message.content.strip()
+        parsed = json.loads(content)
+        result = response_model(**parsed)
         logger.debug("[LLMProvider] generate_structured OK")
         return result
 
@@ -416,32 +540,55 @@ class LLMProvider:
         prompt: str,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
+        images: Optional[List[bytes]] = None,
     ) -> str:
-        """Vision / OCR extraction from image bytes."""
+        """Vision / OCR extraction from image bytes.
+
+        Args:
+            image_bytes: Primary image bytes (required).
+            images: Optional list of additional image bytes for multi-image models.
+        """
+        if self.vision_provider not in _VALID_VISION_PROVIDERS:
+            raise ValueError(f"Unsupported vision provider: {self.vision_provider}")
+
         if max_tokens is None:
             max_tokens = self.vision_token_limit
         if timeout is None:
             timeout = self.timeout_seconds
 
+        model = self._to_litellm_model(self._resolve_model(model_key), self.vision_provider)
+
+        import base64
+        all_images = [self._ensure_image_jpeg(image_bytes)] + [
+            self._ensure_image_jpeg(img) for img in (images or [])
+        ]
+        content_list: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for img in all_images:
+            b64 = base64.b64encode(img).decode("utf-8")
+            # litellm's ollama_chat transformation forwards image_url.url verbatim
+            # into Ollama's native `images` field, which expects bare base64 (no
+            # data-URI prefix) — other providers expect the full data: URI.
+            url = b64 if self.vision_provider == PROVIDER_OLLAMA else f"data:image/jpeg;base64,{b64}"
+            content_list.append({"type": "image_url", "image_url": {"url": url}})
+        messages = [{"role": "user", "content": content_list}]
+
+        total_imgs = len(all_images)
         logger.debug(
-            "[LLMProvider] generate_vision model_key=%s img_size=%d prompt_len=%d max_tokens=%s timeout=%s",
-            model_key, len(image_bytes), len(prompt), max_tokens, timeout,
+            "[LLMProvider] generate_vision model_key=%s model=%s imgs=%d prompt_len=%d max_tokens=%s timeout=%s",
+            model_key, model, total_imgs, len(prompt), max_tokens, timeout,
         )
         with self._semaphore:
-            if self.vision_provider == PROVIDER_OLLAMA:
-                result = self._ollama_generate_vision(model_key, image_bytes, prompt, max_tokens, timeout)
-            elif self.vision_provider == PROVIDER_OPENAI:
-                result = self._openai_generate_vision(model_key, image_bytes, prompt, max_tokens, timeout)
-            elif self.vision_provider == PROVIDER_ANTHROPIC:
-                result = self._anthropic_generate_vision(model_key, image_bytes, prompt, max_tokens, timeout)
-            elif self.vision_provider == PROVIDER_GOOGLE:
-                result = self._google_generate_vision(model_key, image_bytes, prompt, max_tokens, timeout)
-            elif self.vision_provider == PROVIDER_OPENROUTER:
-                result = self._openrouter_generate_vision(model_key, image_bytes, prompt, max_tokens, timeout)
-            elif self.vision_provider == PROVIDER_NVIDIA:
-                result = self._nvidia_generate_vision(model_key, image_bytes, prompt, max_tokens, timeout)
-            else:
-                raise ValueError(f"Unsupported vision provider: {self.vision_provider}")
+            resp = self._completion(
+                model, messages, self.vision_provider,
+                temperature=0.0, max_tokens=max_tokens, timeout=timeout,
+            )
+        result = resp.choices[0].message.content.strip()
+
+        # Strip Gemma-style thinking tokens if present:
+        #   <|channel>thought\n...<channel|>
+        import re
+        result = re.sub(r"<\|channel>thought.*?(?:<channel\|>|$)", "", result, flags=re.DOTALL).strip()
+
         logger.debug("[LLMProvider] generate_vision result_len=%d", len(result))
         return result
 
@@ -452,175 +599,77 @@ class LLMProvider:
         timeout: Optional[float] = None,
     ) -> List[float]:
         """Return a dense embedding vector for the given text."""
+        if self.embedding_provider not in _VALID_EMBEDDING_PROVIDERS:
+            raise ValueError(f"Unsupported embedding provider: {self.embedding_provider}")
+
         if timeout is None:
             timeout = self.timeout_seconds
 
+        model = self._to_litellm_model(
+            self._resolve_model(model_key), self.embedding_provider, is_embedding=True
+        )
+
         logger.debug(
-            "[LLMProvider] get_embeddings model_key=%s text_len=%d timeout=%s",
-            model_key, len(text), timeout,
+            "[LLMProvider] get_embeddings model_key=%s model=%s text_len=%d timeout=%s",
+            model_key, model, len(text), timeout,
         )
         with self._semaphore:
-            if self.embedding_provider == PROVIDER_OLLAMA:
-                result = self._ollama_get_embeddings(model_key, text, timeout)
-            elif self.embedding_provider == PROVIDER_OPENAI:
-                result = self._openai_get_embeddings(model_key, text, timeout)
-            elif self.embedding_provider == PROVIDER_GOOGLE:
-                result = self._google_get_embeddings(model_key, text, timeout)
-            elif self.embedding_provider == PROVIDER_OPENROUTER:
-                result = self._openrouter_get_embeddings(model_key, text, timeout)
-            elif self.embedding_provider == PROVIDER_NVIDIA:
-                result = self._nvidia_get_embeddings(model_key, text, timeout)
-            else:
-                raise ValueError(f"Unsupported embedding provider: {self.embedding_provider}")
+            result = self._embed(model, text, self.embedding_provider, timeout=timeout)
         logger.debug("[LLMProvider] get_embeddings dim=%d", len(result))
         return result
 
     # ------------------------------------------------------------------
-    # model name resolution
+    # model name resolution (lazy per-instance cache — reads env on first access)
     # ------------------------------------------------------------------
 
     def _resolve_model(self, model_key: str) -> str:
         if model_key == MODEL_KEY_FAST:
-            return _FAST_MODEL
+            if self._cached_fast is None:
+                self._cached_fast = os.environ.get("FAST_THINKER_MODEL", _FAST_MODEL)
+            return self._cached_fast
         elif model_key == MODEL_KEY_SLOW:
-            return _SLOW_MODEL
+            if self._cached_slow is None:
+                self._cached_slow = os.environ.get("SLOW_THINKER_MODEL", _SLOW_MODEL)
+            return self._cached_slow
         elif model_key == MODEL_KEY_VISION:
-            return _VISION_MODEL
+            if self._cached_vision is None:
+                self._cached_vision = os.environ.get("VISION_MODEL", _VISION_MODEL)
+            return self._cached_vision
         elif model_key == MODEL_KEY_EMBEDDING:
-            return _EMBEDDING_MODEL
+            if self._cached_embedding is None:
+                self._cached_embedding = os.environ.get("EMBEDDING_MODEL", _EMBEDDING_MODEL)
+            return self._cached_embedding
         return model_key
 
     # ------------------------------------------------------------------
-    # Ollama backend
+    # Image helpers
     # ------------------------------------------------------------------
 
-    def _build_ollama_client(self):
-        try:
-            import ollama
-            return ollama.Client(host=self._ollama_url)
-        except ImportError:
-            logger.error("ollama package not installed; Ollama provider unavailable")
-            raise RuntimeError("ollama package is required when LLM_PROVIDER=ollama")
+    @staticmethod
+    def _ensure_image_jpeg(image_bytes: bytes) -> bytes:
+        """Convert image bytes to JPEG if they are in an incompatible format.
 
-    def _ollama_generate_text(
-        self,
-        model_key: str,
-        system_prompt: str,
-        user_input: str,
-        temperature: float,
-        history: Optional[List[Dict[str, str]]],
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> str:
-        model = self._resolve_model(model_key)
-        full_prompt = system_prompt + "\n\n" + user_input
-        if self._ollama_client and timeout is not None:
-            self._ollama_client._client.timeout = httpx.Timeout(timeout)
-        options = {"temperature": temperature}
-        if max_tokens is not None:
-            options["num_predict"] = max_tokens
+        Many vision models cannot decode WebP or HEIC images.  This helper
+        detects when the bytestream is not JPEG and re-encodes it via PIL so
+        the vision model always receives a format it can handle.
+        """
+        # Quick magic-byte check: JPEG starts with FF D8 FF
+        if image_bytes[:3] == b'\xff\xd8\xff':
+            return image_bytes  # already JPEG — no-op
         try:
-            response = self._ollama_client.generate(
-                model=model,
-                prompt=full_prompt,
-                options=options,
-                keep_alive=-1,
-            )
-            return response.response.strip()
-        except Exception as exc:
-            logger.error("Ollama generate_text failed for model=%s: %s", model, exc)
-            raise
-
-    def _ollama_generate_structured(
-        self,
-        model_key: str,
-        system_prompt: str,
-        user_input: str,
-        response_model: Type[BaseModel],
-        temperature: float,
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> BaseModel:
-        model = self._resolve_model(model_key)
-        schema_json = response_model.model_json_schema()
-        schema_str = str(schema_json)
-        full_prompt = (
-            f"{system_prompt}\n\n"
-            f"Respond ONLY with a valid JSON object matching this schema:\n{schema_str}\n\n"
-            f"Input: {user_input}\nJSON:"
-        )
-        if self._ollama_client and timeout is not None:
-            self._ollama_client._client.timeout = httpx.Timeout(timeout)
-        options = {"temperature": temperature}
-        if max_tokens is not None:
-            options["num_predict"] = max_tokens
-        try:
-            response = self._ollama_client.generate(
-                model=model,
-                prompt=full_prompt,
-                options=options,
-                keep_alive=-1,
-            )
-            import json
-            parsed = json.loads(response.response.strip())
-            return response_model(**parsed)
-        except Exception as exc:
-            logger.error("Ollama generate_structured failed for model=%s: %s", model, exc)
-            raise
-
-    def _ollama_generate_vision(
-        self,
-        model_key: str,
-        image_bytes: bytes,
-        prompt: str,
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> str:
-        model = self._resolve_model(model_key)
-        import base64
-        b64_image = base64.b64encode(image_bytes).decode("utf-8")
-        if self._ollama_client and timeout is not None:
-            self._ollama_client._client.timeout = httpx.Timeout(timeout)
-        options = {"temperature": 0.0}
-        if max_tokens is not None:
-            options["num_predict"] = max_tokens
-        try:
-            response = self._ollama_client.generate(
-                model=model,
-                prompt=prompt,
-                images=[b64_image],
-                options=options,
-                keep_alive=-1,
-            )
-            return response.response.strip()
-        except Exception as exc:
-            logger.error("Ollama generate_vision failed for model=%s: %s", model, exc)
-            raise
-
-    def _ollama_get_embeddings(
-        self,
-        model_key: str,
-        text: str,
-        timeout: Optional[float] = None,
-    ) -> List[float]:
-        model = self._resolve_model(model_key)
-        if self._ollama_client and timeout is not None:
-            self._ollama_client._client.timeout = httpx.Timeout(timeout)
-        try:
-            response = self._ollama_client.embed(
-                model=model,
-                input=text,
-            )
-            embeddings = response.get("embeddings", [])
-            if not embeddings:
-                raise ValueError("Ollama returned empty embeddings array")
-            return embeddings[0]
-        except Exception as exc:
-            logger.error("Ollama get_embeddings failed for model=%s: %s", model, exc)
-            raise
+            img = _PILImage.open(_io.BytesIO(image_bytes))
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            buf = _io.BytesIO()
+            img.save(buf, format="JPEG", quality=92)
+            return buf.getvalue()
+        except Exception:
+            # If PIL can't open it, return as-is and let the model try
+            return image_bytes
 
     # ------------------------------------------------------------------
-    # OpenAI backend
+    # OpenAI SDK client — used only for Whisper audio transcription, which
+    # falls outside LiteLLM's completion/embedding abstraction here.
     # ------------------------------------------------------------------
 
     def _get_openai_client(self):
@@ -629,479 +678,8 @@ class LLMProvider:
                 from openai import OpenAI
                 self._openai_client = OpenAI(api_key=_OPENAI_API_KEY)
             except ImportError:
-                raise RuntimeError("openai package required when using OpenAI provider")
+                raise RuntimeError("openai package required for Whisper transcription")
         return self._openai_client
-
-    def _openai_generate_text(
-        self,
-        model_key: str,
-        system_prompt: str,
-        user_input: str,
-        temperature: float,
-        history: Optional[List[Dict[str, str]]],
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> str:
-        model = self._resolve_model(model_key)
-        client = self._get_openai_client()
-        messages = [{"role": "system", "content": system_prompt}]
-        if history:
-            messages.extend(history)
-        messages.append({"role": "user", "content": user_input})
-        resp = client.chat.completions.create(
-            model=model, messages=messages, temperature=temperature,
-            max_tokens=max_tokens, timeout=timeout,
-        )
-        return resp.choices[0].message.content.strip()
-
-    def _openai_generate_structured(
-        self,
-        model_key: str,
-        system_prompt: str,
-        user_input: str,
-        response_model: Type[BaseModel],
-        temperature: float,
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> BaseModel:
-        model = self._resolve_model(model_key)
-        client = self._get_openai_client()
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_input},
-            ],
-            temperature=temperature,
-            response_format={"type": "json_object"},
-            max_tokens=max_tokens,
-            timeout=timeout,
-        )
-        import json
-        parsed = json.loads(resp.choices[0].message.content)
-        return response_model(**parsed)
-
-    def _openai_generate_vision(
-        self,
-        model_key: str,
-        image_bytes: bytes,
-        prompt: str,
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> str:
-        model = self._resolve_model(model_key)
-        client = self._get_openai_client()
-        import base64
-        b64 = base64.b64encode(image_bytes).decode("utf-8")
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                ],
-            }],
-            max_tokens=max_tokens or 500,
-            timeout=timeout,
-        )
-        return resp.choices[0].message.content.strip()
-
-    def _openai_get_embeddings(
-        self,
-        model_key: str,
-        text: str,
-        timeout: Optional[float] = None,
-    ) -> List[float]:
-        model = self._resolve_model(model_key)
-        client = self._get_openai_client()
-        resp = client.embeddings.create(model=model, input=text, timeout=timeout)
-        return resp.data[0].embedding
-
-    # ------------------------------------------------------------------
-    # Anthropic backend
-    # ------------------------------------------------------------------
-
-    def _get_anthropic_client(self):
-        if self._anthropic_client is None:
-            try:
-                import anthropic
-                self._anthropic_client = anthropic.Anthropic(api_key=_ANTHROPIC_API_KEY)
-            except ImportError:
-                raise RuntimeError("anthropic package required when using Anthropic provider")
-        return self._anthropic_client
-
-    def _anthropic_generate_text(
-        self,
-        model_key: str,
-        system_prompt: str,
-        user_input: str,
-        temperature: float,
-        history: Optional[List[Dict[str, str]]],
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> str:
-        model = self._resolve_model(model_key)
-        client = self._get_anthropic_client()
-        messages = []
-        if history:
-            for msg in history:
-                messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
-        messages.append({"role": "user", "content": user_input})
-        resp = client.messages.create(
-            model=model,
-            system=system_prompt,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens or 1024,
-            timeout=timeout,
-        )
-        return resp.content[0].text.strip()
-
-    def _anthropic_generate_structured(
-        self,
-        model_key: str,
-        system_prompt: str,
-        user_input: str,
-        response_model: Type[BaseModel],
-        temperature: float,
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> BaseModel:
-        import json
-        text = self._anthropic_generate_text(model_key, system_prompt, user_input, temperature, None, max_tokens, timeout)
-        parsed = json.loads(text)
-        return response_model(**parsed)
-
-    def _anthropic_generate_vision(
-        self,
-        model_key: str,
-        image_bytes: bytes,
-        prompt: str,
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> str:
-        model = self._resolve_model(model_key)
-        client = self._get_anthropic_client()
-        import base64
-        b64 = base64.b64encode(image_bytes).decode("utf-8")
-        resp = client.messages.create(
-            model=model,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image", "source": {
-                        "type": "base64",
-                        "media_type": "image/jpeg",
-                        "data": b64,
-                    }},
-                ],
-            }],
-            max_tokens=max_tokens or 500,
-            timeout=timeout,
-        )
-        return resp.content[0].text.strip()
-
-    # ------------------------------------------------------------------
-    # Google Gemini backend
-    # ------------------------------------------------------------------
-
-    def _get_google_client(self):
-        if self._google_client is None:
-            try:
-                import google.generativeai as genai
-                genai.configure(api_key=_GEMINI_API_KEY)
-                self._google_client = genai
-            except ImportError:
-                raise RuntimeError("google-generativeai package required for Google provider")
-        return self._google_client
-
-    def _google_generate_text(
-        self,
-        model_key: str,
-        system_prompt: str,
-        user_input: str,
-        temperature: float,
-        history: Optional[List[Dict[str, str]]],
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> str:
-        model = self._resolve_model(model_key)
-        genai = self._get_google_client()
-        gen_config = {"temperature": temperature}
-        if max_tokens is not None:
-            gen_config["max_output_tokens"] = max_tokens
-        gemini_model = genai.GenerativeModel(
-            model_name=model,
-            system_instruction=system_prompt,
-            generation_config=gen_config,
-        )
-        combined = user_input
-        req_options = {"timeout": timeout} if timeout else None
-        resp = gemini_model.generate_content(combined, request_options=req_options)
-        return resp.text.strip()
-
-    def _google_generate_structured(
-        self,
-        model_key: str,
-        system_prompt: str,
-        user_input: str,
-        response_model: Type[BaseModel],
-        temperature: float,
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> BaseModel:
-        import json
-        text = self._google_generate_text(model_key, system_prompt, user_input, temperature, None, max_tokens, timeout)
-        parsed = json.loads(text)
-        return response_model(**parsed)
-
-    def _google_generate_vision(
-        self,
-        model_key: str,
-        image_bytes: bytes,
-        prompt: str,
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> str:
-        model = self._resolve_model(model_key)
-        genai = self._get_google_client()
-        gen_config = {}
-        if max_tokens is not None:
-            gen_config["max_output_tokens"] = max_tokens
-        gemini_model = genai.GenerativeModel(
-            model_name=model,
-            generation_config=gen_config,
-        )
-        req_options = {"timeout": timeout} if timeout else None
-        resp = gemini_model.generate_content(
-            [prompt, {"mime_type": "image/jpeg", "data": image_bytes}],
-            request_options=req_options
-        )
-        return resp.text.strip()
-
-    def _google_get_embeddings(
-        self,
-        model_key: str,
-        text: str,
-        timeout: Optional[float] = None,
-    ) -> List[float]:
-        model = self._resolve_model(model_key)
-        genai = self._get_google_client()
-        req_options = {"timeout": timeout} if timeout else None
-        resp = genai.embed_content(model=model, content=text, request_options=req_options)
-        return resp["embedding"]
-
-    # ------------------------------------------------------------------
-    # OpenRouter backend (OpenAI-compatible API)
-    # ------------------------------------------------------------------
-
-    def _get_openrouter_client(self):
-        if self._openrouter_client is None:
-            try:
-                from openai import OpenAI
-                self._openrouter_client = OpenAI(
-                    api_key=_OPENROUTER_API_KEY,
-                    base_url=_OPENROUTER_BASE_URL,
-                )
-            except ImportError:
-                raise RuntimeError("openai package required when using OpenRouter provider")
-        return self._openrouter_client
-
-    def _openrouter_generate_text(
-        self,
-        model_key: str,
-        system_prompt: str,
-        user_input: str,
-        temperature: float,
-        history: Optional[List[Dict[str, str]]],
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> str:
-        model = self._resolve_model(model_key)
-        client = self._get_openrouter_client()
-        messages = [{"role": "system", "content": system_prompt}]
-        if history:
-            messages.extend(history)
-        messages.append({"role": "user", "content": user_input})
-        resp = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            timeout=timeout,
-        )
-        return resp.choices[0].message.content.strip()
-
-    def _openrouter_generate_structured(
-        self,
-        model_key: str,
-        system_prompt: str,
-        user_input: str,
-        response_model: Type[BaseModel],
-        temperature: float,
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> BaseModel:
-        model = self._resolve_model(model_key)
-        client = self._get_openrouter_client()
-        import json
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_input},
-            ],
-            temperature=temperature,
-            response_format={"type": "json_object"},
-            max_tokens=max_tokens,
-            timeout=timeout,
-        )
-        parsed = json.loads(resp.choices[0].message.content)
-        return response_model(**parsed)
-
-    def _openrouter_generate_vision(
-        self,
-        model_key: str,
-        image_bytes: bytes,
-        prompt: str,
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> str:
-        model = self._resolve_model(model_key)
-        client = self._get_openrouter_client()
-        import base64
-        b64 = base64.b64encode(image_bytes).decode("utf-8")
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                ],
-            }],
-            max_tokens=max_tokens or 500,
-            timeout=timeout,
-        )
-        return resp.choices[0].message.content.strip()
-
-    def _openrouter_get_embeddings(
-        self,
-        model_key: str,
-        text: str,
-        timeout: Optional[float] = None,
-    ) -> List[float]:
-        model = self._resolve_model(model_key)
-        client = self._get_openrouter_client()
-        resp = client.embeddings.create(model=model, input=text, timeout=timeout)
-        return resp.data[0].embedding
-
-    # ------------------------------------------------------------------
-    # NVIDIA NIM backend (OpenAI-compatible API)
-    # ------------------------------------------------------------------
-
-    def _get_nvidia_client(self):
-        if self._nvidia_client is None:
-            try:
-                from openai import OpenAI
-                self._nvidia_client = OpenAI(
-                    api_key=_NVIDIA_API_KEY,
-                    base_url=_NVIDIA_BASE_URL,
-                )
-            except ImportError:
-                raise RuntimeError("openai package required when using NVIDIA NIM provider")
-        return self._nvidia_client
-
-    def _nvidia_generate_text(
-        self,
-        model_key: str,
-        system_prompt: str,
-        user_input: str,
-        temperature: float,
-        history: Optional[List[Dict[str, str]]],
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> str:
-        model = self._resolve_model(model_key)
-        client = self._get_nvidia_client()
-        messages = [{"role": "system", "content": system_prompt}]
-        if history:
-            messages.extend(history)
-        messages.append({"role": "user", "content": user_input})
-        resp = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            timeout=timeout,
-        )
-        return resp.choices[0].message.content.strip()
-
-    def _nvidia_generate_structured(
-        self,
-        model_key: str,
-        system_prompt: str,
-        user_input: str,
-        response_model: Type[BaseModel],
-        temperature: float,
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> BaseModel:
-        model = self._resolve_model(model_key)
-        client = self._get_nvidia_client()
-        import json
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_input},
-            ],
-            temperature=temperature,
-            response_format={"type": "json_object"},
-            max_tokens=max_tokens,
-            timeout=timeout,
-        )
-        parsed = json.loads(resp.choices[0].message.content)
-        return response_model(**parsed)
-
-    def _nvidia_generate_vision(
-        self,
-        model_key: str,
-        image_bytes: bytes,
-        prompt: str,
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> str:
-        model = self._resolve_model(model_key)
-        client = self._get_nvidia_client()
-        import base64
-        b64 = base64.b64encode(image_bytes).decode("utf-8")
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                ],
-            }],
-            max_tokens=max_tokens or 500,
-            timeout=timeout,
-        )
-        return resp.choices[0].message.content.strip()
-
-    def _nvidia_get_embeddings(
-        self,
-        model_key: str,
-        text: str,
-        timeout: Optional[float] = None,
-    ) -> List[float]:
-        model = self._resolve_model(model_key)
-        client = self._get_nvidia_client()
-        resp = client.embeddings.create(model=model, input=text, timeout=timeout)
-        return resp.data[0].embedding
 
 
 # ===================================================================

@@ -1,0 +1,80 @@
+# Estate Steward 🕊️
+
+Estate Steward is an AI-powered, local-first probate mediation platform. It is designed to assist Executors and grieving families in navigating the emotional and logistical challenges of dividing estate keepsakes and personal property.
+
+By using the **Maximum Nash Welfare (MNW)** algorithm, Estate Steward guarantees a fair, mathematically optimal distribution of assets based on private points allocations from the heirs.
+
+## Key Features
+
+- **Private Points Allocation**: Heirs assign points (out of 1,000) to items based on personal and sentimental value. All allocations are blind and private.
+- **AI Mediator**: An integrated AI assistant (using local models) helps heirs explore the catalog, recount sentimental stories, and ask questions.
+- **Fiduciary Compliance**: Compiles a mathematically fair, cryptographically sealed Probate Audit Ledger for court filing.
+- **Privacy First**: Fully local architecture (Docker). ID scans and chat transcripts are kept completely offline.
+- **Digital Keepsakes**: Automatically generates personalized Keepsake Memory Book PDFs for each heir containing the history and allocations of the estate items.
+
+## Architecture
+
+This project is a **Monorepo** consisting of two main pieces:
+
+1. **Frontend** (`/frontend`): A modern React application (Vite + React Router + Zustand).
+2. **Backend** (`/backend`): A FastAPI Python server handling the database (PostgreSQL), fair division math, AI integration (Ollama / LangChain), and PDF generation.
+
+---
+
+## 🚀 Quickstart (Local Development)
+
+The easiest way to run Estate Steward locally is with Docker Compose.
+
+### Prerequisites
+- [Docker](https://docs.docker.com/get-docker/) & Docker Compose
+- (Optional) [Ollama](https://ollama.ai/) installed locally if you wish to run the AI Mediator features locally.
+
+### Steps
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/your-org/estate-steward.git
+   cd estate-steward
+   ```
+
+2. **Environment Setup:**
+   Copy the example environment file and adjust if necessary.
+   ```bash
+   cp .env.example .env
+   ```
+
+3. **Run with Docker Compose:**
+   ```bash
+   docker compose up --build
+   ```
+   
+   - **Frontend:** `http://localhost`
+   - **Backend API Docs:** `http://localhost/api/docs`
+   - **Mailpit (Local Email Testing):** `http://localhost:8025`
+
+---
+
+## 📦 Deployment (Separated Deployments)
+
+This monorepo is structured so that the **Frontend** and **Backend** can be deployed independently to different platforms (e.g., Vercel for Frontend, Render/AWS for Backend). 
+
+### Option 1: Using Platform Integrations (Vercel, Netlify, Render)
+Most modern platforms support "Root Directory" settings.
+- **Frontend (Vercel/Netlify):** Connect your GitHub repository. In the build settings, set the **Root Directory** to `frontend`. The build command will automatically be `npm run build`.
+- **Backend (Render/Heroku):** Connect your repository and set the **Root Directory** to `backend`. You can either use the provided `backend/Dockerfile` or native Python environments using `backend/requirements.txt`.
+
+### Option 2: GitHub Actions
+We have provided sample GitHub Actions in `.github/workflows/` that demonstrate how to trigger deployments separately based on path changes:
+- `deploy-frontend.yml` triggers only when files in `/frontend/` change.
+- `deploy-backend.yml` triggers only when files in `/backend/` change.
+
+You can modify these workflows to push to your specific infrastructure (AWS ECS, SSH to VPS, etc.).
+
+---
+
+## 🤝 Contributing
+
+We welcome contributions from the community! Please read our [CONTRIBUTING.md](./CONTRIBUTING.md) for details on our code of conduct, development environment setup, and the process for submitting pull requests.
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](./LICENSE) file for details.

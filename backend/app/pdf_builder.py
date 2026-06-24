@@ -21,6 +21,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+from html import escape
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -642,19 +643,6 @@ def build_probate_ledger_pdf(
 
     # --- Cover page ---
     executor_user = _find_admin(heirs)
-    executor_name = (
-        " ".join(
-            p
-            for p in [
-                executor_user.legal_first_name if executor_user else None,
-                executor_user.legal_middle_name if executor_user else None,
-                executor_user.legal_last_name if executor_user else None,
-            ]
-            if p
-        ).strip()
-        if executor_user
-        else "Executor"
-    )
     now_str = datetime.now(timezone.utc).strftime("%B %d, %Y")
     closure_str = now_str
     start_str = (
@@ -665,7 +653,8 @@ def build_probate_ledger_pdf(
 
     cover_title = f"{session.title or 'Estate'} Final Distribution & Probate Audit Ledger"
     subtitle_lines = [
-        f"Executor: {executor_name}",
+        _estate_identity_line(session),
+        *_executor_identity_lines(executor_user),
         f"Session Start: {start_str}",
         f"Closure Date: {closure_str}",
         '"Official estate distribution record for probate court filing."',
@@ -680,6 +669,9 @@ def build_probate_ledger_pdf(
     elements.append(_build_beneficiary_table(heirs))
     elements.append(Spacer(1, 0.4 * inch))
 
+    elements.append(_build_scale_summary(heirs, assets))
+    elements.append(Spacer(1, 0.4 * inch))
+
     # --- 3. Proof of Notice Log ---
     elements.append(Paragraph("Proof of Notice Log", STYLES["heading"]))
     elements.append(Spacer(1, 0.15 * inch))
@@ -689,7 +681,13 @@ def build_probate_ledger_pdf(
     # --- 4. Final Asset Allocation Grid ---
     elements.append(Paragraph("Final Asset Allocation Grid", STYLES["heading"]))
     elements.append(Spacer(1, 0.15 * inch))
-    elements.append(_build_asset_allocation_grid(assets, solver_result, appendix))
+    elements.append(_build_asset_allocation_grid(assets, heirs, solver_result, appendix))
+    elements.append(Spacer(1, 0.4 * inch))
+
+    # --- 4.5 Physical Distribution Responsibility ---
+    elements.append(Paragraph("Post-Allocation Distribution Responsibility", STYLES["heading"]))
+    elements.append(Spacer(1, 0.15 * inch))
+    elements.append(_build_distribution_responsibility_notice())
     elements.append(Spacer(1, 0.4 * inch))
 
     # --- 5. Maximum Nash Welfare Product Display ---
@@ -711,6 +709,30 @@ def build_probate_ledger_pdf(
         elements.append(Paragraph("Admin Intervention Log", STYLES["heading"]))
         elements.append(Spacer(1, 0.15 * inch))
         elements.append(_build_intervention_table(admin_interventions))
+        elements.append(Spacer(1, 0.4 * inch))
+
+    # --- 7.5 Inventory Modification Log (if any) ---
+    inventory_mods = [
+        al for al in audit_logs if al.event_type in ("ASSET_CREATED", "ASSET_UPDATED", "ASSET_DELETED")
+    ]
+    if inventory_mods:
+        elements.append(Paragraph("Inventory Modification Log", STYLES["heading"]))
+        elements.append(Spacer(1, 0.15 * inch))
+        elements.append(_build_inventory_mods_table(inventory_mods))
+        elements.append(Spacer(1, 0.4 * inch))
+
+    # --- 7.6 Executor-Heir Communication Log (if any) ---
+    communication_events = [
+        al for al in audit_logs if al.event_type in (
+            "SUPPORT_REQUEST_CREATED",
+            "SUPPORT_REPLY_SENT",
+            "SUPPORT_REQUEST_RESOLVED",
+        )
+    ]
+    if communication_events:
+        elements.append(Paragraph("Executor-Heir Communication Log", STYLES["heading"]))
+        elements.append(Spacer(1, 0.15 * inch))
+        elements.append(_build_communication_log_table(communication_events))
         elements.append(Spacer(1, 0.4 * inch))
 
     # --- 7. Points Valuation Matrix ---
@@ -819,38 +841,140 @@ def _find_admin(users: list[UserModel]) -> Optional[UserModel]:
     return None
 
 
+def _format_pdf_date(value: datetime | None) -> str:
+    return value.strftime("%Y-%m-%d") if value else "—"
+
+
+def _format_pdf_datetime(value: datetime | None) -> str:
+    if not value:
+        return "—"
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc)
+    return value.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _legal_name(user: UserModel | None) -> str:
+    if not user:
+        return ""
+    return " ".join(
+        p
+        for p in [user.legal_first_name, user.legal_middle_name, user.legal_last_name]
+        if p
+    ).strip()
+
+
+def _estate_identity_line(session: SessionModel) -> str:
+    decedent_name = (
+        getattr(session, "decedent_legal_name", None)
+        or getattr(session, "decedent_name", None)
+        or getattr(session, "estate_of", None)
+    )
+    if decedent_name:
+        return f"Estate / Decedent: {escape(str(decedent_name))}"
+
+    session_title = getattr(session, "title", None) or "Untitled session"
+    return (
+        "Estate / Decedent: Not separately recorded "
+        f"(session title: {escape(str(session_title))})"
+    )
+
+
+def _executor_identity_lines(executor_user: UserModel | None) -> list[str]:
+    if not executor_user:
+        return ["Executor Legal Name: Not recorded", "Executor Account: Not recorded"]
+
+    legal_name = _legal_name(executor_user)
+    lines = [
+        f"Executor Legal Name: {escape(legal_name) if legal_name else 'Not recorded'}",
+    ]
+    account_parts = []
+    if executor_user.username:
+        account_parts.append(f"account {escape(executor_user.username)}")
+    if executor_user.email:
+        account_parts.append(escape(executor_user.email))
+    if account_parts:
+        lines.append(f"Executor Account: {'; '.join(account_parts)}")
+    return lines
+
+
+def _build_scale_summary(heirs: list[UserModel], assets: list[AssetModel]) -> Table:
+    heir_count = len([h for h in heirs if h.role == "HEIR"])
+    asset_count = len(assets)
+    beneficiary_label = "beneficiary" if heir_count == 1 else "beneficiaries"
+    item_label = "item" if asset_count == 1 else "items"
+    scale_text = (
+        f"Ledger scale summary: {heir_count} registered {beneficiary_label} "
+        f"and {asset_count} catalog {item_label}. Long ledgers are expected for larger "
+        "estates; tables repeat headers across pages, and the points valuation "
+        "matrix switches to a landscape page layout when more than four "
+        "beneficiaries participate."
+    )
+    table = Table(
+        [[Paragraph(scale_text, STYLES["body"])]],
+        colWidths=[6.8 * inch],
+    )
+    table.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor(LIGHT_GREY_BORDER)),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F8FAF7")),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    return table
+
+
+def _build_distribution_responsibility_notice() -> Table:
+    text = (
+        "This ledger records the final allocation decision; it does not by itself "
+        "certify that physical possession has transferred. Unless a court order "
+        "or estate attorney directs otherwise, the executor/personal representative "
+        "should retain custody control until pickup, delivery, shipping, or storage "
+        "is documented. Recommended follow-up records include distribution date, "
+        "method, receiving beneficiary, pickup/delivery notes, condition at handoff, "
+        "and recipient acknowledgment or signature."
+    )
+    table = Table(
+        [[Paragraph(text, STYLES["body"])]],
+        colWidths=[6.8 * inch],
+    )
+    table.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor(SAGE_GREEN)),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F0F5EE")),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("LEFTPADDING", (0, 0), (-1, -1), 9),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+    ]))
+    return table
+
+
 def _build_beneficiary_table(heirs: list[UserModel]) -> Table:
     heir_heirs = [h for h in heirs if h.role == "HEIR"]
     header = [
         Paragraph("Name", STYLES["table_header"]),
         Paragraph("Email", STYLES["table_header"]),
         Paragraph("Created", STYLES["table_header"]),
+        Paragraph("Submitted", STYLES["table_header"]),
         Paragraph("Status", STYLES["table_header"]),
     ]
     data = [header]
 
     for h in heir_heirs:
-        name = (
-            " ".join(
-                p
-                for p in [h.legal_first_name, h.legal_middle_name, h.legal_last_name]
-                if p
-            ).strip()
-            or h.username
-        )
+        name = _legal_name(h) or h.username
         email = h.email or "—"
-        created = (
-            h.created_at.strftime("%Y-%m-%d") if h.created_at else "—"
-        )
+        created = _format_pdf_date(h.created_at)
+        submitted = _format_pdf_datetime(getattr(h, "submitted_at", None))
         status = h.status
         data.append([
             Paragraph(name, STYLES["table_cell"]),
             Paragraph(email, STYLES["table_cell"]),
             Paragraph(created, STYLES["table_cell"]),
+            Paragraph(submitted, STYLES["table_cell"]),
             Paragraph(status, STYLES["table_cell"]),
         ])
 
-    col_widths = [2.2 * inch, 2.2 * inch, 1.3 * inch, 1.3 * inch]
+    col_widths = [1.55 * inch, 1.85 * inch, 1.0 * inch, 1.55 * inch, 0.85 * inch]
     table = Table(data, colWidths=col_widths, repeatRows=1)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(CREAM_BG)),
@@ -871,26 +995,16 @@ def _build_notice_log_table(notice_log: NoticeLog) -> Table:
         Paragraph("Invite Created", STYLES["table_header"]),
         Paragraph("Dispatched", STYLES["table_header"]),
         Paragraph("Expires", STYLES["table_header"]),
+        Paragraph("Submitted", STYLES["table_header"]),
         Paragraph("Outcome", STYLES["table_header"]),
     ]
     data = [header]
 
     for entry in notice_log.entries:
-        invite_created = (
-            entry.invite_created_at.strftime("%Y-%m-%d %H:%M")
-            if entry.invite_created_at
-            else "—"
-        )
-        dispatched = (
-            entry.invitation_dispatched_at.strftime("%Y-%m-%d %H:%M")
-            if entry.invitation_dispatched_at
-            else "—"
-        )
-        expires = (
-            entry.invite_expires_at.strftime("%Y-%m-%d %H:%M")
-            if entry.invite_expires_at
-            else "—"
-        )
+        invite_created = _format_pdf_datetime(entry.invite_created_at)
+        dispatched = _format_pdf_datetime(entry.invitation_dispatched_at)
+        expires = _format_pdf_datetime(entry.invite_expires_at)
+        submitted = _format_pdf_datetime(entry.submitted_at)
         summary = entry.participation_summary
         data.append([
             Paragraph(entry.legal_name or entry.username, STYLES["table_cell"]),
@@ -898,10 +1012,19 @@ def _build_notice_log_table(notice_log: NoticeLog) -> Table:
             Paragraph(invite_created, STYLES["table_cell"]),
             Paragraph(dispatched, STYLES["table_cell"]),
             Paragraph(expires, STYLES["table_cell"]),
+            Paragraph(submitted, STYLES["table_cell"]),
             Paragraph(summary, STYLES["table_cell"]),
         ])
 
-    col_widths = [1.3 * inch, 1.3 * inch, 1.0 * inch, 1.0 * inch, 1.0 * inch, 1.4 * inch]
+    col_widths = [
+        1.05 * inch,
+        1.15 * inch,
+        0.95 * inch,
+        0.95 * inch,
+        0.95 * inch,
+        0.95 * inch,
+        0.8 * inch,
+    ]
     table = Table(data, colWidths=col_widths, repeatRows=1)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(CREAM_BG)),
@@ -914,20 +1037,52 @@ def _build_notice_log_table(notice_log: NoticeLog) -> Table:
     return table
 
 
+def _display_user_name(user: UserModel | None, fallback: str = "—") -> str:
+    if not user:
+        return fallback
+    legal_name = " ".join(
+        p
+        for p in [user.legal_first_name, user.legal_middle_name, user.legal_last_name]
+        if p
+    ).strip()
+    return legal_name or user.username or user.email or fallback
+
+
+def _valuation_source_label(source: str | None) -> str:
+    if not source:
+        return "Not declared - executor should document appraisal basis"
+
+    source_text = source.strip()
+    lower = source_text.lower()
+    if "ai" in lower:
+        return f"{source_text} (AI-generated estimate, not a professional appraisal)"
+    if "professional" in lower or "certified" in lower or "appraiser" in lower:
+        return f"{source_text} (professional appraisal)"
+    if "ebay" in lower or "auction" in lower or "comparable" in lower or "market" in lower:
+        return f"{source_text} (market comparable estimate)"
+    if "estate sale" in lower:
+        return f"{source_text} (estate sale estimate)"
+    if "personal" in lower:
+        return f"{source_text} (executor/family estimate)"
+    return source_text
+
+
 def _build_asset_allocation_grid(
     assets: list[AssetModel],
+    heirs: list[UserModel],
     solver_result: SolverResult,
     appendix: list[tuple[str, str]],
 ) -> Table:
     header = [
         Paragraph("Image", STYLES["table_header"]),
-        Paragraph("Title / Description / Source", STYLES["table_header"]),
+        Paragraph("Title / Description", STYLES["table_header"]),
         Paragraph("Allocated To", STYLES["table_header"]),
-        Paragraph("Appraisal Range", STYLES["table_header"]),
+        Paragraph("Appraisal Range / Source", STYLES["table_header"]),
     ]
     data = [header]
 
     allocation = solver_result.allocation
+    heir_name_by_id = {str(heir.id): _display_user_name(heir, str(heir.id)) for heir in heirs}
     # Reverse map: asset_id -> heir_id
     asset_to_heir: dict[str, str] = {}
     for heir_id, asset_ids in allocation.items():
@@ -937,16 +1092,20 @@ def _build_asset_allocation_grid(
     for asset in assets:
         image_cell = _small_image_cell(asset)
         desc = asset.description or ""
-        source = asset.valuation_source or "—"
-        title_text = f"<b>{asset.title or 'Untitled'}</b><br/>{desc}<br/><i>Source: {source}</i>"
+        title_text = f"<b>{asset.title or 'Untitled'}</b><br/>{desc}"
         _collect_appendix(asset.title or "Untitled", desc, appendix)
         title_cell = _safe_paragraph(title_text, STYLES["table_cell"])
 
         allocated_to = "—"
         if asset.allocated_to_id:
-            allocated_to = str(asset.allocated_to_id)
+            allocated_id = str(asset.allocated_to_id)
+            allocated_to = heir_name_by_id.get(
+                allocated_id,
+                _display_user_name(getattr(asset, "allocated_to", None), allocated_id),
+            )
         elif str(asset.id) in asset_to_heir:
-            allocated_to = asset_to_heir[str(asset.id)]
+            allocated_id = asset_to_heir[str(asset.id)]
+            allocated_to = heir_name_by_id.get(allocated_id, allocated_id)
 
         allocated_cell = Paragraph(allocated_to, STYLES["table_cell"])
 
@@ -960,7 +1119,11 @@ def _build_asset_allocation_grid(
             appraisal = f"Up to ${val_max:,.0f}"
         else:
             appraisal = "—"
-        appraisal_cell = Paragraph(appraisal, STYLES["table_cell"])
+        source_label = _valuation_source_label(asset.valuation_source)
+        appraisal_cell = _safe_paragraph(
+            f"<b>{appraisal}</b><br/><i>Source: {escape(source_label)}</i>",
+            STYLES["table_cell"],
+        )
 
         data.append([image_cell, title_cell, allocated_cell, appraisal_cell])
 
@@ -1003,7 +1166,14 @@ def _small_image_cell(asset: AssetModel):
 
 def _build_mnw_callout(mnw_product_value: float) -> Table:
     """Build a centered MNW product callout box per Spec §13.3 Item 5."""
-    text = f"Maximum Nash Welfare Product: {mnw_product_value:,.2f}"
+    if mnw_product_value > 0:
+        text = f"Maximum Nash Welfare Product: {mnw_product_value:,.2f}"
+    else:
+        text = (
+            "Maximum Nash Welfare Product: 0.00<br/>"
+            "<font size='9'>Review note: zero usually means no positive submitted points were available, "
+            "no eligible valued assets were allocated, or this was a one-participant/no-bid test.</font>"
+        )
     para = Paragraph(text, STYLES["heading"])
     table = Table([[para]], colWidths=[5.0 * inch])
     table.setStyle(TableStyle([
@@ -1044,6 +1214,126 @@ def _build_intervention_table(audit_logs: list[AuditLogModel]) -> Table:
         ])
 
     col_widths = [1.3 * inch, 1.5 * inch, 1.5 * inch, 2.7 * inch]
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(CREAM_BG)),
+        ("LINEBELOW", (0, 0), (-1, 0), 1, colors.HexColor(WARM_GREY)),
+        ("LINEBELOW", (0, 1), (-1, -1), 0.5, colors.HexColor(WARM_GREY)),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return table
+
+
+def _build_inventory_mods_table(audit_logs: list[AuditLogModel]) -> Table:
+    header = [
+        Paragraph("Timestamp", STYLES["table_header"]),
+        Paragraph("Asset", STYLES["table_header"]),
+        Paragraph("Change Details", STYLES["table_header"]),
+        Paragraph("Classification", STYLES["table_header"]),
+        Paragraph("Reason", STYLES["table_header"]),
+    ]
+    data = [header]
+
+    for al in audit_logs:
+        ts = (
+            al.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            if al.created_at
+            else "—"
+        )
+        snapshot = al.state_snapshot or {}
+        asset_title = str(snapshot.get("asset_title") or "Unnamed Asset")
+        evt = snapshot.get("event")
+        classification = str(snapshot.get("classification") or "MINOR")
+        reason = str(snapshot.get("reason") or "—")
+
+        # Format details
+        if evt == "ASSET_CREATED":
+            details = f"Asset staged in category: {snapshot.get('category', '—')}"
+        elif evt == "ASSET_DELETED":
+            details = "Asset deleted from inventory."
+        elif evt == "ASSET_UPDATED":
+            chg = snapshot.get("changes", {})
+            if "status" in chg and chg["status"].get("new") == "LIVE":
+                details = f"Asset published as LIVE (Valuation: ${chg.get('valuation_min', {}).get('new', 0)} – ${chg.get('valuation_max', {}).get('new', 0)})"
+            else:
+                field_changes = []
+                for k, v in chg.items():
+                    field_changes.append(f"{k}: '{v.get('old')}' -> '{v.get('new')}'")
+                details = "Modified: " + ", ".join(field_changes)
+        else:
+            details = f"Unknown event: {evt}"
+
+        data.append([
+            Paragraph(ts, STYLES["table_cell"]),
+            Paragraph(asset_title, STYLES["table_cell"]),
+            Paragraph(details, STYLES["table_cell"]),
+            Paragraph(classification, STYLES["table_cell"]),
+            Paragraph(reason, STYLES["table_cell"]),
+        ])
+
+    col_widths = [1.2 * inch, 1.3 * inch, 2.3 * inch, 1.0 * inch, 1.2 * inch]
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(CREAM_BG)),
+        ("LINEBELOW", (0, 0), (-1, 0), 1, colors.HexColor(WARM_GREY)),
+        ("LINEBELOW", (0, 1), (-1, -1), 0.5, colors.HexColor(WARM_GREY)),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return table
+
+
+def _build_communication_log_table(audit_logs: list[AuditLogModel]) -> Table:
+    header = [
+        Paragraph("Timestamp", STYLES["table_header"]),
+        Paragraph("Event", STYLES["table_header"]),
+        Paragraph("Heir", STYLES["table_header"]),
+        Paragraph("Record Summary", STYLES["table_header"]),
+    ]
+    data = [header]
+
+    event_labels = {
+        "SUPPORT_REQUEST_CREATED": "Request",
+        "SUPPORT_REPLY_SENT": "Executor Reply",
+        "SUPPORT_REQUEST_RESOLVED": "Resolved",
+    }
+
+    for al in audit_logs:
+        ts = (
+            al.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            if al.created_at
+            else "—"
+        )
+        snapshot = al.state_snapshot or {}
+        event = event_labels.get(al.event_type, al.event_type)
+        heir = str(snapshot.get("heir_username") or snapshot.get("heir_id") or "—")
+
+        if al.event_type == "SUPPORT_REQUEST_CREATED":
+            details = f"Request: {snapshot.get('message', '—')}"
+        elif al.event_type == "SUPPORT_REPLY_SENT":
+            details = (
+                f"Original: {snapshot.get('original_message', '—')}\n"
+                f"Reply: {snapshot.get('admin_response', '—')}"
+            )
+        elif al.event_type == "SUPPORT_REQUEST_RESOLVED":
+            details = (
+                f"Support request {snapshot.get('support_request_id', '—')} resolved "
+                f"by {snapshot.get('resolved_by_username', 'Executor')}"
+            )
+        else:
+            details = str(snapshot)
+
+        data.append([
+            Paragraph(ts, STYLES["table_cell"]),
+            Paragraph(event, STYLES["table_cell"]),
+            Paragraph(heir, STYLES["table_cell"]),
+            _safe_paragraph(escape(details).replace("\n", "<br/>"), STYLES["table_cell"]),
+        ])
+
+    col_widths = [1.3 * inch, 1.1 * inch, 1.3 * inch, 3.3 * inch]
     table = Table(data, colWidths=col_widths, repeatRows=1)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(CREAM_BG)),
@@ -1216,13 +1506,23 @@ def _build_mathematical_proof(
     elements.append(Paragraph(formula, STYLES["body"]))
     elements.append(Spacer(1, 0.15 * inch))
 
-    guarantee_text = (
-        f"The computed Maximum Nash Welfare Product for this session is "
-        f"<b>{solver_result.mnw_product_value:,.2f}</b>. No alternative "
-        "division of these assets yields a higher Nash product without "
-        "reducing the utility of at least one participant. This guarantee "
-        "holds under the standard MNW optimality criterion."
-    )
+    if solver_result.mnw_product_value > 0:
+        guarantee_text = (
+            f"The computed Maximum Nash Welfare Product for this session is "
+            f"<b>{solver_result.mnw_product_value:,.2f}</b>. No alternative "
+            "division of these assets yields a higher Nash product without "
+            "reducing the utility of at least one participant. This guarantee "
+            "holds under the standard MNW optimality criterion."
+        )
+    else:
+        guarantee_text = (
+            "The computed Maximum Nash Welfare Product for this session is "
+            "<b>0.00</b>. This does not necessarily indicate a software error: "
+            "it can occur in a one-participant systems test, when no positive "
+            "point valuations were submitted, or when a participating heir "
+            "receives no positively valued assets. For real multi-heir estates, "
+            "a zero product should be reviewed before relying on the ledger."
+        )
     elements.append(Paragraph(guarantee_text, STYLES["body"]))
 
     if solver_result.tie_breaker_events:

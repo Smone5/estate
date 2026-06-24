@@ -391,3 +391,32 @@ To maximize user experience across diverse screens, the React routing wrapper an
         *   *Right Pane (30% width)*: Allocated points details, unallocated counter, and individual sliders.
     *   Clicking an asset in the left pane updates the details card and filters comments in-place without triggering full-page routing reloads.
 
+---
+
+## 6. Admin Management Panels & Components
+
+To support the Executor/Admin role in setting up and directing the estate mediation session, the frontend implements four custom dashboard views:
+
+### 6.1 `AdminSetupChecklist`
+Guarantees the estate catalog is fully prepared before launching. Renders:
+*   **Infrastructure Health**: Verifies connection pool status, dynamic LLM provider keys, and SMTP server connectivity.
+*   **Estate Setup Steps**: Checks that at least two active heirs have been registered and at least five staged assets are published into the live catalog.
+*   **Status Indicators**: Green checkmarks for complete requirements and amber warnings with action links for pending configurations.
+
+### 6.2 `AdminSessionLifecycleControls`
+Orchestrates active mediation session states:
+*   **Launch Session**: Transitions the session status from `'SETUP'` to `'ACTIVE'`.
+*   **Grief Pause Control**: Toggles the `is_paused` flag, locking sliders and AI chats on the heir's client side during emotional halts.
+*   **Finalize / Lock Session**: Transitions the session status to `'LOCKED'` to calculate distribution matrices or `'FINALIZED'` to output documents.
+
+### 6.3 `AdminCommunicationsPanel`
+Facilitates Executor announcements and direct assistance:
+*   **Estate Announcements**: Publishes text updates visible at the top of heirs' screens.
+*   **Support Ticket Workspace**: Lists open help tickets, displays heir screenshot attachments, and allows Executors to type replies (`admin_response`), upload response attachments, and resolve tickets.
+
+### 6.4 `AdminFinalDocumentsPanel`
+Handles outputs and fiduciary accounting:
+*   **Probate Audit Ledger**: Fetches the encrypted JSON chain, verifies historical hashes, and triggers PDF rendering with page templates.
+*   **Keepsake Memory Books**: Triggers background tasks that generate custom keepsakes for each heir and emails them using the SMTP dispatch service.
+
+

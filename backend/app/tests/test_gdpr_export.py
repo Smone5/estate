@@ -210,7 +210,11 @@ class TestGdprExport:
         assert ticket_data["id"] == str(TICKET_ID)
         assert ticket_data["message"] == "Need help with export feature."
         assert ticket_data["status"] == "OPEN"
-        assert "created_at" not in ticket_data
+        assert "initiator_role" in ticket_data
+        assert "created_at" in ticket_data
+        assert "admin_response" in ticket_data
+        assert "responded_at" in ticket_data
+        assert "resolved_at" in ticket_data
 
     def test_export_rejects_non_heir(self, client):
         """Verify non-HEIR users get 403 Forbidden."""

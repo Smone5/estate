@@ -1,6 +1,7 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useSearchParams } from 'react-router-dom';
 import InvitePage from './routes/Invite';
+import HeirLoginPage from './routes/HeirLogin';
 import OptOutPage from './routes/OptOut';
 import DashboardGuard from './components/DashboardGuard';
 import IDScanner from './components/IDScanner';
@@ -8,10 +9,15 @@ import SemanticSearch from './components/SemanticSearch';
 import AdminDashboard from './routes/AdminDashboard';
 import FAQDrawer from './components/FAQDrawer';
 import HeirValuationPanel from './components/HeirValuationPanel';
+import { useWebSocket } from './hooks/useWebSocket';
 
-const PUBLIC_PATHS = ['/invite', '/opt-out'];
+const PUBLIC_PATHS = ['/invite', '/login', '/opt-out'];
 
 function DashboardPlaceholder() {
+  // Enable real-time WebSocket push for heir (support_reply, support_resolution,
+  // session_status, announcement_updated, inventory_updated)
+  useWebSocket();
+
   return (
     <DashboardGuard variant="heir">
       <IDScanner />
@@ -78,6 +84,7 @@ function AppShell() {
 
       <Routes>
         <Route path="/invite/:token" element={<InvitePage />} />
+        <Route path="/login" element={<HeirLoginPage />} />
         <Route path="/dashboard" element={<DashboardPlaceholder />} />
         <Route path="/admin" element={<AdminDashboard />} />
         <Route path="/opt-out" element={<OptOutPage />} />

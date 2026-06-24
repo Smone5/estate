@@ -8,6 +8,7 @@ export default function AdminInspectIDModal({ heir, onClose, onVerificationCompl
   const [error, setError] = useState(null);
 
   if (!heir) return null;
+  const idScanPreviewUrl = `/api/heirs/${heir.id}/id-scan`;
 
   async function handleApprove() {
     setApproving(true);
@@ -15,6 +16,7 @@ export default function AdminInspectIDModal({ heir, onClose, onVerificationCompl
     try {
       const res = await fetch(`/api/heirs/${heir.id}/verify-identity`, {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'approve' }),
       });
@@ -22,8 +24,19 @@ export default function AdminInspectIDModal({ heir, onClose, onVerificationCompl
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.detail || `Verification failed: ${res.status}`);
       }
-      if (onVerificationComplete) onVerificationComplete();
-      onClose();
+      const data = await res.json().catch(() => ({}));
+      if (onVerificationComplete) {
+        await onVerificationComplete(data.heir || {
+          ...heir,
+          status: 'ACTIVE',
+          user_status: 'ACTIVE',
+          identity_verified: true,
+          id_scan_uri: null,
+        });
+      }
+      // Defer closing so the parent's state update (heirOverrides + fetchHeirs)
+      // has a chance to flush to the DOM before selectedIdentityHeir is nulled.
+      setTimeout(() => onClose(), 0);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -42,15 +55,24 @@ export default function AdminInspectIDModal({ heir, onClose, onVerificationCompl
     try {
       const res = await fetch(`/api/heirs/${heir.id}/verify-identity`, {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'reject', reason: rejectionReason.trim() }),
+        body: JSON.stringify({ action: 'reject', rejection_reason: rejectionReason.trim() }),
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.detail || `Rejection failed: ${res.status}`);
       }
-      if (onVerificationComplete) onVerificationComplete();
-      onClose();
+      const data = await res.json().catch(() => ({}));
+      if (onVerificationComplete) {
+        await onVerificationComplete(data.heir || {
+          ...heir,
+          identity_verified: false,
+          id_scan_uri: null,
+        });
+      }
+      // Defer closing so the parent's state update has a chance to flush.
+      setTimeout(() => onClose(), 0);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -124,16 +146,26 @@ export default function AdminInspectIDModal({ heir, onClose, onVerificationCompl
               }}
             >
               {heir.id_scan_uri ? (
-                <img
-                  src={heir.id_scan_uri}
-                  alt="Government ID scan"
+                <object
+                  data={idScanPreviewUrl}
+                  aria-label="Government ID scan"
                   data-testid="id-scan-image"
                   style={{
-                    maxWidth: '100%',
-                    maxHeight: 400,
+                    width: '100%',
+                    minHeight: 400,
                     objectFit: 'contain',
                   }}
-                />
+                >
+                  <img
+                    src={idScanPreviewUrl}
+                    alt="Government ID scan"
+                    style={{
+                      maxWidth: '100%',
+                      maxHeight: 400,
+                      objectFit: 'contain',
+                    }}
+                  />
+                </object>
               ) : (
                 <p className="text-muted">No ID scan uploaded</p>
               )}

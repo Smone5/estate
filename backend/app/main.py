@@ -9,16 +9,21 @@ T10: Exposes core auth and onboarding endpoints with rate limiting.
 """
 
 import logging
+import io
 import os
+import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
+from typing import Optional, Annotated
 
-from fastapi import FastAPI, Depends, HTTPException, Response, Request, UploadFile, File, Form, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, Response, Request, UploadFile, File, Form, Query, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session as DBSession
 
-from .database import init_db, SessionLocal
+from . import database
+from .database import init_db
 from .rate_limiter import init_rate_limiting, limiter
 from .auth import (
     hash_password,
@@ -30,14 +35,13 @@ from .auth import (
     get_current_user,
     get_current_admin,
 )
-from .models import User, Session as SessionModel, Asset, Valuation, AuditLog, SupportRequest, CustomFAQ, ChatMessage
+from .models import User, Session as SessionModel, Asset, Valuation, AuditLog, SupportRequest, CustomFAQ, ChatMessage, AssetImage, Category
 from .websocket_manager import manager
 from .kokoro_tts import get_kokoro_tts, _KOKORO_AVAILABLE as TTS_AVAILABLE
 from .services.storage import get_storage_driver, preprocess_image
 from .services.llm_provider import get_provider, reset_provider
 from .services.smtp_service import send_email, send_email_background, Attachment
-from .solver import solve_mnw, SolverResult
-from .pdf_builder import build_keepsake_pdf, build_probate_ledger_pdf, build_waiver_receipt_pdf
+from .services.settings_service import get_settings_for_admin, update_settings, load_settings_into_env
 from .notice_log import build_notice_log
 
 logging.basicConfig(
@@ -45,6 +49,14 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Backward-compatible override hook for tests. Runtime uses database.SessionLocal
+# after init_db() initializes it; tests can patch app.main.SessionLocal.
+SessionLocal = None
+
+
+def _get_session_factory():
+    return SessionLocal or database.SessionLocal
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +103,7 @@ class InviteVerifyRequest(BaseModel):
     token: str
     consent_accepted: bool
     age_verified: bool
+    password: str | None = Field(None, min_length=8, max_length=128)
     legal_first_name: str = Field(..., min_length=1, max_length=50)
     legal_middle_name: str | None = None
     legal_last_name: str = Field(..., min_length=1, max_length=100)
@@ -107,10 +120,84 @@ class HeirProfileUpdate(BaseModel):
     email: str | None = Field(None, max_length=255)
     phone: str | None = Field(None, max_length=50)
     physical_address: str | None = Field(None, max_length=255)
+    address_line1: str | None = Field(None, max_length=255)
+    address_line2: str | None = Field(None, max_length=255)
+    address_city: str | None = Field(None, max_length=100)
+    address_region: str | None = Field(None, max_length=100)
+    address_postal_code: str | None = Field(None, max_length=40)
+    address_country: str | None = Field(None, max_length=100)
 
 
 class InviteLoginRequest(BaseModel):
     token: str
+
+
+class HeirLoginRequest(BaseModel):
+    identifier: str = Field(..., min_length=1, max_length=255)
+    password: str = Field(..., min_length=1, max_length=128)
+
+
+ADDRESS_FIELD_NAMES = (
+    "address_line1",
+    "address_line2",
+    "address_city",
+    "address_region",
+    "address_postal_code",
+    "address_country",
+)
+
+
+def _clean_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _structured_address_from_body(body: BaseModel) -> dict[str, str | None]:
+    return {
+        field_name: _clean_optional_text(getattr(body, field_name, None))
+        for field_name in ADDRESS_FIELD_NAMES
+    }
+
+
+def _compose_physical_address(
+    address: dict[str, str | None],
+    fallback: str | None = None,
+) -> str | None:
+    line1 = address.get("address_line1")
+    line2 = address.get("address_line2")
+    city = address.get("address_city")
+    region = address.get("address_region")
+    postal_code = address.get("address_postal_code")
+    country = address.get("address_country")
+
+    locality = ", ".join(part for part in (city, region) if part)
+    if postal_code:
+        locality = f"{locality} {postal_code}".strip()
+
+    parts = [line1, line2, locality or None, country]
+    composed = ", ".join(part for part in parts if part)
+    return composed or _clean_optional_text(fallback)
+
+
+def _address_response_fields(heir: User) -> dict[str, str | None]:
+    fields: dict[str, str | None] = {}
+    for field_name in ADDRESS_FIELD_NAMES:
+        value = getattr(heir, field_name, None)
+        fields[field_name] = value if isinstance(value, str) else None
+    return fields
+
+
+def _public_base_url(request: Request) -> str:
+    configured_url = (
+        os.environ.get("PUBLIC_BASE_URL")
+        or os.environ.get("APP_PUBLIC_URL")
+        or ""
+    ).strip()
+    if configured_url:
+        return configured_url.rstrip("/")
+    return str(request.base_url).rstrip("/")
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +206,7 @@ class InviteLoginRequest(BaseModel):
 
 def get_db() -> DBSession:
     """FastAPI dependency that yields a database session per request."""
-    db = SessionLocal()
+    db = _get_session_factory()()
     try:
         yield db
     finally:
@@ -145,7 +232,7 @@ async def _invite_expiration_task():
     while True:
         try:
             await asyncio.sleep(900)  # 15 minutes
-            db = SessionLocal()
+            db = _get_session_factory()()
             try:
                 now_utc = datetime.now(timezone.utc)
                 expired = (
@@ -177,11 +264,47 @@ async def _invite_expiration_task():
             break
 
 
+def cleanup_stuck_ocr_tasks():
+    """Find any assets with ocr_status == 'PROCESSING' on startup and reset them to 'FAILED'."""
+    db = _get_session_factory()()
+    try:
+        stuck_assets = db.query(Asset).filter(Asset.ocr_status == "PROCESSING").all()
+        for asset in stuck_assets:
+            asset.ocr_status = "FAILED"
+            import json as json_mod
+            try:
+                djson = json_mod.loads(asset.description_json) if asset.description_json else {}
+            except Exception:
+                djson = {}
+            djson["ocr_error"] = "Task interrupted by system restart."
+            asset.description_json = json_mod.dumps(djson)
+        if stuck_assets:
+            db.commit()
+            logger.info("Startup recovery: marked %d stuck OCR tasks as FAILED", len(stuck_assets))
+    except Exception:
+        db.rollback()
+        logger.exception("Startup recovery cleanup_stuck_ocr_tasks failed")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Perform startup database initialization with retry loop."""
     logger.info("Starting Estate Steward backend...")
     init_db()
+    try:
+        db = _get_session_factory()()
+        try:
+            load_settings_into_env(db)
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.exception("Failed to load admin-configured settings on startup: %s", exc)
+    try:
+        cleanup_stuck_ocr_tasks()
+    except Exception as exc:
+        logger.exception("Failed to clean up stuck OCR tasks on startup: %s", exc)
     task = asyncio.create_task(_invite_expiration_task())
     logger.info("Startup complete.")
     yield
@@ -253,6 +376,40 @@ async def auth_login(
 
     set_auth_cookie(response, token)
     return {"status": "authenticated", "role": "ADMIN"}
+
+
+@app.get("/api/auth/me")
+async def auth_me(
+    request: Request,
+    response: Response,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return the authenticated user payload and re-issue a fresh session cookie.
+
+    Every call extends the JWT session by 24 hours (sliding expiration),
+    so users who refresh the page or navigate never see an expired session.
+    """
+    token = create_access_token(
+        user_id=current_user["user_id"],
+        username=current_user["username"],
+        role=current_user["role"],
+        session_id=current_user.get("session_id"),
+    )
+    set_auth_cookie(response, token)
+    return {
+        "status": "authenticated",
+        "user_id": current_user.get("user_id"),
+        "username": current_user.get("username"),
+        "role": current_user.get("role"),
+        "session_id": current_user.get("session_id"),
+    }
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(response: Response):
+    """Clear the session cookie (logout)."""
+    clear_auth_cookie(response)
+    return {"status": "success", "message": "Logged out successfully"}
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +489,8 @@ async def invite_verify(
     user.age_verified = True
     user.consent_timestamp = now_utc
     user.invite_token_used = True
+    if body.password:
+        user.pw_hash = hash_password(body.password)
     user.status = "PROFILE_HOLD"
 
     db.commit()
@@ -386,6 +545,59 @@ async def get_invite_status(
         "legal_last_name": user.legal_last_name,
         "relationship_to_decedent": user.relationship_to_decedent,
         "date_of_birth": user.date_of_birth.isoformat() if user.date_of_birth else None,
+    }
+
+
+@app.post("/api/auth/heir-login")
+@limiter.limit("10/minute")
+async def heir_password_login(
+    request: Request,
+    body: HeirLoginRequest,
+    response: Response,
+    db: DBSession = Depends(get_db),
+):
+    """
+    Heir password login endpoint.
+
+    This allows already-onboarded heirs to return after the invitation link
+    expires. The invite remains the first-entry path; password login becomes
+    the long-term credential after onboarding.
+    """
+    identifier = body.identifier.strip().lower()
+    user = (
+        db.query(User)
+        .filter(
+            User.role == "HEIR",
+            or_(
+                func.lower(User.email) == identifier,
+                func.lower(User.username) == identifier,
+            ),
+        )
+        .first()
+    )
+
+    if (
+        not user
+        or not user.invite_token_used
+        or not user.pw_hash
+        or not verify_password(body.password, user.pw_hash)
+    ):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    jwt_token = create_access_token(
+        user_id=str(user.id),
+        username=user.username,
+        role="HEIR",
+        session_id=str(user.session_id) if user.session_id else None,
+    )
+
+    set_auth_cookie(response, jwt_token)
+    return {
+        "status": "success",
+        "role": "HEIR",
+        "session_id": str(user.session_id) if user.session_id else None,
+        "heir_id": str(user.id),
+        "user_status": user.status,
     }
 
 
@@ -456,6 +668,37 @@ class AnnouncementRequest(BaseModel):
     announcement: str | None = None
 
 
+class AdminSettingsUpdateRequest(BaseModel):
+    updates: dict[str, str]
+
+
+@app.get("/api/admin/settings")
+@limiter.limit("30/minute")
+async def admin_get_settings(
+    request: Request,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Return current LLM/SMTP/storage settings, grouped by section. Secrets are masked."""
+    return JSONResponse(content=get_settings_for_admin(db))
+
+
+@app.put("/api/admin/settings")
+@limiter.limit("30/minute")
+async def admin_update_settings(
+    request: Request,
+    body: AdminSettingsUpdateRequest,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Persist and immediately apply a partial set of LLM/SMTP/storage settings."""
+    try:
+        result = update_settings(db, body.updates, admin_user_id=current_admin.get("user_id"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse(content=result)
+
+
 # ---------------------------------------------------------------------------
 # T11 — Schema
 # ---------------------------------------------------------------------------
@@ -464,11 +707,31 @@ class AnnouncementRequest(BaseModel):
 class AssetPublishRequest(BaseModel):
     title: str = Field(..., max_length=150)
     description: str
-    category: str = Field(..., pattern=r"^(Jewelry|Furniture|Art|Other)$")
+    category: str = Field(..., max_length=100)
     valuation_min: float | None = None
     valuation_max: float | None = None
     valuation_source: str | None = None
     sentiment_tag: str | None = None
+    item_overview: str | None = None
+    specifications: str | None = None
+    condition_report: str | None = None
+    keywords: str | None = None
+    reason: str | None = None
+
+
+class AssetSaveRequest(BaseModel):
+    title: str | None = Field(None, max_length=150)
+    description: str | None = None
+    category: str | None = Field(None, max_length=100)
+    valuation_min: float | None = None
+    valuation_max: float | None = None
+    valuation_source: str | None = None
+    sentiment_tag: str | None = None
+    item_overview: str | None = None
+    specifications: str | None = None
+    condition_report: str | None = None
+    keywords: str | None = None
+    reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -736,11 +999,328 @@ async def session_announcement(
 # ---------------------------------------------------------------------------
 
 
+vision_semaphore = asyncio.Semaphore(2)
+
+
+async def _transcribe_audio_file(audio_uri: str) -> str:
+    """Helper to perform transcription on an audio file using OpenAI Whisper or local mock."""
+    try:
+        from .services.llm_provider import get_provider
+        provider = get_provider()
+        if provider.llm_provider == "openai" and provider._get_openai_client():
+            client = provider._get_openai_client()
+            storage = get_storage_driver()
+            audio_bytes = storage.get(audio_uri)
+            import io
+            audio_file = io.BytesIO(audio_bytes)
+            audio_file.name = "audio.wav"
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+            )
+            return transcript.text
+    except Exception as e:
+        logger.warning("Failed to transcribe audio via OpenAI: %s", e)
+
+    # Realistic default mock/fallback story for offline/Ollama setups:
+    return "A beautiful keepsake handed down through the family, kept in pristine condition."
+
+
+async def analyze_staged_asset_background(asset_id: str, session_id: str):
+    """
+    Background worker that runs LLM Vision on a staged asset, optionally transcribing audio.
+    Saves details and broadcasts the completion event via WebSocket.
+    """
+    import json as json_mod
+
+    db = _get_session_factory()()
+    try:
+        asset = db.query(Asset).filter(Asset.id == asset_id).first()
+        if not asset:
+            logger.warning("Background analysis failed: asset %s not found", asset_id)
+            return
+
+        # Ensure ocr_status is set to PROCESSING
+        asset.ocr_status = "PROCESSING"
+        db.commit()
+
+        # 1. Transcribe audio if present
+        transcript = None
+        if asset.audio_uri:
+            try:
+                transcript = await _transcribe_audio_file(asset.audio_uri)
+            except Exception as e:
+                logger.warning("Speech-to-text failed for asset %s: %s", asset_id, e)
+
+        # 2. Get image bytes for primary and secondary images
+        storage = get_storage_driver()
+        try:
+            image_bytes = storage.get(asset.image_uri)
+        except Exception as exc:
+            logger.exception("Could not read primary image for background analysis of %s", asset_id)
+            asset.ocr_status = "FAILED"
+            db.commit()
+            return
+
+        secondary_images = []
+        for img in sorted(asset.images, key=lambda x: (x.is_primary, x.created_at or datetime.min.replace(tzinfo=timezone.utc))):
+            if img.is_primary:
+                continue
+            try:
+                sec_bytes = storage.get(img.image_uri)
+                if sec_bytes:
+                    secondary_images.append(sec_bytes)
+            except Exception:
+                logger.warning("Could not read secondary image %s for asset %s", img.image_uri, asset_id)
+
+        # 3. Acquire vision semaphore
+        async with vision_semaphore:
+            prompt = (
+                "You are an expert appraiser and estate sale liquidator. Analyze the provided image(s) of this item "
+                "and generate a clean, highly accurate marketplace listing.\n\n"
+            )
+            if location:
+                prompt += f"This item was found in the [{location}] location of the estate.\n"
+            if transcript:
+                prompt += f"The owner provided this verbal story/provenance: \"{transcript}\"\n"
+
+            prompt += (
+                "\nRespond with a valid JSON object containing these fields:\n"
+                "  title: Catchy, searchable keyword title (include Brand/Maker, Material, Era if identifiable).\n"
+                "  item_overview: A 2-3 sentence accurate description of what the item is and its aesthetic style.\n"
+                "  specifications: Bullet points detailing estimated materials, color, dimensions (if scale cues exist), and noticeable hardware. Use '- ' prefix per line.\n"
+                "  condition_report: Explicitly state any visible wear, scratches, fading, blemishes, or damage. Be brutally honest for buyers.\n"
+                "  keywords: 5-8 relevant tags for search optimization, comma-separated (e.g. Mid-Century Modern, Vintage, Solid Oak).\n"
+                "  valuation_min: Estimated minimum secondary market value as a float/number (e.g. 50.0). Estimate realistically based on the item.\n"
+                "  valuation_max: Estimated maximum secondary market value as a float/number (e.g. 150.0). Estimate realistically based on the item.\n"
+                "  sentiment_tags: Comma-separated sentiment labels. Select 1-3 relevant tags from: Heirloom, Memento, Practical, Antique, Handmade, Documents.\n"
+                "  valuation_confidence: The confidence level of your appraisal. Select one: Low, Medium, High.\n\n"
+                "If the item is a handwritten document, letter, diary, or family heirloom, emphasize its historical and sentimental value over its financial worth. Pre-populate its sentiment tag as 'Heirloom' or 'Documents'.\n"
+                "If the item has no clear indicators of origin or brand, do not guess. Estimate the category average or leave the value as Null and flag review_required=true.\n\n"
+                "Do not use overly flowery language. Stick to descriptive facts that help a buyer buy.\n\n"
+                "JSON:"
+            )
+
+            try:
+                provider = get_provider()
+                res = provider.generate_vision(
+                    model_key="vision",
+                    image_bytes=image_bytes,
+                    prompt=prompt,
+                    images=secondary_images if secondary_images else None,
+                    max_tokens=2048,
+                )
+            except Exception as exc:
+                logger.exception("LLM vision generation failed in background task for asset %s", asset_id)
+                asset.ocr_status = "FAILED"
+                db.commit()
+                return
+
+        # 4. Parse JSON from response
+        try:
+            cleaned = res.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[-1] if "\n" in cleaned else cleaned
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3]
+                cleaned = cleaned.strip()
+                if cleaned.lower().startswith("json"):
+                    cleaned = cleaned[4:].strip()
+
+            parsed = json_mod.loads(cleaned)
+
+            if "specifications" in parsed and isinstance(parsed["specifications"], list):
+                parsed["specifications"] = "\n".join(parsed["specifications"])
+            if "keywords" in parsed and isinstance(parsed["keywords"], list):
+                parsed["keywords"] = ", ".join(parsed["keywords"])
+            if "sentiment_tags" in parsed and isinstance(parsed["sentiment_tags"], list):
+                parsed["sentiment_tags"] = ", ".join(parsed["sentiment_tags"])
+
+            title = parsed.get("title", "")
+            item_overview = parsed.get("item_overview", "")
+            specifications = parsed.get("specifications", "")
+            condition_report = parsed.get("condition_report", "")
+            keywords = parsed.get("keywords", "")
+            valuation_min = parsed.get("valuation_min")
+            if valuation_min is not None:
+                valuation_min = float(valuation_min)
+            valuation_max = parsed.get("valuation_max")
+            if valuation_max is not None:
+                valuation_max = float(valuation_max)
+            sentiment_tags = parsed.get("sentiment_tags", "")
+            valuation_confidence = parsed.get("valuation_confidence", "Medium")
+        except Exception:
+            # Fallback parsing
+            import re
+            def _extract(label, text):
+                m = re.search(rf'"{label}"\s*:\s*\[(.*?)\]', text, re.DOTALL)
+                if m:
+                    items = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
+                    if items:
+                        joiner = "\n" if label == "specifications" else ", "
+                        return joiner.join(items)
+                m = re.search(rf'"{label}"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+                return m.group(1) if m else ""
+            def _extract_float(label, text):
+                m = re.search(rf'"{label}"\s*:\s*(\d+(?:\.\d+)?)', text)
+                return float(m.group(1)) if m else None
+
+            title = _extract("title", res)
+            item_overview = _extract("item_overview", res)
+            specifications = _extract("specifications", res)
+            condition_report = _extract("condition_report", res)
+            keywords = _extract("keywords", res)
+            valuation_min = _extract_float("valuation_min", res)
+            valuation_max = _extract_float("valuation_max", res)
+            sentiment_tags = _extract("sentiment_tags", res)
+            valuation_confidence = _extract("valuation_confidence", res) or "Medium"
+
+        # 5. Apply to asset fields
+        asset.title = title or asset.title or "Staged Item"
+        asset.description = item_overview or asset.description
+        asset.valuation_min = valuation_min if valuation_min is not None else asset.valuation_min
+        asset.valuation_max = valuation_max if valuation_max is not None else asset.valuation_max
+        asset.valuation_source = "AI Valuation Range (Estimate)"
+        asset.sentiment_tag = sentiment_tags or asset.sentiment_tag
+
+        # Set review required flag if confidence is low, value is high (>500), or valuation_max is missing
+        review_required = False
+        if valuation_confidence.lower() == "low" or (valuation_max is not None and valuation_max > 500) or valuation_max is None:
+            review_required = True
+
+        djson = {
+            "item_overview": item_overview,
+            "specifications": specifications,
+            "condition_report": condition_report,
+            "keywords": keywords,
+            "review_required": review_required,
+            "valuation_confidence": valuation_confidence,
+        }
+        asset.description_json = json_mod.dumps(djson)
+        asset.ocr_status = "COMPLETED"
+
+        # 6. Compute embeddings
+        try:
+            text_to_embed = _build_asset_embedding_text(asset)
+            embedding = provider.get_embeddings("embedding", text_to_embed)
+            asset.embedding = embedding
+        except Exception:
+            logger.warning("Failed to compute embedding in background for asset %s", asset_id)
+
+        db.commit()
+        db.refresh(asset)
+
+        # 7. Broadcast completion frame
+        asset_data = {
+            "id": str(asset.id),
+            "session_id": str(asset.session_id),
+            "title": asset.title,
+            "description": asset.description,
+            "description_json": asset.description_json,
+            "category": asset.category,
+            "valuation_min": asset.valuation_min,
+            "valuation_max": asset.valuation_max,
+            "valuation_source": asset.valuation_source,
+            "sentiment_tag": asset.sentiment_tag,
+            "image_uri": asset.image_uri,
+            "audio_uri": asset.audio_uri,
+            "status": asset.status,
+            "ocr_status": asset.ocr_status,
+            "allocated_to_id": str(asset.allocated_to_id) if asset.allocated_to_id else None,
+            "images": [
+                {
+                    "id": str(img.id),
+                    "image_uri": img.image_uri,
+                    "is_primary": img.is_primary,
+                    "angle_label": img.angle_label,
+                }
+                for img in asset.images
+            ],
+        }
+        await manager.broadcast_asset_ocr_completed(session_id, asset_data)
+
+    except Exception:
+        db.rollback()
+        logger.exception("Error in background staged asset analysis")
+        try:
+            asset = db.query(Asset).filter(Asset.id == asset_id).first()
+            if asset:
+                asset.ocr_status = "FAILED"
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
+def _reset_session_submitted_heirs(db: DBSession, session_id: str):
+    """
+    If the session is ACTIVE, resets all submitted heirs back to ACTIVE state
+    so that they can adjust their allocations due to inventory changes.
+    """
+    submitted_heirs = (
+        db.query(User)
+        .filter(
+            User.session_id == session_id,
+            User.role == "HEIR",
+            User.is_submitted == True
+        )
+        .all()
+    )
+    for heir in submitted_heirs:
+        heir.is_submitted = False
+        heir.submitted_at = None
+        heir.status = "ACTIVE"
+
+
+def _log_asset_audit_event(
+    db: DBSession,
+    session_id: str,
+    event_type: str,
+    state_snapshot: dict
+) -> AuditLog:
+    """
+    Creates an AuditLog entry for asset modification events and computes
+    a correct SHA-256 hash using the autoincrement ID from PostgreSQL.
+    """
+    # 1. Fetch previous hash
+    prev_hash = "0" * 64
+    last_log = (
+        db.query(AuditLog)
+        .filter(AuditLog.session_id == session_id)
+        .order_by(AuditLog.id.desc())
+        .first()
+    )
+    if last_log:
+        prev_hash = last_log.sha256_hash
+
+    # 2. Add AuditLog entry with dummy hash
+    audit_entry = AuditLog(
+        session_id=session_id,
+        event_type=event_type,
+        state_snapshot=state_snapshot,
+        prev_hash=prev_hash,
+        sha256_hash="",
+    )
+    db.add(audit_entry)
+    db.flush()  # Populates audit_entry.id
+
+    # 3. Compute hash using computed row ID
+    snapshot_str = str(sorted(state_snapshot.items())) if isinstance(state_snapshot, dict) else str(state_snapshot)
+    raw_data = f"{audit_entry.id}:{event_type}:{snapshot_str}:{prev_hash}"
+    audit_entry.sha256_hash = hashlib.sha256(raw_data.encode("utf-8")).hexdigest()
+
+    return audit_entry
+
+
 @app.post("/api/sessions/{session_id}/assets/stage")
 @limiter.limit("30/minute")
 async def asset_stage(
     request: Request,
     session_id: str,
+    background_tasks: BackgroundTasks,
+    location: Optional[str] = None,
+    auto_appraise: bool = True,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
 ):
@@ -749,10 +1329,9 @@ async def asset_stage(
 
     Per Backend Spec §9.2 (POST /api/sessions/{session_id}/assets/stage):
     1. Preprocesses the image (HEIC conversion, WebP scaling) and saves it.
-    2. Creates an asset row with ocr_status='PROCESSING' and status='STAGED'.
-    3. Returns the asset ID for subsequent editing/publishing.
-
-    Returns 400 if session is not in SETUP status (inventory lock).
+    2. Creates an asset row with ocr_status='PROCESSING' or 'COMPLETED' and status='STAGED'.
+    3. Queues background AI appraisal if requested.
+    4. Returns the asset ID for subsequent editing/publishing.
     """
     import uuid as _uuid_mod
 
@@ -760,53 +1339,173 @@ async def asset_stage(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if session.status != "SETUP":
+    if session.status not in ("SETUP", "ACTIVE"):
         raise HTTPException(
             status_code=400,
-            detail="Assets can only be staged during the SETUP phase.",
+            detail="Assets can only be staged during the SETUP or ACTIVE phases.",
         )
 
     # Parse multipart upload
     form = await request.form()
-    file_upload = form.get("file")
-    if not file_upload:
-        raise HTTPException(status_code=400, detail="No file uploaded")
+    file_uploads = form.getlist("files")
+    if not file_uploads:
+        single_file = form.get("file")
+        if single_file:
+            file_uploads = [single_file]
 
-    raw_bytes = await file_upload.read()
+    if not file_uploads:
+        raise HTTPException(status_code=400, detail="No file(s) uploaded")
+
+    # Get parameters from form with query string fallback
+    asset_id_str = form.get("asset_id")
+    location_str = form.get("location") or location
+    angle_labels = []
+    angle_labels_raw = form.get("angle_labels")
+    if angle_labels_raw:
+        try:
+            parsed_labels = json.loads(str(angle_labels_raw))
+            if isinstance(parsed_labels, list):
+                angle_labels = [
+                    str(label).strip()[:50]
+                    for label in parsed_labels
+                    if str(label).strip()
+                ]
+        except Exception:
+            angle_labels = []
+
+    # Process auto_appraise from form
+    auto_appraise_val = auto_appraise
+    form_auto_appraise = form.get("auto_appraise")
+    if form_auto_appraise is not None:
+        auto_appraise_val = str(form_auto_appraise).lower() in ("true", "1", "yes")
+
+    if asset_id_str:
+        try:
+            asset_id_uuid = _uuid_mod.UUID(str(asset_id_str))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid asset_id UUID format")
+    else:
+        asset_id_uuid = _uuid_mod.uuid4()
+
+    # Idempotence Check
+    existing_asset = db.query(Asset).filter(Asset.id == asset_id_uuid).first()
+    if existing_asset:
+        return JSONResponse(
+            content={
+                "asset_id": str(existing_asset.id),
+                "status": existing_asset.status,
+                "ocr_status": existing_asset.ocr_status,
+            },
+            status_code=200,
+        )
+
+    # Preprocess and save first image as primary
+    first_file = file_uploads[0]
+    raw_bytes = await first_file.read()
     if not raw_bytes:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+        raise HTTPException(status_code=400, detail="First uploaded file is empty")
 
-    # Preprocess image (HEIC -> WebP, scale, compress)
     try:
         processed = preprocess_image(raw_bytes)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Save to storage
     storage = get_storage_driver()
-    asset_id = _uuid_mod.uuid4()
-    filename = f"static/uploads/{asset_id}.webp"
+    filename = f"static/uploads/{asset_id_uuid}.webp"
     storage.save(filename, processed)
+
+    # Parse and save optional audio file
+    audio_upload = form.get("audio") or form.get("audio_file")
+    audio_filename = None
+    if audio_upload:
+        audio_bytes = await audio_upload.read()
+        if audio_bytes:
+            content_type = audio_upload.content_type or ""
+            filename_orig = audio_upload.filename or ""
+            if "webm" in content_type.lower() or filename_orig.lower().endswith(".webm"):
+                ext = ".webm"
+            elif "mpeg" in content_type.lower() or "mp3" in content_type.lower() or filename_orig.lower().endswith(".mp3"):
+                ext = ".mp3"
+            elif "wav" in content_type.lower() or filename_orig.lower().endswith(".wav"):
+                ext = ".wav"
+            else:
+                ext = ".webm"
+
+            audio_filename = f"static/uploads/{_uuid_mod.uuid4()}{ext}"
+            storage.save(audio_filename, audio_bytes)
 
     # Create asset record
     asset = Asset(
-        id=asset_id,
+        id=asset_id_uuid,
         session_id=session_id,
         title=None,
         description=None,
-        category=None,
+        category=location_str,  # Store staging location context
         valuation_min=None,
         valuation_max=None,
         valuation_source=None,
         sentiment_tag=None,
         image_uri=filename,
-        audio_uri=None,
-        ocr_status="PROCESSING",
+        audio_uri=audio_filename,
+        ocr_status="PROCESSING" if auto_appraise_val else "COMPLETED",
         status="STAGED",
     )
     db.add(asset)
+
+    # Add primary AssetImage record
+    primary_image = AssetImage(
+        asset_id=asset_id_uuid,
+        image_uri=filename,
+        is_primary=True,
+        angle_label=angle_labels[0] if angle_labels else "Primary",
+    )
+    db.add(primary_image)
+
+    # Process secondary images if any
+    for idx, sec_file in enumerate(file_uploads[1:], start=2):
+        sec_bytes = await sec_file.read()
+        if not sec_bytes:
+            continue
+        try:
+            sec_processed = preprocess_image(sec_bytes)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Secondary image {idx} preprocessing error: {str(e)}",
+            )
+        sec_img_id = _uuid_mod.uuid4()
+        sec_filename = f"static/uploads/{sec_img_id}.webp"
+        storage.save(sec_filename, sec_processed)
+
+        sec_image = AssetImage(
+            asset_id=asset_id_uuid,
+            image_uri=sec_filename,
+            is_primary=False,
+            angle_label=angle_labels[idx - 1] if len(angle_labels) >= idx else f"View {idx}",
+        )
+        db.add(sec_image)
+
+    # Write ASSET_CREATED audit log
+    state_snapshot = {
+        "event": "ASSET_CREATED",
+        "asset_id": str(asset_id_uuid),
+        "status": "STAGED",
+        "category": location_str,
+        "notified": False,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    _log_asset_audit_event(db, session_id, "ASSET_CREATED", state_snapshot)
+
     db.commit()
     db.refresh(asset)
+
+    if auto_appraise_val:
+        background_tasks.add_task(
+            analyze_staged_asset_background,
+            asset_id=str(asset.id),
+            session_id=session_id,
+            location=location_str,
+        )
 
     return JSONResponse(
         content={
@@ -816,6 +1515,45 @@ async def asset_stage(
         },
         status_code=201,
     )
+
+
+def _build_asset_embedding_text(asset: Asset) -> str:
+    """
+    Construct a comprehensive text block representing all asset fields
+    so that the asset is fully indexed and searchable by RAG.
+    """
+    parts = []
+    if asset.title:
+        parts.append(f"Title: {asset.title}")
+    if asset.category:
+        parts.append(f"Category: {asset.category}")
+    if asset.description:
+        parts.append(f"Description: {asset.description}")
+    if asset.valuation_min is not None and asset.valuation_max is not None:
+        parts.append(f"Valuation: ${asset.valuation_min} to ${asset.valuation_max}")
+    if asset.valuation_source:
+        parts.append(f"Valuation Source: {asset.valuation_source}")
+    if asset.sentiment_tag:
+        parts.append(f"Tags: {asset.sentiment_tag}")
+
+    # Parse details from description_json if present
+    if asset.description_json:
+        try:
+            import json as json_mod
+            djson = json_mod.loads(asset.description_json)
+            if isinstance(djson, dict):
+                if djson.get("item_overview"):
+                    parts.append(f"Overview: {djson['item_overview']}")
+                if djson.get("specifications"):
+                    parts.append(f"Specifications: {djson['specifications']}")
+                if djson.get("condition_report"):
+                    parts.append(f"Condition: {djson['condition_report']}")
+                if djson.get("keywords"):
+                    parts.append(f"Keywords: {djson['keywords']}")
+        except Exception:
+            pass
+
+    return "\n".join(parts)
 
 
 @app.post("/api/assets/{asset_id}/publish")
@@ -854,16 +1592,29 @@ async def asset_publish(
             detail=f"Asset cannot be published — current status is '{asset.status}'.",
         )
 
-    # Check session status — only SETUP allows publishing
+    # Check session status — SETUP or ACTIVE allow publishing
     session = db.query(SessionModel).filter(SessionModel.id == asset.session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if session.status != "SETUP":
+    if session.status not in ("SETUP", "ACTIVE"):
         raise HTTPException(
             status_code=400,
-            detail="Assets can only be published during the SETUP phase.",
+            detail=f"Assets can only be published during the SETUP or ACTIVE phases. Current status: '{session.status}'.",
         )
+
+    # If session is ACTIVE, this is a Major change post-launch requiring a reason
+    is_major = session.status == "ACTIVE"
+    if is_major:
+        if not body.reason or not body.reason.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="A reason is required when publishing a new asset post-launch (during ACTIVE phase).",
+            )
+
+    # Concurrency control locking
+    session = db.query(SessionModel).filter(SessionModel.id == asset.session_id).with_for_update().first()
+    asset = db.query(Asset).filter(Asset.id == asset_id).with_for_update().first()
 
     # --- Asset Lifecycle Validation Gate (DB Spec §2.3) ---
     missing = []
@@ -896,15 +1647,27 @@ async def asset_publish(
     asset.valuation_source = body.valuation_source
     asset.sentiment_tag = body.sentiment_tag
 
+    # Keep description_json fields synchronized and save edits
+    import json as json_mod
+    try:
+        if asset.description_json:
+            djson = json_mod.loads(asset.description_json) if isinstance(asset.description_json, str) else asset.description_json
+        else:
+            djson = {}
+    except Exception:
+        djson = {}
+
+    djson["item_overview"] = body.description
+    djson["specifications"] = body.specifications if body.specifications is not None else djson.get("specifications", "")
+    djson["condition_report"] = body.condition_report if body.condition_report is not None else djson.get("condition_report", "")
+    djson["keywords"] = body.keywords if body.keywords is not None else djson.get("keywords", "")
+
+    asset.description_json = json_mod.dumps(djson)
+
     # Compute embedding
     try:
         provider = get_provider()
-        text_to_embed = (
-            f"Title: {asset.title}\n"
-            f"Category: {asset.category}\n"
-            f"Description: {asset.description}\n"
-            f"Tags: {asset.sentiment_tag}"
-        )
+        text_to_embed = _build_asset_embedding_text(asset)
         embedding = provider.get_embeddings("embedding", text_to_embed)
         asset.embedding = embedding
     except Exception:
@@ -941,6 +1704,28 @@ async def asset_publish(
             )
             db.add(valuation)
 
+    # Write ASSET_UPDATED (Publish) audit log entry
+    state_snapshot = {
+        "event": "ASSET_UPDATED",
+        "asset_id": str(asset.id),
+        "asset_title": asset.title,
+        "changes": {
+            "status": {"old": "STAGED", "new": "LIVE"},
+            "title": {"old": None, "new": asset.title},
+            "valuation_min": {"old": None, "new": asset.valuation_min},
+            "valuation_max": {"old": None, "new": asset.valuation_max},
+        },
+        "classification": "MAJOR" if is_major else "MINOR",
+        "reason": body.reason if is_major else None,
+        "notified": False,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    _log_asset_audit_event(db, str(session.id), "ASSET_UPDATED", state_snapshot)
+
+    # Reset submitted heirs if published during ACTIVE phase
+    if is_major:
+        _reset_session_submitted_heirs(db, str(session.id))
+
     db.commit()
 
     return JSONResponse(
@@ -950,6 +1735,642 @@ async def asset_publish(
         }
     )
 
+
+@app.post("/api/assets/{asset_id}/save")
+@limiter.limit("30/minute")
+async def save_asset(
+    request: Request,
+    asset_id: str,
+    body: AssetSaveRequest,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Save changes to an asset.
+    Supports editing LIVE assets when the session is ACTIVE.
+    Tracks all modifications and logs them to the AuditLog.
+    """
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    session = db.query(SessionModel).filter(SessionModel.id == asset.session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status not in ("SETUP", "ACTIVE"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Asset details cannot be modified when session is '{session.status}'.",
+        )
+
+    # Concurrency control locking
+    session = db.query(SessionModel).filter(SessionModel.id == asset.session_id).with_for_update().first()
+    asset = db.query(Asset).filter(Asset.id == asset_id).with_for_update().first()
+
+    # Delta detection
+    changes = {}
+    is_major = False
+
+    def check_diff(field_name, new_val, old_val, is_major_field=False):
+        nonlocal is_major
+        if new_val is not None and new_val != old_val:
+            changes[field_name] = {"old": old_val, "new": new_val}
+            if is_major_field:
+                is_major = True
+
+    check_diff("title", body.title, asset.title, is_major_field=True)
+    check_diff("description", body.description, asset.description, is_major_field=False)
+    check_diff("category", body.category, asset.category, is_major_field=False)
+    check_diff("valuation_min", body.valuation_min, asset.valuation_min, is_major_field=True)
+    check_diff("valuation_max", body.valuation_max, asset.valuation_max, is_major_field=True)
+    check_diff("valuation_source", body.valuation_source, asset.valuation_source, is_major_field=False)
+    check_diff("sentiment_tag", body.sentiment_tag, asset.sentiment_tag, is_major_field=False)
+
+    import json as json_mod
+    try:
+        djson = json_mod.loads(asset.description_json) if asset.description_json else {}
+    except Exception:
+        djson = {}
+
+    check_diff("specifications", body.specifications, djson.get("specifications"), is_major_field=False)
+    check_diff("condition_report", body.condition_report, djson.get("condition_report"), is_major_field=False)
+    check_diff("keywords", body.keywords, djson.get("keywords"), is_major_field=False)
+
+    # A change is Major only if the asset is LIVE and session status is ACTIVE
+    actual_is_major = is_major and (asset.status == "LIVE" and session.status == "ACTIVE")
+
+    if actual_is_major:
+        if not body.reason or not body.reason.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="A reason for the change is required for major asset edits post-launch.",
+            )
+
+    if changes:
+        # Update asset fields
+        if body.title is not None:
+            asset.title = body.title
+        if body.description is not None:
+            asset.description = body.description
+        if body.category is not None:
+            asset.category = body.category
+        if body.valuation_min is not None:
+            asset.valuation_min = body.valuation_min
+        if body.valuation_max is not None:
+            asset.valuation_max = body.valuation_max
+        if body.valuation_source is not None:
+            asset.valuation_source = body.valuation_source
+        if body.sentiment_tag is not None:
+            asset.sentiment_tag = body.sentiment_tag
+
+        djson["item_overview"] = asset.description
+        if body.specifications is not None:
+            djson["specifications"] = body.specifications
+        if body.condition_report is not None:
+            djson["condition_report"] = body.condition_report
+        if body.keywords is not None:
+            djson["keywords"] = body.keywords
+        asset.description_json = json_mod.dumps(djson)
+
+        # Compute embedding
+        try:
+            provider = get_provider()
+            text_to_embed = _build_asset_embedding_text(asset)
+            embedding = provider.get_embeddings("embedding", text_to_embed)
+            asset.embedding = embedding
+        except Exception:
+            logger.warning("Failed to compute embedding for asset %s", asset_id)
+
+        # Write ASSET_UPDATED audit log
+        state_snapshot = {
+            "event": "ASSET_UPDATED",
+            "asset_id": str(asset.id),
+            "asset_title": asset.title,
+            "changes": changes,
+            "classification": "MAJOR" if actual_is_major else "MINOR",
+            "reason": body.reason if actual_is_major else None,
+            "notified": False,
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        _log_asset_audit_event(db, str(session.id), "ASSET_UPDATED", state_snapshot)
+
+        # Reset heir submissions if major change in ACTIVE session
+        if actual_is_major:
+            _reset_session_submitted_heirs(db, str(session.id))
+
+        db.commit()
+
+    return JSONResponse(
+        content={
+            "asset_id": str(asset.id),
+            "status": asset.status,
+            "message": "Asset details saved successfully.",
+        }
+    )
+
+
+@app.post("/api/assets/{asset_id}/images")
+@limiter.limit("30/minute")
+async def add_asset_image(
+    request: Request,
+    asset_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Upload an additional image/angle for an existing asset.
+    """
+    import uuid as _uuid_mod
+
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    # Check session status — only SETUP allows modifications
+    session = db.query(SessionModel).filter(SessionModel.id == asset.session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status != "SETUP":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Asset images can only be modified during the SETUP phase. Current status is '{session.status}'.",
+        )
+
+    form = await request.form()
+    file_upload = form.get("file")
+    if not file_upload:
+        raise HTTPException(status_code=400, detail="No file uploaded")
+
+    angle_label = form.get("angle_label")
+    if angle_label and len(angle_label) > 50:
+        raise HTTPException(status_code=400, detail="Angle label must be 50 characters or less")
+
+    raw_bytes = await file_upload.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    try:
+        processed = preprocess_image(raw_bytes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    storage = get_storage_driver()
+    image_uuid = _uuid_mod.uuid4()
+    filename = f"static/uploads/{image_uuid}.webp"
+    storage.save(filename, processed)
+
+    asset_image = AssetImage(
+        id=image_uuid,
+        asset_id=asset.id,
+        image_uri=filename,
+        is_primary=False,
+        angle_label=angle_label or None,
+    )
+    db.add(asset_image)
+    db.commit()
+    db.refresh(asset_image)
+
+    return JSONResponse(
+        content={
+            "image_id": str(asset_image.id),
+            "image_uri": asset_image.image_uri,
+            "is_primary": asset_image.is_primary,
+            "angle_label": asset_image.angle_label,
+        },
+        status_code=201,
+    )
+
+
+@app.delete("/api/assets/{asset_id}/images/{image_id}")
+@limiter.limit("30/minute")
+async def delete_asset_image(
+    request: Request,
+    asset_id: str,
+    image_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Delete a secondary image/angle of an asset.
+    """
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    session = db.query(SessionModel).filter(SessionModel.id == asset.session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status != "SETUP":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Asset images can only be deleted during the SETUP phase. Current status is '{session.status}'.",
+        )
+
+    img = db.query(AssetImage).filter(AssetImage.id == image_id, AssetImage.asset_id == asset_id).first()
+    if not img:
+        raise HTTPException(status_code=404, detail="Image not found for this asset")
+
+    if img.is_primary:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete primary asset image directly. Deleting the entire asset is required to remove the primary image.",
+        )
+
+    # Delete file from storage
+    if img.image_uri:
+        try:
+            storage = get_storage_driver()
+            storage.delete(img.image_uri)
+        except Exception:
+            pass
+
+    db.delete(img)
+    db.commit()
+
+    return JSONResponse(
+        content={
+            "status": "success",
+            "message": "Asset image deleted successfully",
+        }
+    )
+
+
+@app.post("/api/assets/{asset_id}/images/{image_id}/replace")
+@app.put("/api/assets/{asset_id}/images/{image_id}")
+@limiter.limit("30/minute")
+async def replace_asset_image(
+    request: Request,
+    asset_id: str,
+    image_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Replace an existing asset image with edited image bytes.
+    """
+    import uuid as _uuid_mod
+
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    session = db.query(SessionModel).filter(SessionModel.id == asset.session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status != "SETUP":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Asset images can only be modified during the SETUP phase. Current status is '{session.status}'.",
+        )
+
+    img = None
+    if image_id == "primary":
+        img = (
+            db.query(AssetImage)
+            .filter(AssetImage.asset_id == asset_id, AssetImage.is_primary == True)  # noqa: E712
+            .first()
+        )
+    else:
+        img = db.query(AssetImage).filter(AssetImage.id == image_id, AssetImage.asset_id == asset_id).first()
+
+    if not img and image_id != "primary":
+        raise HTTPException(status_code=404, detail="Image not found for this asset")
+
+    form = await request.form()
+    file_upload = form.get("file")
+    if not file_upload:
+        raise HTTPException(status_code=400, detail="No file uploaded")
+
+    raw_bytes = await file_upload.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    try:
+        processed = preprocess_image(raw_bytes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    storage = get_storage_driver()
+    old_uri = img.image_uri if img else asset.image_uri
+    new_image_id = _uuid_mod.uuid4()
+    new_uri = f"static/uploads/{new_image_id}.webp"
+    storage.save(new_uri, processed)
+
+    if img:
+        img.image_uri = new_uri
+    else:
+        img = AssetImage(
+            id=new_image_id,
+            asset_id=asset.id,
+            image_uri=new_uri,
+            is_primary=True,
+            angle_label="Primary",
+        )
+        db.add(img)
+
+    if img.is_primary or image_id == "primary":
+        asset.image_uri = new_uri
+
+    db.commit()
+    db.refresh(img)
+
+    if old_uri and old_uri != new_uri:
+        try:
+            storage.delete(old_uri)
+        except Exception:
+            logger.warning("Failed to delete replaced asset image %s", old_uri)
+
+    return JSONResponse(
+        content={
+            "image_id": str(img.id),
+            "image_uri": img.image_uri,
+            "is_primary": img.is_primary,
+            "angle_label": img.angle_label,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Category Management
+# ---------------------------------------------------------------------------
+
+class CategoryCreateRequest(BaseModel):
+    name: str
+
+
+@app.get("/api/sessions/{session_id}/categories")
+@limiter.limit("60/minute")
+async def get_session_categories(
+    request: Request,
+    session_id: str,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Retrieve all categories for a session. Auto-seeds defaults for legacy sessions."""
+    categories = db.query(Category).filter(Category.session_id == session_id).all()
+    if not categories:
+        # Auto-seed default categories for backward compatibility
+        default_categories = ['Jewelry', 'Furniture', 'Art', 'Other']
+        for cat_name in default_categories:
+            db.add(Category(session_id=session_id, name=cat_name))
+        db.commit()
+        categories = db.query(Category).filter(Category.session_id == session_id).all()
+    return JSONResponse(content=[c.name for c in categories])
+
+
+@app.post("/api/sessions/{session_id}/categories")
+@limiter.limit("30/minute")
+async def create_session_category(
+    request: Request,
+    session_id: str,
+    body: CategoryCreateRequest,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Create a new custom category for a session."""
+    name_stripped = body.name.strip()
+    if not name_stripped:
+        raise HTTPException(status_code=400, detail="Category name cannot be empty")
+
+    # Check if category already exists
+    existing = db.query(Category).filter(
+        Category.session_id == session_id,
+        Category.name == name_stripped,
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Category already exists")
+
+    new_cat = Category(session_id=session_id, name=name_stripped)
+    db.add(new_cat)
+    db.commit()
+    return JSONResponse(content={"status": "success", "category": name_stripped}, status_code=201)
+
+
+@app.delete("/api/sessions/{session_id}/categories/{name}")
+@limiter.limit("30/minute")
+async def delete_session_category(
+    request: Request,
+    session_id: str,
+    name: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Delete a custom category. Fails if any assets in the session use it."""
+    # Check if assets are using this category
+    asset_count = db.query(Asset).filter(
+        Asset.session_id == session_id,
+        Asset.category == name,
+    ).count()
+    if asset_count > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete category '{name}' because it is in use by {asset_count} asset(s). Reassign them first."
+        )
+
+    cat = db.query(Category).filter(
+        Category.session_id == session_id,
+        Category.name == name,
+    ).first()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Category not found")
+
+    db.delete(cat)
+    db.commit()
+    return JSONResponse(content={"status": "success", "message": f"Category '{name}' deleted."})
+
+
+# ---------------------------------------------------------------------------
+# AI Detail Generation (Pydantic model for structured parsing)
+# ---------------------------------------------------------------------------
+
+from pydantic import BaseModel as PydanticBaseModel_
+
+
+class AssetListingResponse(PydanticBaseModel_):
+    title: str = ""
+    item_overview: str = ""
+    specifications: str = ""
+    condition_report: str = ""
+    keywords: str = ""
+    valuation_min: float | None = None
+    valuation_max: float | None = None
+    sentiment_tags: str = ""
+
+
+# ---------------------------------------------------------------------------
+# AI Detail Generation
+# ---------------------------------------------------------------------------
+
+@app.post("/api/assets/{asset_id}/generate-details")
+@limiter.limit("5/minute")
+async def generate_asset_details(
+    request: Request,
+    asset_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Generate a structured marketplace listing for an asset using LLM Vision.
+    Uses the asset's primary image plus any secondary images for multi-angle analysis.
+    Saves results to asset.title and asset.description_json.
+    """
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    # Get primary image bytes
+    storage = get_storage_driver()
+    try:
+        image_bytes = storage.get(asset.image_uri)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not read primary image from storage: {exc}",
+        )
+
+    # Collect secondary image bytes for multi-image analysis
+    secondary_images = []
+    for img in sorted(asset.images, key=lambda x: (x.is_primary, x.created_at or datetime.min.replace(tzinfo=timezone.utc))):
+        if img.is_primary:
+            continue
+        try:
+            sec_bytes = storage.get(img.image_uri)
+            if sec_bytes:
+                secondary_images.append(sec_bytes)
+        except Exception:
+            logger.warning("Could not read secondary image %s for asset %s", img.image_uri, asset_id)
+
+    prompt = (
+        "You are an expert appraiser and estate sale liquidator. Analyze the provided image(s) of this item "
+        "and generate a clean, highly accurate marketplace listing.\n\n"
+        "Respond with a valid JSON object containing these fields:\n"
+        "  title: Catchy, searchable keyword title (include Brand/Maker, Material, Era if identifiable).\n"
+        "  item_overview: A 2-3 sentence accurate description of what the item is and its aesthetic style.\n"
+        "  specifications: Bullet points detailing estimated materials, color, dimensions (if scale cues exist), and noticeable hardware. Use '- ' prefix per line.\n"
+        "  condition_report: Explicitly state any visible wear, scratches, fading, blemishes, or damage. Be brutally honest for buyers.\n"
+        "  keywords: 5-8 relevant tags for search optimization, comma-separated (e.g. Mid-Century Modern, Vintage, Solid Oak).\n"
+        "  valuation_min: Estimated minimum secondary market value as a float/number (e.g. 50.0). Estimate realistically based on the item.\n"
+        "  valuation_max: Estimated maximum secondary market value as a float/number (e.g. 150.0). Estimate realistically based on the item.\n"
+        "  sentiment_tags: Comma-separated sentiment labels. Select 1-3 relevant tags from: Heirloom, Memento, Practical, Antique, Handmade, Documents.\n\n"
+        "Do not use overly flowery language. Stick to descriptive facts that help a buyer buy.\n\n"
+        "JSON:"
+    )
+
+    # Use LLM Provider's vision capability with multi-image support
+    try:
+        provider = get_provider()
+        res = provider.generate_vision(
+            model_key="vision",
+            image_bytes=image_bytes,
+            prompt=prompt,
+            images=secondary_images if secondary_images else None,
+            max_tokens=2048,
+        )
+    except Exception as exc:
+        logger.exception("LLM vision generation failed for asset %s", asset_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"LLM vision generation failed: {exc}",
+        )
+
+    # Parse JSON from response
+    import json as json_mod
+    try:
+        # Strip any markdown code fences
+        cleaned = res.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[-1] if "\n" in cleaned else cleaned
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:].strip()
+
+        parsed = json_mod.loads(cleaned)
+
+        # Coerce list fields to string to prevent Pydantic ValidationError
+        if "specifications" in parsed and isinstance(parsed["specifications"], list):
+            parsed["specifications"] = "\n".join(parsed["specifications"])
+        if "keywords" in parsed and isinstance(parsed["keywords"], list):
+            parsed["keywords"] = ", ".join(parsed["keywords"])
+        if "sentiment_tags" in parsed and isinstance(parsed["sentiment_tags"], list):
+            parsed["sentiment_tags"] = ", ".join(parsed["sentiment_tags"])
+
+        listing = AssetListingResponse(**parsed)
+    except Exception:
+        # Fallback: try regex extraction of fields
+        import re
+        def _extract(label, text):
+            # Try bracketed list first
+            m = re.search(rf'"{label}"\s*:\s*\[(.*?)\]', text, re.DOTALL)
+            if m:
+                items = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
+                if items:
+                    joiner = "\n" if label == "specifications" else ", "
+                    return joiner.join(items)
+            m = re.search(rf'"{label}"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+            return m.group(1) if m else ""
+        def _extract_float(label, text):
+            m = re.search(rf'"{label}"\s*:\s*(\d+(?:\.\d+)?)', text)
+            return float(m.group(1)) if m else None
+        listing = AssetListingResponse(
+            title=_extract("title", res),
+            item_overview=_extract("item_overview", res),
+            specifications=_extract("specifications", res),
+            condition_report=_extract("condition_report", res),
+            keywords=_extract("keywords", res),
+            valuation_min=_extract_float("valuation_min", res),
+            valuation_max=_extract_float("valuation_max", res),
+            sentiment_tags=_extract("sentiment_tags", res),
+        )
+
+    # Save to asset fields
+    asset.title = listing.title or asset.title
+    asset.description = listing.item_overview or asset.description
+    asset.valuation_min = listing.valuation_min if listing.valuation_min is not None else asset.valuation_min
+    asset.valuation_max = listing.valuation_max if listing.valuation_max is not None else asset.valuation_max
+    asset.valuation_source = "AI Appraisal"
+    asset.sentiment_tag = listing.sentiment_tags or asset.sentiment_tag
+    asset.description_json = json_mod.dumps({
+        "item_overview": listing.item_overview,
+        "specifications": listing.specifications,
+        "condition_report": listing.condition_report,
+        "keywords": listing.keywords,
+    })
+
+    # Compute embedding for staged asset (RAG readiness)
+    try:
+        provider = get_provider()
+        text_to_embed = _build_asset_embedding_text(asset)
+        embedding = provider.get_embeddings("embedding", text_to_embed)
+        asset.embedding = embedding
+    except Exception:
+        logger.warning("Failed to compute embedding for asset %s", asset_id)
+
+    db.commit()
+
+    return JSONResponse(
+        content={
+            "title": listing.title or "Suggested Keepsake",
+            "item_overview": listing.item_overview or "",
+            "specifications": listing.specifications or "",
+            "condition_report": listing.condition_report or "",
+            "keywords": listing.keywords or "",
+            "valuation_min": listing.valuation_min,
+            "valuation_max": listing.valuation_max,
+            "valuation_source": "AI Appraisal",
+            "sentiment_tags": listing.sentiment_tags or "",
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Session Assets
+# ---------------------------------------------------------------------------
 
 @app.get("/api/sessions/{session_id}/assets")
 @limiter.limit("60/minute")
@@ -976,9 +2397,13 @@ async def session_assets(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    allowed_statuses = ["LIVE", "PRE_ALLOCATED", "DISTRIBUTED"]
+    if current_user.get("role") == "ADMIN":
+        allowed_statuses.append("STAGED")
+
     query = db.query(Asset).filter(
         Asset.session_id == session_id,
-        Asset.status.in_(["LIVE", "PRE_ALLOCATED", "DISTRIBUTED"]),
+        Asset.status.in_(allowed_statuses),
     )
 
     # Category filter
@@ -1015,32 +2440,186 @@ async def session_assets(
                 query = query.filter(Asset.status == "PRE_ALLOCATED")
 
     # Text search
+    assets_data = []
     if q:
-        search_term = f"%{q}%"
-        query = query.filter(
-            (Asset.title.ilike(search_term)) | (Asset.description.ilike(search_term))
-        )
+        try:
+            provider = get_provider()
+            query_vector = provider.get_embeddings("embedding", q)
+        except Exception as exc:
+            logger.warning("RAG embedding call failed, falling back to ILIKE: %s", exc)
+            query_vector = None
 
-    # Sorting
-    if sort_by == "title":
-        query = query.order_by(
-            Asset.title.asc() if sort_order != "desc" else Asset.title.desc()
-        )
-    elif sort_by == "category":
-        query = query.order_by(
-            Asset.category.asc() if sort_order != "desc" else Asset.category.desc()
-        )
+        if query_vector is not None:
+            # cosine distance is 0 to 2. Similarity = 1.0 - distance
+            similarity_expr = 1.0 - Asset.embedding.cosine_distance(query_vector)
+
+            # Run similarity on a clean Asset-only query (never on a pre-joined
+            # query) to avoid SQLAlchemy compound Row objects that break
+            # attribute access.  Collect id → similarity, then fetch full
+            # assets through the existing filtered query.
+            sim_query = (
+                db.query(Asset.id, similarity_expr.label("similarity"))
+                .filter(
+                    Asset.session_id == session_id,
+                    Asset.status.in_(allowed_statuses),
+                    Asset.embedding.isnot(None),
+                )
+            )
+            sim_results = sim_query.all()
+            id_to_sim: dict[str, float] = {}
+            for row in sim_results:
+                asset_uuid = str(row[0])
+                sim_val = float(row[1]) if row[1] is not None else 0.0
+                id_to_sim[asset_uuid] = max(0.0, min(1.0, sim_val))
+
+            if id_to_sim:
+                # Fetch full Asset objects via the existing query, but without
+                # add_columns so `.images` relationships are intact.
+                matched_ids = list(id_to_sim.keys())
+                base = db.query(Asset).filter(Asset.id.in_(matched_ids))
+                if sort_by == "title":
+                    base = base.order_by(
+                        Asset.title.asc() if sort_order != "desc" else Asset.title.desc()
+                    )
+                elif sort_by == "category":
+                    base = base.order_by(
+                        Asset.category.asc() if sort_order != "desc" else Asset.category.desc()
+                    )
+                else:
+                    base = base.order_by(Asset.id.desc())
+
+                for a in base.all():
+                    sim_score = id_to_sim[str(a.id)]
+                    asset_dict = {
+                        "id": str(a.id),
+                        "session_id": str(a.session_id),
+                        "title": a.title,
+                        "description": a.description,
+                        "description_json": a.description_json,
+                        "category": a.category,
+                        "valuation_min": a.valuation_min,
+                        "valuation_max": a.valuation_max,
+                        "valuation_source": a.valuation_source,
+                        "sentiment_tag": a.sentiment_tag,
+                        "image_uri": a.image_uri,
+                        "audio_uri": a.audio_uri,
+                        "status": a.status,
+                        "ocr_status": a.ocr_status,
+                        "allocated_to_id": str(a.allocated_to_id) if a.allocated_to_id else None,
+                        "images": [
+                            {
+                                "id": str(img.id),
+                                "image_uri": img.image_uri,
+                                "is_primary": img.is_primary,
+                                "angle_label": img.angle_label,
+                            }
+                            for img in a.images
+                        ],
+                    }
+                    asset_dict["_similarity"] = sim_score
+                    assets_data.append(asset_dict)
+
+                # Sort by similarity after the fact (preserves default order
+                # when sort_by is title/category).
+                if not sort_by:
+                    assets_data.sort(key=lambda d: d.get("_similarity", 0.0), reverse=True)
+        else:
+            # ILIKE fallback — rebuild base query to avoid corruption from prior mutations
+            fallback = db.query(Asset).filter(
+                Asset.session_id == session_id,
+                Asset.status.in_(allowed_statuses),
+            )
+            if category:
+                categories = [c.strip() for c in category.split(",") if c.strip()]
+                if categories:
+                    fallback = fallback.filter(Asset.category.in_(categories))
+            if has_audio is True:
+                fallback = fallback.filter(Asset.audio_uri.isnot(None))
+            elif has_audio is False:
+                fallback = fallback.filter(Asset.audio_uri.is_(None))
+            if allocation_status and current_user.get("role") == "HEIR":
+                heir_id = current_user.get("user_id")
+                if heir_id:
+                    if allocation_status == "allocated":
+                        fallback = (
+                            fallback.join(Valuation, Asset.id == Valuation.asset_id)
+                            .filter(Valuation.heir_id == heir_id)
+                            .filter(Valuation.points > 0)
+                        )
+                    elif allocation_status == "unallocated":
+                        subq = (
+                            db.query(Valuation.asset_id)
+                            .filter(Valuation.heir_id == heir_id)
+                            .filter(Valuation.points > 0)
+                            .subquery()
+                        )
+                        fallback = fallback.filter(Asset.id.notin_(subq))
+                    elif allocation_status == "pre_allocated":
+                        fallback = fallback.filter(Asset.status == "PRE_ALLOCATED")
+
+            search_term = f"%{q}%"
+            fallback = fallback.filter(
+                (Asset.title.ilike(search_term)) | (Asset.description.ilike(search_term))
+            )
+            if sort_by == "title":
+                fallback = fallback.order_by(
+                    Asset.title.asc() if sort_order != "desc" else Asset.title.desc()
+                )
+            elif sort_by == "category":
+                fallback = fallback.order_by(
+                    Asset.category.asc() if sort_order != "desc" else Asset.category.desc()
+                )
+            else:
+                fallback = fallback.order_by(Asset.id.desc())
+
+            assets = fallback.all()
+            for a in assets:
+                assets_data.append({
+                    "id": str(a.id),
+                    "session_id": str(a.session_id),
+                    "title": a.title,
+                    "description": a.description,
+                    "description_json": a.description_json,
+                    "category": a.category,
+                    "valuation_min": a.valuation_min,
+                    "valuation_max": a.valuation_max,
+                    "valuation_source": a.valuation_source,
+                    "sentiment_tag": a.sentiment_tag,
+                    "image_uri": a.image_uri,
+                    "audio_uri": a.audio_uri,
+                    "status": a.status,
+                    "ocr_status": a.ocr_status,
+                    "allocated_to_id": str(a.allocated_to_id) if a.allocated_to_id else None,
+                    "images": [
+                        {
+                            "id": str(img.id),
+                            "image_uri": img.image_uri,
+                            "is_primary": img.is_primary,
+                            "angle_label": img.angle_label,
+                        }
+                        for img in a.images
+                    ],
+                })
     else:
-        query = query.order_by(Asset.id.desc())
+        if sort_by == "title":
+            query = query.order_by(
+                Asset.title.asc() if sort_order != "desc" else Asset.title.desc()
+            )
+        elif sort_by == "category":
+            query = query.order_by(
+                Asset.category.asc() if sort_order != "desc" else Asset.category.desc()
+            )
+        else:
+            query = query.order_by(Asset.id.desc())
 
-    assets = query.all()
-    return JSONResponse(
-        content=[
-            {
+        assets = query.all()
+        for a in assets:
+            assets_data.append({
                 "id": str(a.id),
                 "session_id": str(a.session_id),
                 "title": a.title,
                 "description": a.description,
+                "description_json": a.description_json,
                 "category": a.category,
                 "valuation_min": a.valuation_min,
                 "valuation_max": a.valuation_max,
@@ -1051,10 +2630,19 @@ async def session_assets(
                 "status": a.status,
                 "ocr_status": a.ocr_status,
                 "allocated_to_id": str(a.allocated_to_id) if a.allocated_to_id else None,
-            }
-            for a in assets
-        ]
-    )
+                "images": [
+                    {
+                        "id": str(img.id),
+                        "image_uri": img.image_uri,
+                        "is_primary": img.is_primary,
+                        "angle_label": img.angle_label,
+                    }
+                    for img in a.images
+                ],
+            })
+
+    return JSONResponse(content=assets_data)
+
 
 
 # ---------------------------------------------------------------------------
@@ -1064,6 +2652,15 @@ async def session_assets(
 
 class SupportRequestCreate(BaseModel):
     message: str = Field(..., min_length=5, max_length=1000)
+
+
+class SupportRequestReply(BaseModel):
+    response: str = Field(..., min_length=2, max_length=2000)
+
+
+class SupportDirectMessageCreate(BaseModel):
+    heir_id: str = Field(..., min_length=1)
+    message: str = Field(..., min_length=2, max_length=2000)
 
 
 # ---------------------------------------------------------------------------
@@ -1083,14 +2680,20 @@ class FAQCreate(BaseModel):
 
 class HeirCreateRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=100)
-    legal_first_name: str = Field(..., min_length=1, max_length=50)
+    legal_first_name: str | None = Field(None, min_length=1, max_length=50)
     legal_middle_name: str | None = None
-    legal_last_name: str = Field(..., min_length=1, max_length=100)
+    legal_last_name: str | None = Field(None, min_length=1, max_length=100)
     relationship_to_decedent: str | None = None
     date_of_birth: str | None = None
     email: str | None = None
     phone: str | None = None
     physical_address: str | None = None
+    address_line1: str | None = Field(None, max_length=255)
+    address_line2: str | None = Field(None, max_length=255)
+    address_city: str | None = Field(None, max_length=100)
+    address_region: str | None = Field(None, max_length=100)
+    address_postal_code: str | None = Field(None, max_length=40)
+    address_country: str | None = Field(None, max_length=100)
     expiration_days: int | None = 14
 
 
@@ -1123,6 +2726,7 @@ def _heir_to_response(heir: User) -> dict:
         "email": heir.email,
         "phone": heir.phone,
         "physical_address": heir.physical_address,
+        **_address_response_fields(heir),
         "invite_token": str(heir.invite_token) if heir.invite_token else None,
         "invite_token_expires_at": (
             heir.invite_token_expires_at.isoformat()
@@ -1141,6 +2745,7 @@ def _heir_to_response(heir: User) -> dict:
         ),
         "draft_version": heir.draft_version,
         "status": heir.status,
+        "user_status": heir.status,
         "created_at": heir.created_at.isoformat() if heir.created_at else None,
         "invitation_dispatched_at": (
             heir.invitation_dispatched_at.isoformat()
@@ -1220,17 +2825,28 @@ async def create_heir(
                 detail="Invalid date_of_birth format. Use YYYY-MM-DD.",
             )
 
+    structured_address = _structured_address_from_body(body)
+    display_name_parts = body.username.strip().split()
+    legal_first_name = body.legal_first_name or display_name_parts[0]
+    legal_last_name = body.legal_last_name or (
+        " ".join(display_name_parts[1:]) if len(display_name_parts) > 1 else "Pending"
+    )
+
     heir = User(
         session_id=session_id,
         username=body.username,
-        legal_first_name=body.legal_first_name,
+        legal_first_name=legal_first_name,
         legal_middle_name=body.legal_middle_name,
-        legal_last_name=body.legal_last_name,
+        legal_last_name=legal_last_name,
         relationship_to_decedent=body.relationship_to_decedent,
         date_of_birth=dob,
         email=body.email,
         phone=body.phone,
-        physical_address=body.physical_address,
+        physical_address=_compose_physical_address(
+            structured_address,
+            fallback=body.physical_address,
+        ),
+        **structured_address,
         role="HEIR",
         invite_token=invite_token,
         invite_token_expires_at=invite_expires,
@@ -1244,11 +2860,13 @@ async def create_heir(
     db.refresh(heir)
 
     # Build invite URL
-    base_url = str(request.base_url).rstrip("/")
+    base_url = _public_base_url(request)
     invite_url = f"{base_url}/invite/{invite_token}"
 
     return JSONResponse(
         content={
+            "id": str(heir.id),
+            "heir_id": str(heir.id),
             "invite_token": str(invite_token),
             "invite_url": invite_url,
             "username": heir.username,
@@ -1297,7 +2915,7 @@ async def renew_invite_token(
     heir.invite_token_used = False
     db.commit()
 
-    base_url = str(request.base_url).rstrip("/")
+    base_url = _public_base_url(request)
     invite_url = f"{base_url}/invite/{new_token}"
 
     return JSONResponse(
@@ -1342,7 +2960,7 @@ async def send_invite(
             detail="Cannot send invitations for a locked or finalized session.",
         )
 
-    base_url = str(request.base_url).rstrip("/")
+    base_url = _public_base_url(request)
     invite_url = (
         f"{base_url}/invite/{heir.invite_token}" if heir.invite_token else base_url
     )
@@ -1359,7 +2977,7 @@ async def send_invite(
         f"The Estate Steward"
     )
 
-    await send_email_background(
+    email_sent = await send_email_background(
         to=heir.email,
         subject=subject,
         body=body,
@@ -1368,6 +2986,11 @@ async def send_invite(
             f"(heir {heir.username}) failed to deliver."
         ),
     )
+    if not email_sent:
+        raise HTTPException(
+            status_code=502,
+            detail="Invitation email could not be delivered to the configured SMTP service.",
+        )
 
     # Mark as dispatched
     now_utc = datetime.now(timezone.utc)
@@ -1478,6 +3101,7 @@ async def delete_heir(
         heir.email,
         heir.phone,
         heir.physical_address,
+        *_address_response_fields(heir).values(),
     ]
     pii_values = [v for v in pii_values if v]
 
@@ -1528,16 +3152,14 @@ async def delete_heir(
 async def delete_asset(
     request: Request,
     asset_id: str,
+    reason: Optional[str] = None,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
 ):
     """
     Permanently delete an asset and its associated files.
-
-    Per Backend Spec §9.2 (DELETE /api/assets/{asset_id}):
-    Deletes the asset record, removes the associated image file from
-    storage, and cascade-deletes all linked valuation rows.
-    Returns 400 if the session status is ACTIVE, LOCKED, or FINALIZED.
+    Allows deleting assets when the session status is SETUP or ACTIVE.
+    Requires a reason for major deletions (LIVE assets or ACTIVE sessions).
     """
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
@@ -1549,25 +3171,61 @@ async def delete_asset(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if session.status in ("ACTIVE", "LOCKED", "FINALIZED"):
+    if session.status in ("LOCKED", "FINALIZED"):
         raise HTTPException(
             status_code=400,
-            detail=f"Assets can only be deleted during the SETUP phase. "
-            f"Current session status is '{session.status}'.",
+            detail=f"Assets cannot be deleted when session status is '{session.status}'.",
         )
 
-    # Remove image file from storage
-    if asset.image_uri:
+    # Classify as Major if asset is published or session is already active
+    is_major = (asset.status == "LIVE") or (session.status == "ACTIVE")
+    if is_major:
+        if not reason or not reason.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="A reason is required when deleting an asset post-launch or after publishing.",
+            )
+
+    # Concurrency control locking
+    session = db.query(SessionModel).filter(SessionModel.id == asset.session_id).with_for_update().first()
+    asset = db.query(Asset).filter(Asset.id == asset_id).with_for_update().first()
+
+    # Write ASSET_DELETED audit log entry BEFORE deletion
+    state_snapshot = {
+        "event": "ASSET_DELETED",
+        "asset_id": str(asset.id),
+        "asset_title": asset.title,
+        "classification": "MAJOR" if is_major else "MINOR",
+        "reason": reason if is_major else None,
+        "notified": False,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    _log_asset_audit_event(db, str(session.id), "ASSET_DELETED", state_snapshot)
+
+    # Reset heir submissions if major change in ACTIVE session
+    if is_major:
+        _reset_session_submitted_heirs(db, str(session.id))
+
+    # Remove all associated images from storage (including the primary/legacy image_uri)
+    storage = get_storage_driver()
+    deleted_uris = set()
+    for img in asset.images:
+        if img.image_uri and img.image_uri not in deleted_uris:
+            try:
+                storage.delete(img.image_uri)
+                deleted_uris.add(img.image_uri)
+            except Exception:
+                pass
+    if asset.image_uri and asset.image_uri not in deleted_uris:
         try:
-            storage = get_storage_driver()
             storage.delete(asset.image_uri)
+            deleted_uris.add(asset.image_uri)
         except Exception:
             pass
 
     # Remove audio file from storage if present
     if asset.audio_uri:
         try:
-            storage = get_storage_driver()
             storage.delete(asset.audio_uri)
         except Exception:
             pass
@@ -1591,9 +3249,229 @@ async def delete_asset(
 # ---------------------------------------------------------------------------
 
 
+@app.get("/api/sessions/{session_id}/pending-updates")
+@limiter.limit("60/minute")
+async def get_pending_updates(
+    request: Request,
+    session_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Returns the count of pending (un-notified) asset updates.
+    """
+    unnotified_logs = (
+        db.query(AuditLog)
+        .filter(
+            AuditLog.session_id == session_id,
+            AuditLog.event_type.in_(["ASSET_CREATED", "ASSET_UPDATED", "ASSET_DELETED"]),
+        )
+        .all()
+    )
+    pending_count = 0
+    for log in unnotified_logs:
+        if isinstance(log.state_snapshot, dict) and not log.state_snapshot.get("notified", False):
+            pending_count += 1
+
+    return JSONResponse(content={"pending_count": pending_count})
+
+
+@app.post("/api/sessions/{session_id}/publish-updates")
+@limiter.limit("10/minute")
+async def publish_updates(
+    request: Request,
+    session_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Publish queued asset changes (additions, modifications, deletions) as a single batch.
+    Emails a change summary to all active/verified heirs and broadcasts a WebSocket notification.
+    """
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).with_for_update().first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status not in ("SETUP", "ACTIVE"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Updates can only be published during SETUP or ACTIVE phases. Current status: '{session.status}'",
+        )
+
+    # 1. Query all un-notified audit logs for this session
+    unnotified_logs = (
+        db.query(AuditLog)
+        .filter(
+            AuditLog.session_id == session_id,
+            AuditLog.event_type.in_(["ASSET_CREATED", "ASSET_UPDATED", "ASSET_DELETED"]),
+        )
+        .all()
+    )
+
+    # Decrypt and filter logs where snapshot has notified = False
+    pending_logs = []
+    for log in unnotified_logs:
+        snapshot = log.state_snapshot
+        if isinstance(snapshot, dict) and not snapshot.get("notified", False):
+            pending_logs.append(log)
+
+    if not pending_logs:
+        return JSONResponse(
+            content={
+                "status": "noop",
+                "message": "No pending asset updates to publish.",
+            }
+        )
+
+    # 2. Count additions, modifications, and deletions
+    added_count = 0
+    modified_count = 0
+    deleted_count = 0
+    changes_details = []
+
+    for log in pending_logs:
+        snap = log.state_snapshot
+        evt = snap.get("event")
+        title = snap.get("asset_title") or "Unnamed Asset"
+        cls = snap.get("classification")
+        reason = snap.get("reason")
+
+        if evt == "ASSET_CREATED":
+            added_count += 1
+            changes_details.append(f"- Added new asset (staged): {title}")
+        elif evt == "ASSET_DELETED":
+            deleted_count += 1
+            reason_str = f" (Reason: {reason})" if reason else ""
+            changes_details.append(f"- Deleted asset: {title}{reason_str}")
+        elif evt == "ASSET_UPDATED":
+            # Check if it was an transition from staged to live
+            chg = snap.get("changes", {})
+            if "status" in chg and chg["status"].get("new") == "LIVE":
+                added_count += 1
+                reason_str = f" (Reason: {reason})" if reason else ""
+                changes_details.append(f"- Published asset: {title}{reason_str}")
+            else:
+                modified_count += 1
+                changed_keys = ", ".join(chg.keys())
+                reason_str = f" (Reason: {reason})" if reason else ""
+                changes_details.append(f"- Modified asset '{title}' (Fields: {changed_keys}){reason_str}")
+
+    # Build summary line
+    summary_parts = []
+    if added_count > 0:
+        summary_parts.append(f"{added_count} item(s) added")
+    if modified_count > 0:
+        summary_parts.append(f"{modified_count} item(s) modified")
+    if deleted_count > 0:
+        summary_parts.append(f"{deleted_count} item(s) deleted")
+    summary_line = "Updated: " + ", ".join(summary_parts)
+
+    # 3. Write ASSET_PUBLISH_BATCH log to AuditLog
+    state_snapshot = {
+        "event": "ASSET_PUBLISH_BATCH",
+        "summary": summary_line,
+        "published_log_ids": [log.id for log in pending_logs],
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    batch_log = _log_asset_audit_event(db, session_id, "ASSET_PUBLISH_BATCH", state_snapshot)
+
+    # Mark all pending logs as notified = True in DB
+    for log in pending_logs:
+        new_snap = dict(log.state_snapshot)
+        new_snap["notified"] = True
+        log.state_snapshot = new_snap
+
+    # 4. Email all active/verified heirs
+    from .services.smtp_service import send_email_background
+    active_heirs = (
+        db.query(User)
+        .filter(
+            User.session_id == session_id,
+            User.role == "HEIR",
+            User.status.in_(["ACTIVE", "SUBMITTED"]),
+        )
+        .all()
+    )
+
+    email_body = (
+        f"Notice: The Executor has published updates to the estate inventory for '{session.title}'.\n\n"
+        f"Summary of changes:\n"
+        f"{summary_line}\n\n"
+        f"Details:\n"
+        + "\n".join(changes_details) + "\n\n"
+        f"Please log into your Estate Steward workspace to review the latest inventory and update your allocations if needed."
+    )
+
+    for heir in active_heirs:
+        if heir.email:
+            await send_email_background(
+                to=heir.email,
+                subject=f"Estate Inventory Updates - {session.title}",
+                body=email_body,
+                on_failure_message=f"Failed to deliver inventory update email to {heir.email}"
+            )
+
+    db.commit()
+
+    # 5. Broadcast WebSockets notification
+    await manager.broadcast_session_status(
+        session_id,
+        {
+            "type": "inventory_updated",
+            "summary": summary_line,
+            "session_status": session.status,
+        },
+    )
+
+    return JSONResponse(
+        content={
+            "status": "success",
+            "summary": summary_line,
+            "batch_log_id": batch_log.id,
+        }
+    )
+
+
 # ---------------------------------------------------------------------------
 # T42 — Support Request & Help CRUD API
 # ---------------------------------------------------------------------------
+
+
+def _support_request_response(db: DBSession, ticket: SupportRequest) -> dict:
+    heir = db.query(User).filter(User.id == ticket.heir_id).first()
+    admin = (
+        db.query(User).filter(User.id == ticket.responded_by_id).first()
+        if getattr(ticket, "responded_by_id", None)
+        else None
+    )
+    legal_name = " ".join(
+        part
+        for part in (
+            getattr(heir, "legal_first_name", None),
+            getattr(heir, "legal_middle_name", None),
+            getattr(heir, "legal_last_name", None),
+        )
+        if part
+    )
+
+    return {
+        "id": str(ticket.id),
+        "session_id": str(ticket.session_id),
+        "heir_id": str(ticket.heir_id),
+        "username": getattr(heir, "username", None) or "Unknown",
+        "legal_name": legal_name or getattr(heir, "username", None) or "Unknown",
+        "message": ticket.message,
+        "admin_response": getattr(ticket, "admin_response", None),
+        "heir_image_uri": getattr(ticket, "heir_image_uri", None),
+        "admin_image_uri": getattr(ticket, "admin_image_uri", None),
+        "initiator_role": getattr(ticket, "initiator_role", None) or "HEIR",
+        "status": ticket.status,
+        "created_at": ticket.created_at.isoformat() if ticket.created_at else None,
+        "responded_at": ticket.responded_at.isoformat() if getattr(ticket, "responded_at", None) else None,
+        "resolved_at": ticket.resolved_at.isoformat() if getattr(ticket, "resolved_at", None) else None,
+        "responded_by_id": str(ticket.responded_by_id) if getattr(ticket, "responded_by_id", None) else None,
+        "responded_by_username": getattr(admin, "username", None) if admin else None,
+    }
 
 
 @app.post("/api/sessions/{session_id}/help")
@@ -1601,7 +3479,8 @@ async def delete_asset(
 async def create_help_request(
     request: Request,
     session_id: str,
-    body: SupportRequestCreate,
+    message: Annotated[Optional[str], Form()] = None,
+    file: Annotated[Optional[UploadFile], File()] = None,
     db: DBSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
@@ -1616,18 +3495,69 @@ async def create_help_request(
         raise HTTPException(status_code=403, detail="Only heirs can submit help requests")
 
     heir_id = current_user.get("user_id")
+    token_session_id = current_user.get("session_id")
+    if not token_session_id or str(token_session_id) != str(session_id):
+        raise HTTPException(status_code=403, detail="Session mismatch")
 
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    heir = (
+        db.query(User)
+        .filter(
+            User.id == heir_id,
+            User.role == "HEIR",
+            User.session_id == session_id,
+        )
+        .first()
+    )
+    if not heir:
+        raise HTTPException(status_code=403, detail="Heir is not registered for this session")
+
+    message_str = message.strip() if message else ""
+
+    if not message_str and not file:
+        raise HTTPException(status_code=400, detail="Must provide message or image")
+
+    heir_image_uri = None
+    if file:
+        import uuid as _uuid_mod
+        file_bytes = await file_upload.read()
+        if file_bytes:
+            try:
+                processed = preprocess_image(file_bytes)
+                storage = get_storage_driver()
+                image_id = _uuid_mod.uuid4()
+                filename = f"static/uploads/support_{image_id}_heir.webp"
+                storage.save(filename, processed)
+                heir_image_uri = f"/{filename}"
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
 
     sr = SupportRequest(
         session_id=session_id,
         heir_id=heir_id,
-        message=body.message,
+        message=message_str or "Sent an image",
+        heir_image_uri=heir_image_uri,
+        initiator_role="HEIR",
         status="OPEN",
     )
     db.add(sr)
+    db.flush()
+
+    _log_asset_audit_event(
+        db,
+        session_id,
+        "SUPPORT_REQUEST_CREATED",
+        {
+            "event": "SUPPORT_REQUEST_CREATED",
+            "support_request_id": str(sr.id),
+            "heir_id": str(heir_id),
+            "heir_username": current_user.get("username", ""),
+            "message": body.message,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
     db.commit()
 
     # Broadcast WebSocket alert to Admin
@@ -1639,9 +3569,124 @@ async def create_help_request(
     )
 
     return JSONResponse(
-        content={"status": "submitted"},
+        content={
+            "status": "submitted",
+            "ticket": _support_request_response(db, sr),
+        },
         status_code=201,
     )
+
+
+@app.post("/api/sessions/{session_id}/help/direct")
+@limiter.limit("30/minute")
+async def create_direct_help_message(
+    request: Request,
+    session_id: str,
+    heir_id: Annotated[str, Form()],
+    message: Annotated[Optional[str], Form()] = None,
+    file: Annotated[Optional[UploadFile], File()] = None,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Send a direct Executor message to one registered heir."""
+    import uuid as _uuid_mod
+
+    form = await request.form()
+    heir_id = form.get("heir_id")
+    if not heir_id:
+        raise HTTPException(status_code=400, detail="Missing heir_id")
+
+    try:
+        heir_uuid = _uuid_mod.UUID(str(heir_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid heir_id")
+
+    try:
+        session_uuid = _uuid_mod.UUID(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session_id")
+
+    session = db.query(SessionModel).filter(SessionModel.id == session_uuid).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    heir = (
+        db.query(User)
+        .filter(
+            User.id == heir_uuid,
+            User.role == "HEIR",
+            User.session_id == session_uuid,
+        )
+        .first()
+    )
+    if not heir:
+        raise HTTPException(status_code=404, detail="Heir not found for this session")
+
+    message_str = message.strip() if message else ""
+
+    if not message_str and not file:
+        raise HTTPException(status_code=400, detail="Must provide message or image")
+
+    admin_image_uri = None
+    if file:
+        file_bytes = await file.read()
+        if file_bytes:
+            try:
+                processed = preprocess_image(file_bytes)
+                storage = get_storage_driver()
+                image_id = _uuid_mod.uuid4()
+                filename = f"static/uploads/support_{image_id}_admin.webp"
+                storage.save(filename, processed)
+                admin_image_uri = f"/{filename}"
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+    now_utc = datetime.now(timezone.utc)
+    sr = SupportRequest(
+        session_id=session_uuid,
+        heir_id=heir_uuid,
+        message="Executor initiated direct message.",
+        admin_response=message_str or "Sent an image",
+        admin_image_uri=admin_image_uri,
+        initiator_role="ADMIN",
+        status="RESPONDED",
+        responded_at=now_utc,
+        responded_by_id=current_admin.get("user_id"),
+    )
+    db.add(sr)
+    db.flush()
+
+    _log_asset_audit_event(
+        db,
+        session_id,
+        "SUPPORT_DIRECT_MESSAGE_SENT",
+        {
+            "event": "SUPPORT_DIRECT_MESSAGE_SENT",
+            "support_request_id": str(sr.id),
+            "heir_id": str(heir_uuid),
+            "heir_username": getattr(heir, "username", ""),
+            "responded_by_id": str(current_admin.get("user_id")),
+            "responded_by_username": current_admin.get("username", ""),
+            "admin_response": sr.admin_response,
+            "responded_at": now_utc.isoformat(),
+        },
+    )
+    db.commit()
+    db.refresh(sr)
+
+    await manager.send_to_heir(
+        session_id,
+        str(heir_uuid),
+        {
+            "type": "support_reply",
+            "ticket_id": str(sr.id),
+            "message": sr.admin_response,
+            "responded_at": now_utc.isoformat(),
+            "initiator_role": "ADMIN",
+        },
+    )
+
+    return JSONResponse(content=_support_request_response(db, sr), status_code=201)
 
 
 @app.get("/api/sessions/{session_id}/help")
@@ -1659,25 +3704,135 @@ async def list_help_requests(
     Admin credentials required. Returns list of SupportRequestResponse
     with resolved Heir usernames via database joins.
     """
+    import uuid as _uuid_mod
+    try:
+        session_uuid = _uuid_mod.UUID(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session_id format")
+
     tickets = (
         db.query(SupportRequest)
-        .filter(SupportRequest.session_id == session_id)
+        .filter(SupportRequest.session_id == session_uuid)
         .order_by(SupportRequest.created_at.desc())
         .all()
     )
 
-    results = []
-    for t in tickets:
-        heir = db.query(User).filter(User.id == t.heir_id).first()
-        results.append({
-            "id": str(t.id),
-            "username": heir.username if heir else "Unknown",
-            "message": t.message,
-            "status": t.status,
-            "created_at": t.created_at.isoformat() if t.created_at else None,
-        })
+    return JSONResponse(content=[_support_request_response(db, t) for t in tickets])
 
-    return JSONResponse(content=results)
+
+@app.get("/api/sessions/{session_id}/help/mine")
+@limiter.limit("60/minute")
+async def list_my_help_requests(
+    request: Request,
+    session_id: str,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """List the current heir's help requests and executor responses."""
+    if current_user.get("role") != "HEIR":
+        raise HTTPException(status_code=403, detail="Heir access required")
+
+    if current_user.get("session_id") and str(current_user.get("session_id")) != str(session_id):
+        raise HTTPException(status_code=403, detail="Session mismatch")
+
+    import uuid as _uuid_mod
+    try:
+        session_uuid = _uuid_mod.UUID(session_id)
+        heir_uuid = _uuid_mod.UUID(current_user.get("user_id"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid UUID format")
+
+    tickets = (
+        db.query(SupportRequest)
+        .filter(
+            SupportRequest.session_id == session_uuid,
+            SupportRequest.heir_id == heir_uuid,
+        )
+        .order_by(SupportRequest.created_at.desc())
+        .all()
+    )
+    return JSONResponse(content=[_support_request_response(db, t) for t in tickets])
+
+
+
+@app.post("/api/help/{ticket_id}/reply")
+@limiter.limit("30/minute")
+async def reply_to_help_request(
+    request: Request,
+    ticket_id: str,
+    response: Annotated[Optional[str], Form()] = None,
+    file: Annotated[Optional[UploadFile], File()] = None,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Admin replies to a specific help ticket.
+    """
+    ticket = db.query(SupportRequest).filter(SupportRequest.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Support request not found")
+    if ticket.status == "RESOLVED":
+        raise HTTPException(status_code=400, detail="Cannot reply to a resolved request")
+
+    response_str = response.strip() if response else ""
+
+    if not response_str and not file:
+        raise HTTPException(status_code=400, detail="Must provide message or image")
+
+    admin_image_uri = None
+    if file:
+        import uuid as _uuid_mod
+        file_bytes = await file.read()
+        if file_bytes:
+            try:
+                processed = preprocess_image(file_bytes)
+                storage = get_storage_driver()
+                image_id = _uuid_mod.uuid4()
+                filename = f"static/uploads/support_{image_id}_admin.webp"
+                storage.save(filename, processed)
+                admin_image_uri = f"/{filename}"
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+    now_utc = datetime.now(timezone.utc)
+    ticket.admin_response = response_str or "Sent an image"
+    if admin_image_uri:
+        ticket.admin_image_uri = admin_image_uri
+    ticket.responded_at = now_utc
+    ticket.responded_by_id = current_admin.get("user_id")
+    ticket.status = "RESPONDED"
+
+    _log_asset_audit_event(
+        db,
+        str(ticket.session_id),
+        "SUPPORT_REPLY_SENT",
+        {
+            "event": "SUPPORT_REPLY_SENT",
+            "support_request_id": str(ticket.id),
+            "heir_id": str(ticket.heir_id),
+            "responded_by_id": str(current_admin.get("user_id")),
+            "responded_by_username": current_admin.get("username", ""),
+            "original_message": ticket.message,
+            "admin_response": ticket.admin_response,
+            "responded_at": now_utc.isoformat(),
+        },
+    )
+    db.commit()
+    db.refresh(ticket)
+
+    await manager.send_to_heir(
+        str(ticket.session_id),
+        str(ticket.heir_id),
+        {
+            "type": "support_reply",
+            "ticket_id": str(ticket.id),
+            "message": body.response,
+            "responded_at": now_utc.isoformat(),
+            "initiator_role": getattr(ticket, "initiator_role", None) or "HEIR",
+        },
+    )
+
+    return JSONResponse(content=_support_request_response(db, ticket))
 
 
 @app.post("/api/help/{ticket_id}/resolve")
@@ -1701,9 +3856,41 @@ async def resolve_help_request(
         raise HTTPException(status_code=404, detail="Support ticket not found")
 
     ticket.status = "RESOLVED"
+    ticket.resolved_at = datetime.now(timezone.utc)
+    _log_asset_audit_event(
+        db,
+        str(ticket.session_id),
+        "SUPPORT_REQUEST_RESOLVED",
+        {
+            "event": "SUPPORT_REQUEST_RESOLVED",
+            "support_request_id": str(ticket.id),
+            "heir_id": str(ticket.heir_id),
+            "resolved_by_id": str(current_admin.get("user_id")),
+            "resolved_by_username": current_admin.get("username", ""),
+            "resolved_at": ticket.resolved_at.isoformat(),
+        },
+    )
     db.commit()
+    db.refresh(ticket)
 
-    return JSONResponse(content={"status": "resolved"})
+    await manager.send_to_heir(
+        str(ticket.session_id),
+        str(ticket.heir_id),
+        {
+            "type": "support_resolution",
+            "ticket_id": str(ticket.id),
+            "status": ticket.status,
+            "resolved_at": ticket.resolved_at.isoformat() if ticket.resolved_at else None,
+            "initiator_role": getattr(ticket, "initiator_role", None) or "HEIR",
+        },
+    )
+
+    return JSONResponse(
+        content={
+            "status": "resolved",
+            "ticket": _support_request_response(db, ticket),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1767,6 +3954,10 @@ async def upload_asset_audio(
         ext = ".mp3"
     elif "wav" in content_type.lower() or filename.lower().endswith(".wav"):
         ext = ".wav"
+    elif "ogg" in content_type.lower() or filename.lower().endswith(".ogg"):
+        ext = ".ogg"
+    elif "mp4" in content_type.lower() or "m4a" in content_type.lower() or "aac" in content_type.lower() or filename.lower().endswith(".mp4") or filename.lower().endswith(".m4a") or filename.lower().endswith(".aac"):
+        ext = ".m4a"
     else:
         ext = ".webm"  # default fallback
 
@@ -2218,6 +4409,59 @@ class VerifyIdentityRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _identity_scan_media_type(raw_bytes: bytes) -> str:
+    if raw_bytes.startswith(b"%PDF"):
+        return "application/pdf"
+    if raw_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw_bytes.startswith(b"RIFF") and raw_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    return "application/octet-stream"
+
+
+@app.get("/api/heirs/{heir_id}/id-scan")
+@limiter.limit("30/minute")
+async def preview_heir_id_scan(
+    request: Request,
+    heir_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Return a decrypted ID scan for authenticated Executor review only."""
+    heir = db.query(User).filter(
+        User.id == heir_id,
+        User.role == "HEIR",
+    ).first()
+    if not heir:
+        raise HTTPException(status_code=404, detail="Heir not found")
+    if not heir.id_scan_uri:
+        raise HTTPException(status_code=404, detail="No ID scan uploaded")
+
+    encryption_key = os.environ.get("ENCRYPTION_KEY")
+    if not encryption_key:
+        raise HTTPException(status_code=500, detail="Server encryption key is not configured.")
+
+    try:
+        from cryptography.fernet import Fernet
+        from fastapi.responses import StreamingResponse
+
+        encrypted_bytes = get_storage_driver().get(heir.id_scan_uri)
+        raw_bytes = Fernet(encryption_key.encode()).decrypt(encrypted_bytes)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="ID scan file not found")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Unable to decrypt ID scan")
+
+    headers = {"Cache-Control": "no-store"}
+    return StreamingResponse(
+        io.BytesIO(raw_bytes),
+        media_type=_identity_scan_media_type(raw_bytes),
+        headers=headers,
+    )
+
+
 @app.post("/api/heirs/{heir_id}/verify-identity")
 @limiter.limit("10/minute")
 async def verify_heir_identity(
@@ -2282,13 +4526,25 @@ async def verify_heir_identity(
         heir.id_scan_uri = None
 
         db.commit()
+        db.refresh(heir)
 
-        return JSONResponse(
+        # Refresh the admin's JWT cookie so their session doesn't expire
+        # while they are actively reviewing IDs.
+        admin_token = create_access_token(
+            user_id=current_admin["user_id"],
+            username=current_admin["username"],
+            role="ADMIN",
+            session_id=current_admin.get("session_id"),
+        )
+        response = JSONResponse(
             content={
                 "status": "success",
                 "message": "Verification action processed successfully.",
+                "heir": _heir_to_response(heir),
             }
         )
+        set_auth_cookie(response, admin_token)
+        return response
 
     elif body.action == "reject":
         # Delete ID scan file, reset id_scan_uri
@@ -2300,13 +4556,25 @@ async def verify_heir_identity(
                 pass
         heir.id_scan_uri = None
         db.commit()
+        db.refresh(heir)
 
-        return JSONResponse(
+        # Refresh the admin's JWT cookie so their session doesn't expire
+        # while they are actively reviewing IDs.
+        admin_token = create_access_token(
+            user_id=current_admin["user_id"],
+            username=current_admin["username"],
+            role="ADMIN",
+            session_id=current_admin.get("session_id"),
+        )
+        response = JSONResponse(
             content={
                 "status": "success",
                 "message": "Verification action processed successfully.",
+                "heir": _heir_to_response(heir),
             }
         )
+        set_auth_cookie(response, admin_token)
+        return response
 
 
 # ---------------------------------------------------------------------------
@@ -2555,9 +4823,27 @@ class SessionCreateRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=100)
 
 
+class SessionUpdateRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=100)
+
+
 # ---------------------------------------------------------------------------
 # T39 — Admin Setup & Session Creation API
 # ---------------------------------------------------------------------------
+
+
+@app.get("/api/setup/status")
+@limiter.limit("60/minute")
+async def setup_status(
+    request: Request,
+    response: Response,
+    db: DBSession = Depends(get_db),
+):
+    """Return whether first-admin setup has already been completed."""
+    existing_admin = (
+        db.query(User).filter(User.role == "ADMIN").first()
+    )
+    return {"admin_exists": existing_admin is not None}
 
 
 @app.post("/api/setup/admin")
@@ -2743,6 +5029,13 @@ async def create_session(
         is_deadlocked=False,
     )
     db.add(session)
+    db.flush()
+
+    # Seed default categories
+    default_categories = ["Jewelry", "Furniture", "Art", "Other"]
+    for cat_name in default_categories:
+        db.add(Category(session_id=session.id, name=cat_name))
+
     db.commit()
     db.refresh(session)
 
@@ -2758,6 +5051,44 @@ async def create_session(
         },
         status_code=201,
     )
+
+
+@app.patch("/api/sessions/{session_id}", response_model=SessionResponse)
+@limiter.limit("30/minute")
+async def update_session(
+    request: Request,
+    session_id: str,
+    response: Response,
+    body: SessionUpdateRequest,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Update a mediation session's title.
+    """
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    session.title = body.title.strip()
+    db.commit()
+    db.refresh(session)
+
+    return SessionResponse(
+        id=str(session.id),
+        title=session.title,
+        status=session.status,
+        is_paused=session.is_paused,
+        paused_at=session.paused_at.isoformat() if session.paused_at else None,
+        is_deadlocked=session.is_deadlocked,
+        announcement=session.announcement,
+        announcement_updated_at=session.announcement_updated_at.isoformat() if session.announcement_updated_at else None,
+        deadline=session.deadline.isoformat() if session.deadline else None,
+        created_at=session.created_at.isoformat() if session.created_at else "",
+    )
+
+
+
 
 
 @app.get("/api/heirs/me")
@@ -2838,6 +5169,7 @@ async def update_my_heir_profile(
         "email": heir.email,
         "phone": heir.phone,
         "physical_address": heir.physical_address,
+        **_address_response_fields(heir),
         "identity_verified": heir.identity_verified,
         "status": heir.status,
         "id_scan_uri": heir.id_scan_uri,
@@ -2862,7 +5194,13 @@ async def update_my_heir_profile(
     heir.date_of_birth = new_dob
     heir.email = body.email
     heir.phone = body.phone
-    heir.physical_address = body.physical_address
+    structured_address = _structured_address_from_body(body)
+    heir.physical_address = _compose_physical_address(
+        structured_address,
+        fallback=body.physical_address,
+    )
+    for field_name, value in structured_address.items():
+        setattr(heir, field_name, value)
 
     post_update_snapshot = {
         "legal_first_name": heir.legal_first_name,
@@ -2873,6 +5211,7 @@ async def update_my_heir_profile(
         "email": heir.email,
         "phone": heir.phone,
         "physical_address": heir.physical_address,
+        **_address_response_fields(heir),
         "identity_verified": heir.identity_verified,
         "status": heir.status,
         "id_scan_uri": heir.id_scan_uri,
@@ -3010,6 +5349,9 @@ async def upload_id_scan(
         content={
             "status": "success",
             "message": "ID document uploaded and encrypted successfully",
+            "user_status": heir.status,
+            "identity_verified": heir.identity_verified,
+            "id_scan_uri": heir.id_scan_uri,
         }
     )
 
@@ -3078,6 +5420,7 @@ async def gdpr_erase_heir(
         heir.email,
         heir.phone,
         heir.physical_address,
+        *_address_response_fields(heir).values(),
         heir.username,
     ]
     pii_values = [v for v in pii_values if v]
@@ -3092,6 +5435,8 @@ async def gdpr_erase_heir(
     heir.email = None
     heir.phone = None
     heir.physical_address = None
+    for field_name in ADDRESS_FIELD_NAMES:
+        setattr(heir, field_name, None)
     heir.pw_hash = None
 
     # 2. Delete encrypted ID scan file from storage if present
@@ -3263,7 +5608,12 @@ async def gdpr_export_heir(
         support_data.append({
             "id": str(sr.id),
             "message": sr.message,
+            "admin_response": getattr(sr, "admin_response", None),
+            "initiator_role": getattr(sr, "initiator_role", None) or "HEIR",
             "status": sr.status,
+            "created_at": sr.created_at.isoformat() if sr.created_at else None,
+            "responded_at": sr.responded_at.isoformat() if getattr(sr, "responded_at", None) else None,
+            "resolved_at": sr.resolved_at.isoformat() if getattr(sr, "resolved_at", None) else None,
         })
 
     payload = {
@@ -3278,6 +5628,7 @@ async def gdpr_export_heir(
         "email": heir.email,
         "phone": heir.phone,
         "physical_address": heir.physical_address,
+        **_address_response_fields(heir),
         "consent_accepted": heir.consent_accepted,
         "age_verified": heir.age_verified,
         "consent_timestamp": heir.consent_timestamp.isoformat() if heir.consent_timestamp else None,
@@ -3310,6 +5661,53 @@ class AdminOverrideRequest(BaseModel):
 
 class AbstainRequest(BaseModel):
     legal_name_signature: str = Field(..., min_length=3, max_length=200)
+
+
+def _reconstruct_solver_result_for_finalized_pdf(
+    assets: list[Asset],
+    audit_logs: list[AuditLog],
+):
+    """Rebuild the solver result needed by finalized PDF downloads.
+
+    The finalization endpoint persists the authoritative MNW scalar and
+    allocation map in the FINALIZED audit block. Asset rows are still used as a
+    fallback for older ledgers that predate that snapshot shape.
+    """
+    from .solver import SolverResult
+
+    allocation: dict[str, list[str]] = {}
+    mnw_product_value = 0.0
+
+    final_log = next(
+        (
+            log for log in reversed(audit_logs)
+            if log.event_type == "FINALIZED" and isinstance(log.state_snapshot, dict)
+        ),
+        None,
+    )
+    if final_log:
+        snapshot = final_log.state_snapshot or {}
+        raw_allocation = snapshot.get("allocations") or {}
+        if isinstance(raw_allocation, dict):
+            for heir_id, asset_ids in raw_allocation.items():
+                if isinstance(asset_ids, list):
+                    allocation[str(heir_id)] = [str(asset_id) for asset_id in asset_ids]
+        try:
+            mnw_product_value = float(snapshot.get("mnw_product_value") or 0.0)
+        except (TypeError, ValueError):
+            mnw_product_value = 0.0
+
+    if not allocation:
+        for asset in assets:
+            if asset.allocated_to_id and asset.status == "DISTRIBUTED":
+                hid = str(asset.allocated_to_id)
+                allocation.setdefault(hid, []).append(str(asset.id))
+
+    return SolverResult(
+        allocation=allocation,
+        mnw_product_value=mnw_product_value,
+        tie_breaker_events=[],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3554,6 +5952,8 @@ async def download_abstain_receipt(
     sha256_hash = waiver_log.sha256_hash
 
     try:
+        from .pdf_builder import build_waiver_receipt_pdf
+
         pdf_buf = build_waiver_receipt_pdf(
             session=session,
             heir=heir,
@@ -3926,6 +6326,8 @@ async def finalize_session(
 
     # Run solver
     try:
+        from .solver import solve_mnw
+
         result = solve_mnw(
             heir_ids=heir_ids,
             asset_ids=asset_ids,
@@ -4069,23 +6471,12 @@ async def download_probate_ledger(
 
     notice_log = build_notice_log(session_id, [h for h in heirs if h.role == "HEIR"])
 
-    # Reconstruct solver result from audit logs or assets
-    solver_result = SolverResult(
-        allocation={},
-        mnw_product_value=0.0,
-        tie_breaker_events=[],
-    )
-
-    # Build allocation from asset records
-    for asset in assets:
-        if asset.allocated_to_id and asset.status == "DISTRIBUTED":
-            hid = str(asset.allocated_to_id)
-            if hid not in solver_result.allocation:
-                solver_result.allocation[hid] = []
-            solver_result.allocation[hid].append(str(asset.id))
+    solver_result = _reconstruct_solver_result_for_finalized_pdf(assets, audit_logs)
 
     # Generate PDF
     try:
+        from .pdf_builder import build_probate_ledger_pdf
+
         pdf_buf = build_probate_ledger_pdf(
             session=session,
             heirs=heirs,
@@ -4102,11 +6493,121 @@ async def download_probate_ledger(
         )
 
     pdf_bytes = pdf_buf.getvalue()
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    _log_asset_audit_event(db, session_id, "DOWNLOAD_LEDGER", {"action": "download", "user_id": current_user.get("user_id"), "timestamp": timestamp})
     return StreamingResponse(
         io.BytesIO(pdf_bytes),
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f'attachment; filename="probate_ledger_{session_id}.pdf"',
+            "Content-Disposition": f'attachment; filename="{timestamp}_probate_ledger_{session_id}.pdf"',
+        },
+    )
+
+
+@app.get("/api/sessions/{session_id}/keepsake/zip")
+@limiter.limit("10/minute")
+async def download_all_keepsakes_zip(
+    request: Request,
+    session_id: str,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Download the Probate Audit Ledger and all individual Heir Keepsakes
+    bundled into a single ZIP archive.
+    """
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status != "FINALIZED":
+        raise HTTPException(
+            status_code=400,
+            detail="Keepsakes are only available after session finalization.",
+        )
+
+    # Load all session data
+    heirs = (
+        db.query(User)
+        .filter(
+            User.session_id == session_id,
+            User.role.in_(["HEIR", "ADMIN"]),
+        )
+        .all()
+    )
+
+    admin_user = db.query(User).filter(
+        User.role == "ADMIN",
+    ).first()
+    if admin_user and admin_user not in heirs:
+        heirs.append(admin_user)
+
+    assets = (
+        db.query(Asset)
+        .filter(Asset.session_id == session_id)
+        .all()
+    )
+
+    audit_logs = (
+        db.query(AuditLog)
+        .filter(AuditLog.session_id == session_id)
+        .order_by(AuditLog.id.asc())
+        .all()
+    )
+
+    notice_log = build_notice_log(session_id, [h for h in heirs if h.role == "HEIR"])
+
+    solver_result = _reconstruct_solver_result_for_finalized_pdf(assets, audit_logs)
+
+    from .pdf_builder import build_probate_ledger_pdf, build_keepsake_pdf
+
+    try:
+        ledger_pdf_buf = build_probate_ledger_pdf(
+            session=session,
+            heirs=heirs,
+            assets=assets,
+            solver_result=solver_result,
+            audit_logs=audit_logs,
+            notice_log=notice_log,
+        )
+    except Exception as e:
+        logger.exception("Failed to build probate ledger PDF")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ledger PDF generation failed: {str(e)}",
+        )
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # Add Ledger
+        zf.writestr(f"{timestamp}_{session.title}-probate-audit-ledger.pdf", ledger_pdf_buf.getvalue())
+        
+        # Add Heir Keepsakes
+        for heir in heirs:
+            if heir.role != "HEIR":
+                continue
+            try:
+                heir_pdf_buf = build_keepsake_pdf(
+                    session=session,
+                    heir=heir,
+                    assets=assets,
+                    solver_result=solver_result,
+                    audit_logs=audit_logs,
+                )
+                heir_name = (heir.username or f"{heir.legal_first_name or ''} {heir.legal_last_name or ''}".strip() or heir.email or "Heir").replace("/", "_").replace("\\", "_")
+                zf.writestr(f"{timestamp}_{session.title}-{heir_name}-keepsake-memory-book.pdf", heir_pdf_buf.getvalue())
+            except Exception as e:
+                logger.error(f"Failed to build keepsake PDF for heir {heir.id}: {e}")
+                pass
+
+    zip_buf.seek(0)
+    _log_asset_audit_event(db, session_id, "DOWNLOAD_ALL_KEEPSAKES", {"action": "download_zip", "user_id": current_user.get("user_id"), "timestamp": timestamp})
+    return StreamingResponse(
+        zip_buf,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{timestamp}_{session.title}_all_documents.zip"',
         },
     )
 
@@ -4164,20 +6665,11 @@ async def download_heir_keepsake(
         .all()
     )
 
-    # Reconstruct solver result from asset records
-    solver_result = SolverResult(
-        allocation={},
-        mnw_product_value=0.0,
-        tie_breaker_events=[],
-    )
-    for asset in assets:
-        if asset.allocated_to_id and asset.status == "DISTRIBUTED":
-            hid = str(asset.allocated_to_id)
-            if hid not in solver_result.allocation:
-                solver_result.allocation[hid] = []
-            solver_result.allocation[hid].append(str(asset.id))
+    solver_result = _reconstruct_solver_result_for_finalized_pdf(assets, audit_logs)
 
     try:
+        from .pdf_builder import build_keepsake_pdf
+
         pdf_buf = build_keepsake_pdf(
             session=session,
             heir=heir,
@@ -4193,11 +6685,13 @@ async def download_heir_keepsake(
         )
 
     pdf_bytes = pdf_buf.getvalue()
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    _log_asset_audit_event(db, session_id, "DOWNLOAD_KEEPSAKE", {"action": "download", "heir_id": heir_id, "user_id": current_user.get("user_id"), "timestamp": timestamp})
     return StreamingResponse(
         io.BytesIO(pdf_bytes),
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f'attachment; filename="keepsake_{heir_id}.pdf"',
+            "Content-Disposition": f'attachment; filename="{timestamp}_keepsake_{heir_id}.pdf"',
         },
     )
 
@@ -4358,6 +6852,18 @@ async def system_models():
             "provenance": "Pretrained on Qwen open training datasets; fine-tuned for instruction-following.",
         },
         # Vision variants
+        "google/diffusiongemma-26b-a4b-it": {
+            "display_name": "DiffusionGemma-26B-A4B-IT",
+            "parameters": "25.2B (3.8B active)",
+            "license": "NVIDIA Open Model Agreement / Gemma Terms",
+            "provenance": "Developed by Google DeepMind; multimodal discrete diffusion model running on NVIDIA integrate NIM.",
+        },
+        "gemma4:e4b": {
+            "display_name": "Gemma 4 E4B",
+            "parameters": "~6GB",
+            "license": "Google Gemma Terms",
+            "provenance": "Google Gemma 4 native multimodal architecture. 128K context window. Optimized for multi-image analysis.",
+        },
         "llava:7b": {
             "display_name": "Llava-1.5",
             "parameters": "7.0B",
@@ -4551,6 +7057,274 @@ async def verify_hash_chain(
 # ---------------------------------------------------------------------------
 
 
+def _quote_sql_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _system_uploads_dir():
+    from pathlib import Path
+
+    return Path(os.environ.get("SYSTEM_UPLOADS_DIR", "/app/static/uploads"))
+
+
+def _sql_literal(value) -> str:
+    import json as _json
+    import math as _math
+    import uuid as _uuid
+    from datetime import date as _date, datetime as _datetime, time as _time
+    from decimal import Decimal as _Decimal
+
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        if _math.isnan(value) or _math.isinf(value):
+            return "NULL"
+        return repr(value)
+    if isinstance(value, _Decimal):
+        return str(value)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return "E'\\\\x" + bytes(value).hex() + "'::bytea"
+    if isinstance(value, (dict, list)):
+        text = _json.dumps(value, separators=(",", ":"), default=str)
+    elif isinstance(value, _uuid.UUID):
+        text = str(value)
+    elif isinstance(value, _datetime):
+        text = value.isoformat()
+    elif isinstance(value, (_date, _time)):
+        text = value.isoformat()
+    else:
+        text = str(value)
+    return "'" + text.replace("'", "''") + "'"
+
+
+def _ordered_table_names_for_backup(engine) -> list[str]:
+    from sqlalchemy import inspect as sa_inspect
+
+    inspector = sa_inspect(engine)
+    table_names = set(inspector.get_table_names())
+    dependencies: dict[str, set[str]] = {name: set() for name in table_names}
+
+    for table_name in table_names:
+        for fk in inspector.get_foreign_keys(table_name):
+            referred_table = fk.get("referred_table")
+            if referred_table in table_names and referred_table != table_name:
+                dependencies[table_name].add(referred_table)
+
+    ordered: list[str] = []
+    remaining = {name: set(deps) for name, deps in dependencies.items()}
+    while remaining:
+        ready = sorted(name for name, deps in remaining.items() if not deps)
+        if not ready:
+            # Fall back deterministically for unexpected circular dependencies.
+            ready = [sorted(remaining)[0]]
+        for name in ready:
+            ordered.append(name)
+            remaining.pop(name, None)
+            for deps in remaining.values():
+                deps.discard(name)
+    return ordered
+
+
+def _build_sql_backup_dump(engine) -> tuple[str, dict]:
+    import hashlib as _hashlib
+    from sqlalchemy import Integer, inspect as sa_inspect, text as sa_text
+
+    inspector = sa_inspect(engine)
+    table_names = _ordered_table_names_for_backup(engine)
+    table_counts: dict[str, int] = {}
+    dump_lines = [
+        "-- Estate Steward SQL backup",
+        "-- Generated via SQLAlchemy introspection",
+        "-- Format: estate-steward-sql-v2",
+        "",
+    ]
+
+    with engine.connect() as conn:
+        for table_name in table_names:
+            columns = [c["name"] for c in inspector.get_columns(table_name)]
+            quoted_table = _quote_sql_identifier(table_name)
+            quoted_cols = ", ".join(_quote_sql_identifier(c) for c in columns)
+            rows = conn.execute(sa_text(f"SELECT * FROM {quoted_table}")).fetchall()
+            table_counts[table_name] = len(rows)
+            if not rows:
+                continue
+
+            dump_lines.append(f"INSERT INTO {quoted_table} ({quoted_cols}) VALUES")
+            value_lines = []
+            for row in rows:
+                values = [_sql_literal(value) for value in row]
+                value_lines.append("  (" + ", ".join(values) + ")")
+            dump_lines.append(",\n".join(value_lines) + ";")
+            dump_lines.append("")
+
+        # Restore PostgreSQL sequences for integer identity/serial columns.
+        for table_name in table_names:
+            column_info = {
+                column["name"]: column
+                for column in inspector.get_columns(table_name)
+            }
+            for pk_col in inspector.get_pk_constraint(table_name).get("constrained_columns", []):
+                if not isinstance(column_info.get(pk_col, {}).get("type"), Integer):
+                    continue
+                quoted_table = _quote_sql_identifier(table_name)
+                quoted_col = _quote_sql_identifier(pk_col)
+                table_literal = table_name.replace("'", "''")
+                col_literal = pk_col.replace("'", "''")
+                dump_lines.append(
+                    "SELECT setval(seq_name, max_id, has_rows) FROM ("
+                    f"SELECT pg_get_serial_sequence('{table_literal}', '{col_literal}') AS seq_name, "
+                    f"COALESCE((SELECT MAX({quoted_col}) FROM {quoted_table}), 1) AS max_id, "
+                    f"(SELECT COUNT(*) > 0 FROM {quoted_table}) AS has_rows"
+                    ") AS seq_state WHERE seq_name IS NOT NULL;"
+                )
+
+    sql_dump = "\n".join(dump_lines).strip() + "\n"
+    manifest = {
+        "format": "estate-steward-backup-v2",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "tables": table_counts,
+        "table_order": table_names,
+        "dump_sha256": _hashlib.sha256(sql_dump.encode("utf-8")).hexdigest(),
+    }
+    return sql_dump, manifest
+
+
+def _safe_extract_tar(tar, destination) -> None:
+    from pathlib import Path
+
+    destination = Path(destination).resolve()
+    for member in tar.getmembers():
+        if member.issym() or member.islnk():
+            raise HTTPException(
+                status_code=400,
+                detail="Backup archive contains an unsafe link.",
+            )
+        target = (destination / member.name).resolve()
+        if target != destination and destination not in target.parents:
+            raise HTTPException(
+                status_code=400,
+                detail="Backup archive contains an unsafe file path.",
+            )
+    tar.extractall(destination)
+
+
+def _prepare_uploads_restore(extract_dir):
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    uploads_dst = _system_uploads_dir()
+    uploads_dst.parent.mkdir(parents=True, exist_ok=True)
+    staging_parent = Path(tempfile.mkdtemp(prefix="estate-uploads-restore-"))
+    staging_uploads = staging_parent / "uploads"
+    uploads_src = Path(extract_dir) / "uploads"
+
+    if uploads_src.exists():
+        shutil.copytree(uploads_src, staging_uploads)
+    else:
+        staging_uploads.mkdir(parents=True, exist_ok=True)
+
+    for path in staging_uploads.rglob("*"):
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    staging_uploads.chmod(0o755)
+    return uploads_dst, staging_parent, staging_uploads
+
+
+def _remove_upload_entry(path) -> None:
+    import shutil
+
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _clear_upload_directory(directory) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    for child in list(directory.iterdir()):
+        _remove_upload_entry(child)
+
+
+def _copy_upload_contents(src_dir, dst_dir) -> None:
+    import shutil
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for child in sorted(src_dir.iterdir(), key=lambda path: path.name):
+        target = dst_dir / child.name
+        if target.exists() or target.is_symlink():
+            _remove_upload_entry(target)
+        if child.is_dir() and not child.is_symlink():
+            shutil.copytree(child, target, symlinks=False)
+        else:
+            shutil.copy2(child, target)
+
+
+def _cleanup_upload_restore_state(state) -> None:
+    import shutil
+
+    for key in ("staging_parent", "backup_parent"):
+        path = state.get(key)
+        if path is not None and path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def _begin_uploads_restore(uploads_dst, staging_parent, staging_uploads) -> dict:
+    import tempfile
+    from pathlib import Path
+
+    uploads_dst.mkdir(parents=True, exist_ok=True)
+    backup_parent = Path(tempfile.mkdtemp(prefix="estate-uploads-before-restore-"))
+    backup_uploads = backup_parent / "uploads"
+    backup_uploads.mkdir(parents=True, exist_ok=True)
+
+    state = {
+        "uploads_dst": uploads_dst,
+        "staging_parent": staging_parent,
+        "backup_parent": backup_parent,
+        "backup_uploads": backup_uploads,
+    }
+
+    try:
+        _copy_upload_contents(uploads_dst, backup_uploads)
+        _clear_upload_directory(uploads_dst)
+        _copy_upload_contents(staging_uploads, uploads_dst)
+    except Exception:
+        try:
+            _clear_upload_directory(uploads_dst)
+            _copy_upload_contents(backup_uploads, uploads_dst)
+        finally:
+            _cleanup_upload_restore_state(state)
+        raise
+
+    return state
+
+
+def _rollback_uploads_restore(state) -> None:
+    uploads_dst = state["uploads_dst"]
+    backup_uploads = state["backup_uploads"]
+    try:
+        _clear_upload_directory(uploads_dst)
+        _copy_upload_contents(backup_uploads, uploads_dst)
+    finally:
+        _cleanup_upload_restore_state(state)
+
+
+def _commit_uploads_restore(state) -> None:
+    _cleanup_upload_restore_state(state)
+
+
+def _run_post_restore_migrations() -> None:
+    from alembic import command
+    from alembic.config import Config
+
+    alembic_cfg = Config("alembic.ini")
+    command.upgrade(alembic_cfg, "head")
+
+
 @app.get("/api/system/backup")
 @limiter.limit("5/minute")
 async def system_backup(
@@ -4568,7 +7342,7 @@ async def system_backup(
 
     Returns: application/octet-stream (.estate.bak).
     """
-    import subprocess
+    import json as _json
     import tempfile
     import tarfile
     from cryptography.fernet import Fernet
@@ -4581,26 +7355,17 @@ async def system_backup(
             detail="ENCRYPTION_KEY is not configured. Cannot encrypt backup.",
         )
 
-    db_url = os.environ.get("DATABASE_URL", "")
-    if not db_url:
-        raise HTTPException(
-            status_code=500,
-            detail="DATABASE_URL is not configured.",
-        )
-
+    # ── Generate SQL dump via SQLAlchemy introspection ─────────────────
+    # No external pg_dump required — pure-Python, portable.
     try:
-        parsed = db_url.replace("postgresql://", "").split("@")
-        user_pass = parsed[0].split(":")
-        user = user_pass[0]
-        password = user_pass[1] if len(user_pass) > 1 else ""
-        host_port = parsed[1].split(":") if len(parsed) > 1 else ["localhost"]
-        host = host_port[0]
-        port = host_port[1].split("/")[0] if len(host_port) > 1 else "5432"
-        dbname = parsed[1].split("/")[1] if "/" in parsed[1] else "estate_agent"
-    except Exception:
+        if database.engine is None:
+            raise RuntimeError("Database engine is not initialized.")
+        sql_dump_content, manifest = _build_sql_backup_dump(database.engine)
+    except Exception as e:
+        logger.exception("SQLAlchemy dump generation failed")
         raise HTTPException(
             status_code=500,
-            detail="Failed to parse DATABASE_URL for pg_dump.",
+            detail=f"Database dump generation failed: {str(e)[:500]}",
         )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -4609,44 +7374,21 @@ async def system_backup(
         archive_path = tmp / "backup.tar.gz"
         encrypted_path = tmp / "backup.estate.bak"
 
-        env = os.environ.copy()
-        env["PGPASSWORD"] = password
-        cmd = [
-            "pg_dump",
-            "-h", host,
-            "-p", port,
-            "-U", user,
-            "-d", dbname,
-            "--no-owner",
-            "--no-acl",
-            "-f", str(sql_dump_path),
-        ]
-        try:
-            result = subprocess.run(
-                cmd, env=env, capture_output=True, text=True, timeout=120,
-            )
-            if result.returncode != 0:
-                logger.error("pg_dump failed: %s", result.stderr)
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Database dump failed: {result.stderr[:500]}",
-                )
-        except FileNotFoundError:
-            raise HTTPException(
-                status_code=500,
-                detail="pg_dump binary not found. Is PostgreSQL client installed?",
-            )
-        except subprocess.TimeoutExpired:
-            raise HTTPException(
-                status_code=500,
-                detail="Database dump timed out after 120 seconds.",
-            )
+        sql_dump_path.write_text(sql_dump_content, encoding="utf-8")
+        (tmp / "manifest.json").write_text(
+            _json.dumps(manifest, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
 
-        uploads_dir = Path("app/static/uploads")
+        # Absolute path to the uploads directory inside the container.
+        # WORKDIR is /app, and docker-compose mounts the live volume to /app/static/uploads.
+        uploads_dir = _system_uploads_dir()
+        empty_uploads_dir = tmp / "uploads"
+        empty_uploads_dir.mkdir(exist_ok=True)
         with tarfile.open(archive_path, "w:gz") as tar:
             tar.add(sql_dump_path, arcname="dump.sql")
-            if uploads_dir.exists():
-                tar.add(uploads_dir, arcname="uploads")
+            tar.add(tmp / "manifest.json", arcname="manifest.json")
+            tar.add(uploads_dir if uploads_dir.exists() else empty_uploads_dir, arcname="uploads")
 
         fernet = Fernet(encryption_key.encode())
         with open(archive_path, "rb") as f:
@@ -4681,7 +7423,8 @@ async def system_restore(
     - Decrypts with ENCRYPTION_KEY or 24-word BIP39 recovery key.
     - Unpacks tar.gz, executes SQL dump in transaction, restores media files.
     """
-    import subprocess
+    import hashlib as _hashlib
+    import json as _json
     import tempfile
     import tarfile
     import base64 as _base64
@@ -4692,6 +7435,12 @@ async def system_restore(
 
     admin_count = db.query(User).filter(User.role == "ADMIN").count()
     is_fresh_system = admin_count == 0
+    try:
+        # Release the read transaction opened by the admin-count query before
+        # the restore transaction attempts to TRUNCATE the users table.
+        db.rollback()
+    except Exception:
+        pass
 
     if not is_fresh_system:
         # T72: Require admin JWT cookie authentication on initialized systems
@@ -4717,7 +7466,7 @@ async def system_restore(
             )
 
     form = await request.form()
-    backup_file = form.get("backup_file")
+    backup_file = form.get("backup_file") or form.get("file")
     if not backup_file:
         raise HTTPException(status_code=400, detail="No backup_file provided.")
 
@@ -4775,8 +7524,16 @@ async def system_restore(
 
         extract_dir = tmp / "extract"
         extract_dir.mkdir(exist_ok=True)
-        with tarfile.open(archive_path, "r:gz") as tar:
-            tar.extractall(extract_dir)
+        try:
+            with tarfile.open(archive_path, "r:gz") as tar:
+                _safe_extract_tar(tar, extract_dir)
+        except HTTPException:
+            raise
+        except tarfile.TarError:
+            raise HTTPException(
+                status_code=400,
+                detail="Backup archive is not a valid tar.gz file.",
+            )
 
         sql_dump = extract_dir / "dump.sql"
         if not sql_dump.exists():
@@ -4789,35 +7546,64 @@ async def system_restore(
         sql_content = sql_content.replace("SET statement_timeout = 0;", "")
         sql_content = sql_content.replace("SET lock_timeout = 0;", "")
 
+        manifest_path = extract_dir / "manifest.json"
+        if manifest_path.exists():
+            try:
+                manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Backup manifest is not valid JSON.",
+                )
+            expected_hash = manifest.get("dump_sha256")
+            actual_hash = _hashlib.sha256(sql_content.encode("utf-8")).hexdigest()
+            if expected_hash and expected_hash != actual_hash:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Backup manifest checksum does not match dump.sql.",
+                )
+
+        uploads_dst = staging_parent = staging_uploads = uploads_restore_state = None
         try:
-            from .database import engine
-            with engine.begin() as conn:
-                conn.execute(sa_text(sql_content))
+            from sqlalchemy import inspect as _restore_inspect
+
+            if database.engine is None:
+                raise RuntimeError("Database engine is not initialized.")
+
+            uploads_dst, staging_parent, staging_uploads = _prepare_uploads_restore(extract_dir)
+            uploads_restore_state = _begin_uploads_restore(
+                uploads_dst,
+                staging_parent,
+                staging_uploads,
+            )
+            staging_parent = None
+
+            # Restore database atomically. If loading the dump fails, the TRUNCATE
+            # and all INSERTs are rolled back together.
+            inspector = _restore_inspect(database.engine)
+            table_names = sorted(inspector.get_table_names())
+            with database.engine.begin() as conn:
+                for tname in table_names:
+                    conn.execute(sa_text(f'TRUNCATE TABLE {_quote_sql_identifier(tname)} RESTART IDENTITY CASCADE'))
+                conn.exec_driver_sql(sql_content)
+
+            _run_post_restore_migrations()
+            _commit_uploads_restore(uploads_restore_state)
+            uploads_restore_state = None
         except Exception as e:
-            logger.exception("SQL restore failed")
+            if uploads_restore_state is not None:
+                try:
+                    _rollback_uploads_restore(uploads_restore_state)
+                except Exception:
+                    logger.exception("Upload rollback failed after restore error")
+            if staging_parent is not None and staging_parent.exists():
+                import shutil
+                shutil.rmtree(staging_parent, ignore_errors=True)
+            logger.exception("System restore failed")
             raise HTTPException(
                 status_code=500,
                 detail=f"Database restore failed: {str(e)[:500]}",
             )
-
-        uploads_src = extract_dir / "uploads"
-        if uploads_src.exists():
-            uploads_dst = Path("app/static/uploads")
-            uploads_dst.mkdir(parents=True, exist_ok=True)
-            for item in uploads_src.iterdir():
-                dst = uploads_dst / item.name
-                if item.is_dir():
-                    import shutil
-                    if dst.exists():
-                        shutil.rmtree(dst)
-                    shutil.copytree(item, dst)
-                    dst.chmod(0o755)
-                    for f in dst.rglob("*"):
-                        f.chmod(0o644)
-                else:
-                    with open(item, "rb") as src_f:
-                        dst.write_bytes(src_f.read())
-                    dst.chmod(0o644)
 
         try:
             reset_provider()
@@ -4864,13 +7650,6 @@ async def secure_session_purge(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if session.status != "FINALIZED":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Session cannot be purged. Current status is '{session.status}'. "
-            "Only FINALIZED sessions can be permanently deleted.",
-        )
-
     # 1. Delete all chat messages
     db.query(ChatMessage).filter(ChatMessage.session_id == session_id).delete()
 
@@ -4894,9 +7673,18 @@ async def secure_session_purge(
     assets = db.query(Asset).filter(Asset.session_id == session_id).all()
     storage = get_storage_driver()
     for asset in assets:
-        if asset.image_uri:
+        deleted_uris = set()
+        for img in asset.images:
+            if img.image_uri and img.image_uri not in deleted_uris:
+                try:
+                    storage.delete(img.image_uri)
+                    deleted_uris.add(img.image_uri)
+                except Exception:
+                    pass
+        if asset.image_uri and asset.image_uri not in deleted_uris:
             try:
                 storage.delete(asset.image_uri)
+                deleted_uris.add(asset.image_uri)
             except Exception:
                 pass
         if asset.audio_uri:
@@ -5015,7 +7803,7 @@ async def session_websocket(
             return
 
         # Verify heir exists and is in a permissible status
-        db = SessionLocal()
+        db = _get_session_factory()()
         try:
             heir = db.query(User).filter(User.id == user_id, User.role == "HEIR").first()
         finally:
@@ -5091,7 +7879,7 @@ async def session_websocket(
                     continue
 
                 # ── Persist the incoming chat message ──────────────────
-                db = SessionLocal()
+                db = _get_session_factory()()
                 try:
                     chat_msg = ChatMessage(
                         session_id=session_id,
@@ -5216,3 +8004,21 @@ async def session_websocket(
         )
     finally:
         manager.disconnect(websocket, session_id=session_id)
+
+
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    print("VALIDATION ERROR:", exc.errors())
+    # sanitize bytes
+    errors = []
+    for err in exc.errors():
+        err_copy = err.copy()
+        if "input" in err_copy and isinstance(err_copy["input"], bytes):
+            err_copy["input"] = "<bytes>"
+        if "ctx" in err_copy and isinstance(err_copy.get("ctx", {}).get("error"), Exception):
+            err_copy["ctx"]["error"] = str(err_copy["ctx"]["error"])
+        errors.append(err_copy)
+    return JSONResponse(status_code=422, content={"detail": errors})

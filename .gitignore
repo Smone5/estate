@@ -1,0 +1,38 @@
+# Environment Variables
+.env
+.env.*
+!.env.example
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project specific
+db_data/
+recovery.txt
+test_voice.wav
+
+# IDE internal (like Antigravity / Gemini)
+.qodo/
+
+# General caches
+.pytest_cache/
+
+# Scratch & temporary helper files
+test.py
+test_fastapi.py
+test_endpoint.py
+recovered_replacements.json
+fix_sed.py
+recovery.txt

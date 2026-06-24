@@ -403,6 +403,78 @@ class TestProbateLedgerPDF:
         assert "Alice" in text
         assert "Bob" in text
 
+    def test_beneficiary_table_renders_submission_timestamp(self):
+        """Registered beneficiary table should show when points were submitted."""
+        session = _make_session()
+        admin = _make_admin()
+        heir = _make_user(
+            submitted_at=datetime(2025, 2, 12, 15, 45, tzinfo=timezone.utc),
+        )
+        solver = _make_solver_result()
+        audit_log = _make_audit_log(session.id)
+        notice_log = build_notice_log(str(session.id), [heir])
+
+        buf = build_probate_ledger_pdf(
+            session=session,
+            heirs=[admin, heir],
+            assets=[],
+            solver_result=solver,
+            audit_logs=[audit_log],
+            notice_log=notice_log,
+        )
+
+        text = _extract_text_from_pdf(buf.getvalue())
+        assert "Submitted" in text
+        assert "2025-02-12" in text
+        assert "15:45 UTC" in text
+
+    def test_cover_identifies_missing_executor_and_decedent_metadata(self):
+        """Cover should not imply unknown legal parties were captured."""
+        session = _make_session(title="Test Session")
+        admin = _make_admin(legal_first_name=None, legal_middle_name=None, legal_last_name=None)
+        heir = _make_user()
+        solver = _make_solver_result()
+        audit_log = _make_audit_log(session.id)
+        notice_log = build_notice_log(str(session.id), [heir])
+
+        buf = build_probate_ledger_pdf(
+            session=session,
+            heirs=[admin, heir],
+            assets=[],
+            solver_result=solver,
+            audit_logs=[audit_log],
+            notice_log=notice_log,
+        )
+
+        text = _extract_text_from_pdf(buf.getvalue())
+        assert "Estate / Decedent: Not separately recorded" in text
+        assert "session title: Test Session" in text
+        assert "Executor Legal Name: Not recorded" in text
+        assert "Executor Account: account executor" in text
+
+    def test_post_allocation_distribution_notice_explains_executor_responsibility(self):
+        """Ledger should clarify that allocation is not physical delivery."""
+        session = _make_session()
+        admin = _make_admin()
+        heir = _make_user()
+        solver = _make_solver_result()
+        audit_log = _make_audit_log(session.id)
+        notice_log = build_notice_log(str(session.id), [heir])
+
+        buf = build_probate_ledger_pdf(
+            session=session,
+            heirs=[admin, heir],
+            assets=[],
+            solver_result=solver,
+            audit_logs=[audit_log],
+            notice_log=notice_log,
+        )
+
+        text = _extract_text_from_pdf(buf.getvalue())
+        assert "Post-Allocation Distribution Responsibility" in text
+        assert "does not by itself certify that physical possession has transferred" in text
+        assert "recipient acknowledgment or signature" in text
+
     def test_mnw_callout_displays_product_value(self):
         """MNW product callout box renders the scalar value."""
         session = _make_session()
@@ -424,6 +496,86 @@ class TestProbateLedgerPDF:
         data = buf.getvalue()
         text = _extract_text_from_pdf(data)
         assert "Maximum Nash Welfare Product" in text
+
+    def test_allocation_grid_uses_legal_name_not_uuid(self):
+        """Final allocation grid should identify heirs by legal name."""
+        session = _make_session()
+        admin = _make_admin()
+        heir = _make_user(legal_first_name="Alice", legal_last_name="Smith")
+        asset = _make_asset(
+            session.id,
+            status="DISTRIBUTED",
+            allocated_to_id=heir.id,
+        )
+        solver = _make_solver_result({str(heir.id): [str(asset.id)]})
+        audit_log = _make_audit_log(session.id)
+        notice_log = build_notice_log(str(session.id), [heir])
+
+        buf = build_probate_ledger_pdf(
+            session=session,
+            heirs=[admin, heir],
+            assets=[asset],
+            solver_result=solver,
+            audit_logs=[audit_log],
+            notice_log=notice_log,
+        )
+
+        text = _extract_text_from_pdf(buf.getvalue())
+        assert "Alice Smith" in text
+        assert str(heir.id) not in text
+
+    def test_allocation_grid_clarifies_ai_appraisal_source(self):
+        """Appraisal range should disclose the source/type of valuation."""
+        session = _make_session()
+        admin = _make_admin()
+        heir = _make_user()
+        asset = _make_asset(
+            session.id,
+            valuation_min=40,
+            valuation_max=90,
+            valuation_source="AI Appraisal",
+        )
+        solver = _make_solver_result({str(heir.id): [str(asset.id)]})
+        audit_log = _make_audit_log(session.id)
+        notice_log = build_notice_log(str(session.id), [heir])
+
+        buf = build_probate_ledger_pdf(
+            session=session,
+            heirs=[admin, heir],
+            assets=[asset],
+            solver_result=solver,
+            audit_logs=[audit_log],
+            notice_log=notice_log,
+        )
+
+        text = _extract_text_from_pdf(buf.getvalue())
+        assert "$40" in text
+        assert "$90" in text
+        assert "AI-generated estimate" in text
+        assert "not a professional appraisal" in text
+
+    def test_zero_mnw_product_includes_review_note(self):
+        """Zero MNW should be explained so test ledgers are not misleading."""
+        session = _make_session()
+        admin = _make_admin()
+        heir = _make_user()
+        solver = _make_solver_result(mnw=0.0)
+        audit_log = _make_audit_log(session.id)
+        notice_log = build_notice_log(str(session.id), [heir])
+
+        buf = build_probate_ledger_pdf(
+            session=session,
+            heirs=[admin, heir],
+            assets=[],
+            solver_result=solver,
+            audit_logs=[audit_log],
+            notice_log=notice_log,
+        )
+
+        text = _extract_text_from_pdf(buf.getvalue())
+        assert "Maximum Nash Welfare Product" in text
+        assert "one-participant systems test" in text
+        assert "should be reviewed" in text
 
     def test_admin_intervention_log_renders_overrides(self):
         """When ADMIN_OVERRIDE audit logs exist, intervention table appears."""

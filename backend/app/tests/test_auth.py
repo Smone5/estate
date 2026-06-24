@@ -102,6 +102,7 @@ def _make_heir_user(session_id=None, invite_token_used=False):
         legal_last_name=None,
         relationship_to_decedent=None,
         date_of_birth=None,
+        email="heir@example.com",
     )
 
 
@@ -368,6 +369,41 @@ class TestAdminLoginEndpoint:
         )
         assert resp.status_code == 401
 
+    def test_auth_me_restores_admin_from_cookie(self, client, test_env):
+        token = create_access_token(
+            user_id="admin-id",
+            username="executor",
+            role="ADMIN",
+            session_id=None,
+        )
+        client.cookies.set("estate_session", token)
+
+        resp = client.get("/api/auth/me")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "authenticated"
+        assert data["role"] == "ADMIN"
+        assert data["username"] == "executor"
+        assert data["session_id"] is None
+
+    def test_auth_me_requires_cookie(self, client, test_env):
+        resp = client.get("/api/auth/me")
+        assert resp.status_code == 401
+
+    def test_auth_logout_clears_cookie(self, client, test_env):
+        # Set a dummy cookie
+        client.cookies.set("estate_session", "dummy_token")
+        
+        resp = client.post("/api/auth/logout")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "success", "message": "Logged out successfully"}
+        
+        # Verify the cookie was cleared (has an empty value or is deleted)
+        # In httpx/test_client, the cookie will be deleted or set to empty
+        cookie = client.cookies.get("estate_session")
+        assert cookie is None or cookie == ""
+
 
 # ---------------------------------------------------------------------------
 # Invite verify endpoint tests
@@ -393,6 +429,7 @@ class TestInviteVerifyEndpoint:
                 "token": str(heir.invite_token),
                 "consent_accepted": True,
                 "age_verified": True,
+                "password": "heirpass123",
                 "legal_first_name": "Jane",
                 "legal_last_name": "Doe",
                 "relationship_to_decedent": "Daughter",
@@ -404,6 +441,7 @@ class TestInviteVerifyEndpoint:
         assert data["status"] == "success"
         assert data["user_status"] == "PROFILE_HOLD"
         assert data["heir_id"] == str(heir.id)
+        assert verify_password("heirpass123", heir.pw_hash)
 
     def test_verify_sets_cookie(self, client, mock_db_session, test_env):
         heir = _make_heir_user()
@@ -701,6 +739,91 @@ class TestInviteLoginEndpoint:
 
 
 # ---------------------------------------------------------------------------
+# Heir password login endpoint tests
+# ---------------------------------------------------------------------------
+
+
+class TestHeirPasswordLoginEndpoint:
+    """POST /api/auth/heir-login"""
+
+    def _setup_heir_mock(self, mock_db_session, heir):
+        mock_query = mock_db_session.query.return_value
+        mock_filter = mock_query.filter.return_value
+        mock_filter.first.return_value = heir
+
+    def test_password_login_success_after_invite_expires(self, client, mock_db_session, test_env):
+        heir = _make_heir_user(invite_token_used=True)
+        heir.email = "heir@example.com"
+        heir.pw_hash = hash_password("heirpass123")
+        heir.invite_token_expires_at = datetime.now(timezone.utc) - timedelta(days=1)
+        self._setup_heir_mock(mock_db_session, heir)
+
+        resp = client.post(
+            "/api/auth/heir-login",
+            json={"identifier": "heir@example.com", "password": "heirpass123"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "success"
+        assert data["role"] == "HEIR"
+        assert data["heir_id"] == str(heir.id)
+        assert "estate_session=" in resp.headers.get("set-cookie", "")
+
+    def test_password_login_accepts_username(self, client, mock_db_session, test_env):
+        heir = _make_heir_user(invite_token_used=True)
+        heir.pw_hash = hash_password("heirpass123")
+        self._setup_heir_mock(mock_db_session, heir)
+
+        resp = client.post(
+            "/api/auth/heir-login",
+            json={"identifier": heir.username, "password": "heirpass123"},
+        )
+
+        assert resp.status_code == 200
+
+    def test_password_login_wrong_password_returns_401(self, client, mock_db_session, test_env):
+        heir = _make_heir_user(invite_token_used=True)
+        heir.email = "heir@example.com"
+        heir.pw_hash = hash_password("heirpass123")
+        self._setup_heir_mock(mock_db_session, heir)
+
+        resp = client.post(
+            "/api/auth/heir-login",
+            json={"identifier": "heir@example.com", "password": "wrongpass"},
+        )
+
+        assert resp.status_code == 401
+        assert resp.json()["detail"] == "Invalid credentials"
+
+    def test_password_login_without_onboarding_returns_401(self, client, mock_db_session, test_env):
+        heir = _make_heir_user(invite_token_used=False)
+        heir.email = "heir@example.com"
+        heir.pw_hash = hash_password("heirpass123")
+        self._setup_heir_mock(mock_db_session, heir)
+
+        resp = client.post(
+            "/api/auth/heir-login",
+            json={"identifier": "heir@example.com", "password": "heirpass123"},
+        )
+
+        assert resp.status_code == 401
+
+    def test_password_login_missing_password_hash_returns_401(self, client, mock_db_session, test_env):
+        heir = _make_heir_user(invite_token_used=True)
+        heir.email = "heir@example.com"
+        heir.pw_hash = None
+        self._setup_heir_mock(mock_db_session, heir)
+
+        resp = client.post(
+            "/api/auth/heir-login",
+            json={"identifier": "heir@example.com", "password": "heirpass123"},
+        )
+
+        assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
 # Invite status endpoint
 # ---------------------------------------------------------------------------
 
@@ -761,3 +884,22 @@ class TestHealthEndpoint:
         resp = client.get("/health")
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
+
+
+class TestSetupStatusEndpoint:
+    def test_setup_status_true_when_admin_exists(self, client, mock_db_session, test_env):
+        admin = _make_admin_user()
+        mock_db_session.query.return_value.filter.return_value.first.return_value = admin
+
+        resp = client.get("/api/setup/status")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"admin_exists": True}
+
+    def test_setup_status_false_when_no_admin_exists(self, client, mock_db_session, test_env):
+        mock_db_session.query.return_value.filter.return_value.first.return_value = None
+
+        resp = client.get("/api/setup/status")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"admin_exists": False}

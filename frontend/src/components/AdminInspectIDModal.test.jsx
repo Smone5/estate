@@ -72,7 +72,17 @@ describe('AdminInspectIDModal Component', () => {
   });
 
   it('calls approve API and closes on success', async () => {
-    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({}) });
+    const updatedHeir = {
+      ...mockHeir,
+      status: 'ACTIVE',
+      user_status: 'ACTIVE',
+      identity_verified: true,
+      id_scan_uri: null,
+    };
+    global.fetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ heir: updatedHeir }),
+    });
     const onClose = vi.fn();
     const onVerificationComplete = vi.fn();
 
@@ -87,7 +97,7 @@ describe('AdminInspectIDModal Component', () => {
     fireEvent.click(screen.getByTestId('approve-identity-btn'));
 
     await waitFor(() => {
-      expect(onVerificationComplete).toHaveBeenCalledTimes(1);
+      expect(onVerificationComplete).toHaveBeenCalledWith(updatedHeir);
       expect(onClose).toHaveBeenCalledTimes(1);
     });
   });

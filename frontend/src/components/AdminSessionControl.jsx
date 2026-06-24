@@ -1,45 +1,143 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useMediationStore } from '../store/useMediationStore';
+import AdminInspectIDModal from './AdminInspectIDModal';
 
-export default function AdminSessionControl({ sessionId }) {
-  const store = useMediationStore();
+const emptyRegistrationForm = {
+  username: '',
+  email: '',
+  phone: '',
+  address_line1: '',
+  address_line2: '',
+  address_city: '',
+  address_region: '',
+  address_postal_code: '',
+  address_country: 'United States',
+};
+
+function composeAddress(address) {
+  const locality = [address.address_city, address.address_region]
+    .map((part) => part?.trim())
+    .filter(Boolean)
+    .join(', ');
+  const localityWithPostal = [locality, address.address_postal_code?.trim()]
+    .filter(Boolean)
+    .join(' ');
+
+  return [
+    address.address_line1,
+    address.address_line2,
+    localityWithPostal,
+    address.address_country,
+  ]
+    .map((part) => part?.trim())
+    .filter(Boolean)
+    .join(', ');
+}
+
+function buildInviteUrl(inviteToken) {
+  if (!inviteToken) return '';
+  const origin = window.location?.origin || 'http://localhost';
+  return `${origin}/invite/${inviteToken}`;
+}
+
+function buildInviteClipboardText(heir) {
+  const heirName =
+    heir.username ||
+    `${heir.legal_first_name || ''} ${heir.legal_last_name || ''}`.trim() ||
+    'Beneficiary';
+  const inviteUrl = buildInviteUrl(heir.invite_token);
+  const expires = heir.invite_token_expires_at
+    ? new Date(heir.invite_token_expires_at).toLocaleString()
+    : 'the date provided by the executor';
+
+  return [
+    `To: ${heir.email || ''}`,
+    'Subject: Estate Mediation Invitation',
+    '',
+    `Dear ${heirName},`,
+    '',
+    'You have been invited to participate in an estate keepsake mediation using The Estate Steward.',
+    '',
+    'Please open this invitation link to review the estate catalog, complete your onboarding, and participate:',
+    inviteUrl,
+    '',
+    `This invitation expires on ${expires}.`,
+    '',
+    'The Estate Steward',
+  ].join('\n');
+}
+
+export default function AdminSessionControl({
+  sessionId,
+  heirs: propHeirs,
+  onRefreshHeirs,
+}) {
   const sessionStatus = useMediationStore((s) => s.sessionStatus);
-  const isPaused = useMediationStore((s) => s.isPaused);
 
-  const [heirs, setHeirs] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [internalHeirs, setInternalHeirs] = useState([]);
+  const [loading, setLoading] = useState(propHeirs === undefined);
   const [actionError, setActionError] = useState(null);
   const [actionSuccess, setActionSuccess] = useState(null);
+  const [selectedIdentityHeir, setSelectedIdentityHeir] = useState(null);
+  const [heirOverrides, setHeirOverrides] = useState({});
+
+  const baseHeirs = propHeirs !== undefined ? propHeirs : internalHeirs;
+  const heirs = baseHeirs.map((heir) => (
+    heirOverrides[heir.id] ? { ...heir, ...heirOverrides[heir.id] } : heir
+  ));
+  const identityReviewHeirs = heirs.filter(
+    (heir) => (heir.status === 'PROFILE_HOLD' || heir.user_status === 'PROFILE_HOLD') && heir.id_scan_uri,
+  );
 
   // Registration form
-  const [regForm, setRegForm] = useState({
-    username: '',
-    email: '',
-    phone: '',
-    physical_address: '',
-  });
+  const [regForm, setRegForm] = useState(emptyRegistrationForm);
   const [registering, setRegistering] = useState(false);
 
   // ── Fetch heirs ─────────────────────────────────────────────────────────
   const fetchHeirs = useCallback(async () => {
     if (!sessionId) return;
+    if (onRefreshHeirs) {
+      await onRefreshHeirs();
+      return;
+    }
     try {
       setLoading(true);
-      const res = await fetch(`/api/sessions/${sessionId}/heirs`);
+      const res = await fetch(`/api/sessions/${sessionId}/heirs`, {
+        credentials: 'same-origin',
+      });
       if (res.ok) {
         const data = await res.json();
-        setHeirs(Array.isArray(data) ? data : []);
+        setInternalHeirs(Array.isArray(data) ? data : []);
+        setHeirOverrides({});
+      } else if (res.status === 401) {
+        setActionError('Your session has expired. Please refresh the page to log in again.');
       }
     } catch (err) {
       console.error('Failed to fetch heirs', err);
     } finally {
       setLoading(false);
     }
-  }, [sessionId]);
+  }, [sessionId, onRefreshHeirs]);
+
+  async function handleVerificationComplete(updatedHeir) {
+    if (updatedHeir?.id) {
+      setHeirOverrides((current) => ({
+        ...current,
+        [updatedHeir.id]: updatedHeir,
+      }));
+      setSelectedIdentityHeir((current) => (
+        current?.id === updatedHeir.id ? { ...current, ...updatedHeir } : current
+      ));
+    }
+    setActionSuccess('Identity verification updated.');
+    await fetchHeirs();
+  }
 
   useEffect(() => {
-    fetchHeirs();
-  }, [fetchHeirs]);
+    if (propHeirs === undefined) {
+      fetchHeirs();
+    }
+  }, [fetchHeirs, propHeirs]);
 
   // Clear action messages after timeout
   useEffect(() => {
@@ -65,14 +163,26 @@ export default function AdminSessionControl({ sessionId }) {
     setActionSuccess(null);
 
     try {
+      const physicalAddress = composeAddress(regForm);
+      const structuredAddress = {
+        address_line1: regForm.address_line1.trim() || null,
+        address_line2: regForm.address_line2.trim() || null,
+        address_city: regForm.address_city.trim() || null,
+        address_region: regForm.address_region.trim() || null,
+        address_postal_code: regForm.address_postal_code.trim() || null,
+        address_country: regForm.address_country.trim() || null,
+      };
+
       const res = await fetch(`/api/sessions/${sessionId}/heirs`, {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           username: regForm.username.trim(),
           email: regForm.email.trim(),
           phone: regForm.phone.trim() || null,
-          physical_address: regForm.physical_address.trim() || null,
+          physical_address: physicalAddress || null,
+          ...structuredAddress,
         }),
       });
 
@@ -81,8 +191,32 @@ export default function AdminSessionControl({ sessionId }) {
         throw new Error(errData.detail || `Registration failed: ${res.status}`);
       }
 
-      setRegForm({ username: '', email: '', phone: '', physical_address: '' });
-      setActionSuccess('Heir registered successfully.');
+      const createdHeir = await res.json().catch(() => ({}));
+      const createdHeirId = createdHeir.id || createdHeir.heir_id;
+      let inviteDispatched = false;
+      let inviteError = null;
+
+      if (createdHeirId && regForm.email.trim()) {
+        const inviteRes = await fetch(`/api/heirs/${createdHeirId}/send-invite`, {
+          method: 'POST',
+          credentials: 'same-origin',
+        });
+        if (inviteRes.ok) {
+          inviteDispatched = true;
+        } else {
+          const errData = await inviteRes.json().catch(() => ({}));
+          inviteError = errData.detail || `Invite email failed: ${inviteRes.status}`;
+        }
+      }
+
+      setRegForm(emptyRegistrationForm);
+      if (inviteDispatched) {
+        setActionSuccess('Heir registered and invitation email sent.');
+      } else if (inviteError) {
+        setActionSuccess(`Heir registered, but invitation email was not sent: ${inviteError}`);
+      } else {
+        setActionSuccess('Heir registered successfully.');
+      }
       await fetchHeirs();
     } catch (err) {
       setActionError(err.message);
@@ -96,7 +230,10 @@ export default function AdminSessionControl({ sessionId }) {
     setActionError(null);
     setActionSuccess(null);
     try {
-      const res = await fetch(`/api/heirs/${heirId}/send-invite`, { method: 'POST' });
+      const res = await fetch(`/api/heirs/${heirId}/send-invite`, {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.detail || `Send invite failed: ${res.status}`);
@@ -115,6 +252,7 @@ export default function AdminSessionControl({ sessionId }) {
     try {
       const res = await fetch(`/api/heirs/${heirId}/invite-token`, {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
       });
@@ -137,6 +275,13 @@ export default function AdminSessionControl({ sessionId }) {
     );
   }
 
+  function handleCopyInvite(heir) {
+    navigator.clipboard.writeText(buildInviteClipboardText(heir)).then(
+      () => setActionSuccess('Invite message copied. Paste it into your email app to send manually.'),
+      () => setActionError('Failed to copy invite message.'),
+    );
+  }
+
   // ── Delete Heir ─────────────────────────────────────────────────────────
   async function handleDeleteHeir(heirId, heirName) {
     if (!window.confirm(`Permanently delete heir "${heirName}"? This will purge all PII, chat history, and ID scans. This action cannot be undone.`)) {
@@ -146,82 +291,16 @@ export default function AdminSessionControl({ sessionId }) {
     setActionError(null);
     setActionSuccess(null);
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/heirs/${heirId}`, { method: 'DELETE' });
+      const res = await fetch(`/api/sessions/${sessionId}/heirs/${heirId}`, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+      });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.detail || `Delete heir failed: ${res.status}`);
       }
       setActionSuccess('Heir deleted and PII purged.');
       await fetchHeirs();
-    } catch (err) {
-      setActionError(err.message);
-    }
-  }
-
-  // ── Session Controls ────────────────────────────────────────────────────
-  async function handleLaunch() {
-    if (!window.confirm('Launch the session? This will lock the asset catalog and open mediation to all heirs. This action cannot be undone.')) return;
-
-    setActionError(null);
-    setActionSuccess(null);
-    try {
-      const res = await fetch(`/api/sessions/${sessionId}/launch`, { method: 'POST' });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || `Launch failed: ${res.status}`);
-      }
-      setActionSuccess('Session launched. Heirs may now begin mediation.');
-      store.loadSessionDetails();
-    } catch (err) {
-      setActionError(err.message);
-    }
-  }
-
-  async function handlePause() {
-    setActionError(null);
-    setActionSuccess(null);
-    try {
-      const res = await fetch(`/api/sessions/${sessionId}/pause`, { method: 'POST' });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || `Pause failed: ${res.status}`);
-      }
-      setActionSuccess('Session paused. Heir sliders and chat are now frozen.');
-      store.loadSessionDetails();
-    } catch (err) {
-      setActionError(err.message);
-    }
-  }
-
-  async function handleUnpause() {
-    setActionError(null);
-    setActionSuccess(null);
-    try {
-      const res = await fetch(`/api/sessions/${sessionId}/unpause`, { method: 'POST' });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || `Unpause failed: ${res.status}`);
-      }
-      setActionSuccess('Session unpaused. Heir access restored.');
-      store.loadSessionDetails();
-    } catch (err) {
-      setActionError(err.message);
-    }
-  }
-
-  async function handleFinalize() {
-    if (!window.confirm('Finalize the mediation session? This will run the division solver, seal the hash chain, and permanently lock all allocations. This action cannot be undone.')) return;
-
-    setActionError(null);
-    setActionSuccess(null);
-    try {
-      const res = await fetch(`/api/sessions/${sessionId}/finalize`, { method: 'POST' });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || `Finalize failed: ${res.status}`);
-      }
-      setActionSuccess('Session finalized. Keepsake ledgers are available for download.');
-      store.loadSessionDetails();
     } catch (err) {
       setActionError(err.message);
     }
@@ -248,8 +327,6 @@ export default function AdminSessionControl({ sessionId }) {
 
   // ── Render ──────────────────────────────────────────────────────────────
   const isSetup = sessionStatus === 'SETUP';
-  const isActive = sessionStatus === 'ACTIVE' || sessionStatus === 'LOCKED';
-  const isFinalized = sessionStatus === 'FINALIZED';
 
   if (!sessionId) {
     return (
@@ -273,74 +350,36 @@ export default function AdminSessionControl({ sessionId }) {
         </div>
       )}
 
-      {/* Session Status Banner */}
-      <div
-        className="archival-card"
-        style={{
-          marginBottom: 'var(--space-lg)',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          flexWrap: 'wrap',
-          gap: 'var(--space-sm)',
-        }}
-      >
-        <div>
-          <h3 style={{ fontFamily: 'var(--font-serif)', marginBottom: '4px' }}>
-            Session Status: <strong>{sessionStatus}</strong>
-            {isPaused && sessionStatus !== 'SETUP' && ' (Paused)'}
-          </h3>
-          <p className="text-muted text-sm">
-            {isSetup && 'Setup Phase. Stage and publish assets, then launch the session.'}
-            {isActive && !isPaused && 'Mediation active. Heirs are allocating points.'}
-            {isActive && isPaused && 'Session paused. Heir access is frozen.'}
-            {isFinalized && 'Mediation finalized. Distribution ledgers are sealed.'}
-          </p>
+      {identityReviewHeirs.length > 0 && (
+        <div
+          className="banner banner-amber"
+          data-testid="identity-review-banner"
+          style={{
+            marginBottom: 'var(--space-md)',
+            display: 'flex',
+            justifyContent: 'space-between',
+            gap: 'var(--space-md)',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+          }}
+        >
+          <span>
+            <strong>{identityReviewHeirs.length} ID review pending.</strong>
+            {' '}Inspect uploaded ID documents before launching or continuing mediation.
+          </span>
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={() => setSelectedIdentityHeir(identityReviewHeirs[0])}
+            data-testid="open-first-id-review-btn"
+          >
+            Review ID
+          </button>
         </div>
-        <div style={{ display: 'flex', gap: 'var(--space-sm)', flexWrap: 'wrap' }}>
-          {isSetup && (
-            <button
-              className="btn btn-primary btn-sm"
-              onClick={handleLaunch}
-              data-testid="launch-session-btn"
-            >
-              🚀 Launch Session
-            </button>
-          )}
-          {isActive && !isPaused && (
-            <button
-              className="btn btn-secondary btn-sm"
-              onClick={handlePause}
-              data-testid="pause-session-btn"
-            >
-              ⏸ Pause Session
-            </button>
-          )}
-          {isActive && isPaused && (
-            <button
-              className="btn btn-primary btn-sm"
-              onClick={handleUnpause}
-              data-testid="unpause-session-btn"
-            >
-              ▶ Unpause Session
-            </button>
-          )}
-          {isActive && (
-            <button
-              className="btn btn-primary btn-sm"
-              onClick={handleFinalize}
-              style={{ background: 'var(--color-alert)', borderColor: 'var(--color-alert)' }}
-              data-testid="finalize-session-btn"
-            >
-              🔒 Finalize & Seal
-            </button>
-          )}
-        </div>
-      </div>
+      )}
 
       {/* Heir Registration Panel (Setup only) */}
       {isSetup && (
-        <div className="archival-card" style={{ marginBottom: 'var(--space-lg)' }}>
+        <div id="register-heir-section" className="archival-card" style={{ marginBottom: 'var(--space-lg)' }}>
           <h3 style={{ fontFamily: 'var(--font-serif)', marginBottom: 'var(--space-md)' }}>
             Register Heir
           </h3>
@@ -388,16 +427,81 @@ export default function AdminSessionControl({ sessionId }) {
                 />
               </div>
               <div>
-                <label className="form-label" htmlFor="heir-address">
-                  Physical Address (optional)
+                <label className="form-label" htmlFor="heir-address-line1">
+                  Address Line 1 (optional)
                 </label>
                 <input
-                  id="heir-address"
+                  id="heir-address-line1"
                   className="form-input"
-                  value={regForm.physical_address}
-                  onChange={(e) => setRegForm((p) => ({ ...p, physical_address: e.target.value }))}
-                  placeholder="123 Main St, Anytown, USA"
-                  data-testid="heir-reg-address"
+                  value={regForm.address_line1}
+                  onChange={(e) => setRegForm((p) => ({ ...p, address_line1: e.target.value }))}
+                  placeholder="1429 Villa Capri Circle"
+                  data-testid="heir-reg-address-line1"
+                />
+              </div>
+              <div>
+                <label className="form-label" htmlFor="heir-address-line2">
+                  Address Line 2 (optional)
+                </label>
+                <input
+                  id="heir-address-line2"
+                  className="form-input"
+                  value={regForm.address_line2}
+                  onChange={(e) => setRegForm((p) => ({ ...p, address_line2: e.target.value }))}
+                  placeholder="Apt, suite, unit, building"
+                  data-testid="heir-reg-address-line2"
+                />
+              </div>
+              <div>
+                <label className="form-label" htmlFor="heir-address-city">
+                  City / Locality (optional)
+                </label>
+                <input
+                  id="heir-address-city"
+                  className="form-input"
+                  value={regForm.address_city}
+                  onChange={(e) => setRegForm((p) => ({ ...p, address_city: e.target.value }))}
+                  placeholder="Odessa"
+                  data-testid="heir-reg-address-city"
+                />
+              </div>
+              <div>
+                <label className="form-label" htmlFor="heir-address-region">
+                  State / Province / Region (optional)
+                </label>
+                <input
+                  id="heir-address-region"
+                  className="form-input"
+                  value={regForm.address_region}
+                  onChange={(e) => setRegForm((p) => ({ ...p, address_region: e.target.value }))}
+                  placeholder="FL"
+                  data-testid="heir-reg-address-region"
+                />
+              </div>
+              <div>
+                <label className="form-label" htmlFor="heir-address-postal">
+                  Postal / ZIP Code (optional)
+                </label>
+                <input
+                  id="heir-address-postal"
+                  className="form-input"
+                  value={regForm.address_postal_code}
+                  onChange={(e) => setRegForm((p) => ({ ...p, address_postal_code: e.target.value }))}
+                  placeholder="33556"
+                  data-testid="heir-reg-address-postal"
+                />
+              </div>
+              <div>
+                <label className="form-label" htmlFor="heir-address-country">
+                  Country (optional)
+                </label>
+                <input
+                  id="heir-address-country"
+                  className="form-input"
+                  value={regForm.address_country}
+                  onChange={(e) => setRegForm((p) => ({ ...p, address_country: e.target.value }))}
+                  placeholder="United States"
+                  data-testid="heir-reg-address-country"
                 />
               </div>
             </div>
@@ -465,7 +569,7 @@ export default function AdminSessionControl({ sessionId }) {
                     <td style={tdStyle}>{heir.email || '—'}</td>
                     <td style={tdStyle}>{heir.phone || '—'}</td>
                     <td style={{ ...tdStyle, maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {heir.physical_address || '—'}
+                      {composeAddress(heir) || heir.physical_address || '—'}
                     </td>
                     <td style={tdStyle}>{statusCheckmark(heir.user_status || heir.status)}</td>
                     <td style={tdStyle}>
@@ -510,7 +614,27 @@ export default function AdminSessionControl({ sessionId }) {
                             >
                               ✉ Send
                             </button>
+                            {heir.invite_token && (
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => handleCopyInvite(heir)}
+                                style={{ fontSize: '0.65rem', padding: '2px 6px' }}
+                                data-testid={`copy-invite-${heir.id}`}
+                              >
+                                Copy Invite
+                              </button>
+                            )}
                           </>
+                        )}
+                        {(heir.status === 'PROFILE_HOLD' || heir.user_status === 'PROFILE_HOLD' || heir.id_scan_uri) && (
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => setSelectedIdentityHeir(heir)}
+                            style={{ fontSize: '0.65rem', padding: '2px 6px' }}
+                            data-testid={`inspect-id-${heir.id}`}
+                          >
+                            Inspect ID
+                          </button>
                         )}
                         {isSetup && (
                           <button
@@ -531,6 +655,14 @@ export default function AdminSessionControl({ sessionId }) {
           </div>
         )}
       </div>
+
+      {selectedIdentityHeir && (
+        <AdminInspectIDModal
+          heir={selectedIdentityHeir}
+          onClose={() => setSelectedIdentityHeir(null)}
+          onVerificationComplete={handleVerificationComplete}
+        />
+      )}
     </div>
   );
 }

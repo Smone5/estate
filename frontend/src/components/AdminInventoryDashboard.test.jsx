@@ -1,10 +1,156 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import React from 'react';
 import AdminInventoryDashboard from './AdminInventoryDashboard';
 import { useMediationStore } from '../store/useMediationStore';
 import '@testing-library/jest-dom';
+
+// Mock indexedDB for jsdom
+const indexedDBStore = {};
+global.indexedDB = {
+  open: vi.fn(() => {
+    const request = {
+      result: {
+        objectStoreNames: { contains: () => false },
+        createObjectStore: vi.fn(() => ({
+          createIndex: vi.fn(),
+        })),
+        transaction: vi.fn(() => ({
+          objectStore: vi.fn(() => ({
+            put: vi.fn(() => ({
+              onsuccess: null,
+            })),
+            get: vi.fn(() => ({
+              onsuccess: null,
+              result: null,
+            })),
+            getAll: vi.fn(() => ({
+              onsuccess: null,
+              result: [],
+            })),
+            index: vi.fn(() => ({
+              getAll: vi.fn(() => ({
+                onsuccess: null,
+                result: [],
+              })),
+              count: vi.fn(() => ({
+                onsuccess: null,
+                result: 0,
+              })),
+            })),
+            delete: vi.fn(() => ({
+              onsuccess: null,
+            })),
+            clear: vi.fn(() => ({
+              onsuccess: null,
+            })),
+          })),
+          oncomplete: null,
+        })),
+      },
+      onupgradeneeded: null,
+      onsuccess: null,
+      onerror: null,
+    };
+    return request;
+  }),
+};
+
+// Mock crypto.randomUUID
+if (!global.crypto) {
+  global.crypto = {};
+}
+global.crypto.randomUUID = vi.fn(() => 'test-uuid-1234');
+
+// Mock createImageBitmap (used by imageCompression)
+global.createImageBitmap = vi.fn(() =>
+  Promise.resolve({
+    width: 100,
+    height: 100,
+    close: vi.fn(),
+  })
+);
+
+// Mock canvas
+HTMLCanvasElement.prototype.getContext = vi.fn(() => ({
+  translate: vi.fn(),
+  rotate: vi.fn(),
+  drawImage: vi.fn(),
+  filter: '',
+}));
+HTMLCanvasElement.prototype.toDataURL = vi.fn(() => 'data:image/webp;base64,test');
+HTMLCanvasElement.prototype.toBlob = vi.fn((callback, type, quality) => {
+  callback(new Blob(['test'], { type: type || 'image/webp' }));
+});
+
+class MockImage {
+  constructor() {
+    this.naturalWidth = 100;
+    this.naturalHeight = 100;
+    this.onload = null;
+    this.onerror = null;
+    this.crossOrigin = '';
+  }
+
+  set src(value) {
+    this._src = value;
+    setTimeout(() => this.onload && this.onload(), 0);
+  }
+
+  get src() {
+    return this._src;
+  }
+}
+global.Image = MockImage;
+window.Image = MockImage;
+
+// Mock stagingDB
+vi.mock('../utils/stagingDB', () => ({
+  saveStagingItem: vi.fn(() => Promise.resolve()),
+  loadStagingItems: vi.fn(() => Promise.resolve([])),
+  loadPendingStagingItems: vi.fn(() => Promise.resolve([])),
+  deleteStagingItem: vi.fn(() => Promise.resolve()),
+  updateStagingItemStatus: vi.fn(() => Promise.resolve()),
+  clearStagingItems: vi.fn(() => Promise.resolve()),
+  getPendingCount: vi.fn(() => Promise.resolve(0)),
+}));
+
+// Mock imageCompression
+vi.mock('../utils/imageCompression', () => ({
+  compressImage: vi.fn((file) => Promise.resolve(new Blob(['compressed'], { type: 'image/webp' }))),
+  shouldCompress: vi.fn(() => true),
+  autoCompress: vi.fn((file) => Promise.resolve({ blob: new Blob(['compressed'], { type: 'image/webp' }), wasCompressed: true })),
+}));
+
+// Mock AdminVoiceRecorder
+vi.mock('./AdminVoiceRecorder', () => ({
+  default: ({ assetId, onSaved }) => (
+    <div data-testid={`voice-recorder-${assetId || 'staging'}`}>
+      <button
+        type="button"
+        data-testid="mock-recording-save"
+        onClick={() => onSaved && onSaved(new Blob(['audio'], { type: 'audio/webm' }))}
+      >
+        Simulate Record
+      </button>
+    </div>
+  ),
+}));
+
+vi.mock('react-easy-crop', () => ({
+  default: ({ onCropComplete, style }) => {
+    React.useEffect(() => {
+      onCropComplete?.(null, { x: 0, y: 0, width: 80, height: 60 });
+    }, []);
+    return (
+      <div
+        data-testid="mock-image-cropper"
+        data-filter={style?.mediaStyle?.filter || ''}
+      />
+    );
+  },
+}));
 
 // Mock the Zustand store
 vi.mock('../store/useMediationStore', () => ({
@@ -30,6 +176,15 @@ describe('AdminInventoryDashboard Component', () => {
 
     // Reset fetch mocks
     global.fetch = vi.fn();
+
+    // Mock navigator.mediaDevices.getUserMedia so tests fall back to file picker
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn(() => Promise.reject(new Error('Test env — no camera'))),
+      },
+      writable: true,
+      configurable: true,
+    });
   });
 
   afterEach(() => {
@@ -37,14 +192,14 @@ describe('AdminInventoryDashboard Component', () => {
   });
 
   // ── Setup Phase Gate ────────────────────────────────────────────────────
-  it('renders locked message when session is not in SETUP', () => {
-    mockStoreState.sessionStatus = 'ACTIVE';
+  it('renders locked message when session is not in SETUP or ACTIVE', () => {
+    mockStoreState.sessionStatus = 'FINALIZED';
 
     render(<AdminInventoryDashboard sessionId={sessionId} />);
 
     expect(screen.getByText('Inventory Dashboard Locked')).toBeInTheDocument();
     expect(
-      screen.getByText(/only available during the Setup phase/),
+      screen.getByText(/only available during the Setup and Active phases/),
     ).toBeInTheDocument();
   });
 
@@ -78,6 +233,29 @@ describe('AdminInventoryDashboard Component', () => {
         'This system is strictly for personal property and keepsakes',
       );
     });
+  });
+
+  it('renders flexible quick capture with AI describe toggle', async () => {
+    global.fetch.mockImplementation((url) => {
+      if (url.includes('/assets')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (url.includes('/heirs')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      return Promise.reject(new Error('Unknown URL'));
+    });
+
+    render(<AdminInventoryDashboard sessionId={sessionId} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('add-staging-photo')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('Add first photo')).toBeInTheDocument();
+    expect(screen.getByTestId('auto-describe-toggle')).toBeChecked();
+    expect(screen.queryByText(/Slot 1/)).not.toBeInTheDocument();
+    expect(screen.getByTestId('stage-from-slots-btn')).toBeDisabled();
   });
 
   // ── Asset List Rendering ────────────────────────────────────────────────
@@ -129,29 +307,122 @@ describe('AdminInventoryDashboard Component', () => {
     render(<AdminInventoryDashboard sessionId={sessionId} />);
 
     await waitFor(() => {
-      expect(screen.getByText('Grandfather Clock')).toBeInTheDocument();
+      expect(screen.getByTestId('asset-card-asset-1')).toBeInTheDocument();
+      expect(screen.getByTestId('asset-card-asset-2')).toBeInTheDocument();
     });
 
-    expect(screen.getByText('Pearl Necklace')).toBeInTheDocument();
-    expect(screen.getByText('$1,500 – $3,000')).toBeInTheDocument();
-    expect(screen.getByText('$500 – $1,200')).toBeInTheDocument();
-    expect(screen.getByTestId('asset-card-asset-1')).toBeInTheDocument();
-    expect(screen.getByTestId('asset-card-asset-2')).toBeInTheDocument();
+    const card1 = screen.getByTestId('asset-card-asset-1');
+    expect(within(card1).getByText('Grandfather Clock')).toBeInTheDocument();
+    expect(within(card1).getByText('$1,500 – $3,000')).toBeInTheDocument();
+
+    const card2 = screen.getByTestId('asset-card-asset-2');
+    expect(within(card2).getByText('Pearl Necklace')).toBeInTheDocument();
+    expect(within(card2).getByText('$500 – $1,200')).toBeInTheDocument();
   });
 
-  // ── OCR Processing Indicator ────────────────────────────────────────────
-  it('displays OCR processing indicator for PROCESSING status', async () => {
+  it('expands long descriptions and previews an item as an heir', async () => {
+    const longDescription = 'This detailed scale model has a painted red hull, fishing rigging, netting, and small cabin details. It should remain readable for the executor and visible in full when checking how heirs will review the item.';
+    const specifications = '- Estimated materials: Wood hull, painted finish, twine rigging\n- Primary colors: Deep red hull accents';
+    const conditionReport = 'Decorative item. The structure appears stable and displays expected wear for its apparent age.';
+    const keywords = 'Model boat, Nautical decor, Fishing vessel';
+    const mockAssets = [
+      {
+        id: 'asset-preview',
+        title: 'Model Fishing Boat',
+        description: longDescription,
+        description_json: JSON.stringify({
+          specifications,
+          condition_report: conditionReport,
+          keywords,
+        }),
+        category: 'Living Room',
+        valuation_min: 40,
+        valuation_max: 120,
+        valuation_source: 'AI Valuation Range (Estimate)',
+        sentiment_tag: 'Heirloom, Handmade',
+        status: 'STAGED',
+        image_uri: 'static/uploads/boat.webp',
+        images: [
+          {
+            id: 'image-primary',
+            image_uri: 'static/uploads/boat.webp',
+            is_primary: true,
+            angle_label: 'Primary',
+          },
+        ],
+      },
+    ];
+
+    global.fetch.mockImplementation((url) => {
+      if (url.includes('/assets')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => mockAssets,
+        });
+      }
+      if (url.includes('/heirs')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [],
+        });
+      }
+      return Promise.reject(new Error('Unknown URL'));
+    });
+
+    render(<AdminInventoryDashboard sessionId={sessionId} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('asset-card-asset-preview')).toBeInTheDocument();
+    });
+
+    const toggle = screen.getByTestId('toggle-description-asset-preview');
+    expect(toggle).toHaveTextContent('Show more');
+    expect(screen.queryByText('Specifications')).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveTextContent('Show less');
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('Specifications')).toBeInTheDocument();
+    expect(screen.getByText(/Estimated materials: Wood hull/)).toBeInTheDocument();
+    expect(screen.getByText(/Primary colors: Deep red hull accents/)).toBeInTheDocument();
+    expect(screen.getByText('Condition Report')).toBeInTheDocument();
+    expect(screen.getByText(conditionReport)).toBeInTheDocument();
+    expect(screen.getByText('Search Keywords')).toBeInTheDocument();
+    expect(screen.getByText(keywords)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('preview-heir-btn-asset-preview'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('heir-preview-modal')).toBeInTheDocument();
+    });
+
+    const dialog = screen.getByRole('dialog', { name: /Model Fishing Boat/ });
+    expect(dialog).toBeInTheDocument();
+    expect(screen.getAllByText(longDescription).length).toBeGreaterThan(0);
+    expect(within(dialog).getByText('Specifications')).toBeInTheDocument();
+    expect(within(dialog).getByText(/Estimated materials: Wood hull/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/Primary colors: Deep red hull accents/)).toBeInTheDocument();
+    expect(within(dialog).getByText('Condition Report')).toBeInTheDocument();
+    expect(within(dialog).getByText(conditionReport)).toBeInTheDocument();
+    expect(within(dialog).getByText('Search Keywords')).toBeInTheDocument();
+    expect(within(dialog).getByText(keywords)).toBeInTheDocument();
+    expect(within(dialog).getByText('$40 – $120')).toBeInTheDocument();
+  });
+
+  // ── OCR Processing State ────────────────────────────────────────────────
+  it('keeps OCR processing status silent in the asset card', async () => {
     const mockAssets = [
       {
         id: 'asset-ocr',
         title: 'Painting',
-        description: '',
+        description: 'OCR extracting details...',
         category: 'Art',
         valuation_min: 0,
         valuation_max: 0,
         valuation_source: 'Personal Estimate',
         status: 'STAGED',
         ocr_status: 'PROCESSING',
+        description_json: '{"review_required":false}',
         image_uri: null,
       },
     ];
@@ -175,11 +446,13 @@ describe('AdminInventoryDashboard Component', () => {
     render(<AdminInventoryDashboard sessionId={sessionId} />);
 
     await waitFor(() => {
-      expect(
-        screen.getByTestId('ocr-processing-asset-ocr'),
-      ).toBeInTheDocument();
-      expect(screen.getByText('OCR extracting details...')).toBeInTheDocument();
+      expect(screen.getByTestId('asset-card-asset-ocr')).toBeInTheDocument();
     });
+
+    expect(screen.queryByTestId('ocr-processing-asset-ocr')).not.toBeInTheDocument();
+    expect(screen.queryByText(/AI appraising/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/OCR extracting details/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/AI could not identify details/)).not.toBeInTheDocument();
   });
 
   // ── Edit & Publish Flow ─────────────────────────────────────────────────
@@ -491,7 +764,7 @@ describe('AdminInventoryDashboard Component', () => {
   });
 
   // ── Audio Upload Flow ──────────────────────────────────────────────────
-  it('shows audio upload UI when Add Voice Story is clicked', async () => {
+  it('shows audio upload UI when Edit is clicked and drawer opens', async () => {
     const mockAssets = [
       {
         id: 'asset-audio',
@@ -527,13 +800,13 @@ describe('AdminInventoryDashboard Component', () => {
     render(<AdminInventoryDashboard sessionId={sessionId} />);
 
     await waitFor(() => {
-      expect(screen.getByTestId('audio-btn-asset-audio')).toBeInTheDocument();
+      expect(screen.getByTestId('edit-btn-asset-audio')).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByTestId('audio-btn-asset-audio'));
+    fireEvent.click(screen.getByTestId('edit-btn-asset-audio'));
 
     await waitFor(() => {
-      expect(screen.getByTestId('audio-file-input-asset-audio')).toBeInTheDocument();
+      expect(screen.getByTestId('voice-recorder-asset-audio')).toBeInTheDocument();
     });
   });
 
@@ -551,7 +824,7 @@ describe('AdminInventoryDashboard Component', () => {
     render(<AdminInventoryDashboard sessionId={sessionId} />);
 
     await waitFor(() => {
-      expect(screen.getByText('No Assets Staged')).toBeInTheDocument();
+      expect(screen.getByText(/No items found matching the current filters/)).toBeInTheDocument();
     });
   });
 
@@ -597,7 +870,7 @@ describe('AdminInventoryDashboard Component', () => {
   });
 
   // ── Spoken Story Indicator ──────────────────────────────────────────────
-  it('shows spoken story indicator and remove audio button when audio_uri exists', async () => {
+  it('shows spoken story indicator and remove audio button when audio_uri exists and drawer is open', async () => {
     const mockAssets = [
       {
         id: 'asset-with-audio',
@@ -634,7 +907,313 @@ describe('AdminInventoryDashboard Component', () => {
 
     await waitFor(() => {
       expect(screen.getByText('🎙 Spoken Story Recorded')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('edit-btn-asset-with-audio'));
+
+    await waitFor(() => {
       expect(screen.getByTestId('delete-audio-btn-asset-with-audio')).toBeInTheDocument();
+    });
+  });
+
+  // ── Image Editing Flow ─────────────────────────────────────────────────
+  it('opens image editor and uploads edited image bytes', async () => {
+    const mockAssets = [
+      {
+        id: 'asset-image-edit',
+        title: 'Silver Bowl',
+        description: 'A polished bowl',
+        category: 'Other',
+        valuation_min: 25,
+        valuation_max: 50,
+        valuation_source: 'Personal Estimate',
+        status: 'STAGED',
+        ocr_status: 'COMPLETED',
+        image_uri: 'static/uploads/primary.webp',
+        images: [
+          {
+            id: 'image-primary',
+            image_uri: 'static/uploads/primary.webp',
+            is_primary: true,
+            angle_label: 'Primary',
+          },
+        ],
+      },
+    ];
+
+    let editedUpload = null;
+    global.fetch.mockImplementation((url, options = {}) => {
+      if (url.includes('/images/image-primary/replace') && options.method === 'POST') {
+        editedUpload = options.body;
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            image_id: 'image-primary',
+            image_uri: 'static/uploads/edited.webp',
+            is_primary: true,
+            angle_label: 'Primary',
+          }),
+        });
+      }
+      if (url.includes('/assets')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => mockAssets,
+        });
+      }
+      if (url.includes('/heirs')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [],
+        });
+      }
+      return Promise.reject(new Error('Unknown URL'));
+    });
+
+    render(<AdminInventoryDashboard sessionId={sessionId} />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Edit Silver Bowl photo/)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByLabelText(/Edit Silver Bowl photo/));
+
+    await waitFor(() => {
+      expect(screen.getByText('Edit Photo')).toBeInTheDocument();
+      expect(screen.getByTestId('mock-image-cropper')).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByLabelText('Brightness'), { target: { value: '125' } });
+    expect(screen.getByTestId('mock-image-cropper')).toHaveAttribute(
+      'data-filter',
+      'brightness(125%) contrast(100%)',
+    );
+
+    fireEvent.click(screen.getByText('Save Edited Photo'));
+
+    await waitFor(() => {
+      expect(editedUpload).toBeInstanceOf(FormData);
+    });
+  });
+
+  // ── Category Manager & AI Generation tests ──────────────────────────────
+  describe('Category Manager, AI Details & Tags', () => {
+    beforeEach(() => {
+      global.__TEST_ENABLE_CATEGORIES_FETCH__ = true;
+    });
+
+    afterEach(() => {
+      global.__TEST_ENABLE_CATEGORIES_FETCH__ = false;
+    });
+
+    it('renders Category Manager and allows adding a new category', async () => {
+      let categoriesList = ['Jewelry', 'Furniture', 'Art', 'Other'];
+      let postBody = null;
+
+      global.fetch.mockImplementation((url, options) => {
+        if (url.includes('/categories')) {
+          if (options?.method === 'POST') {
+            postBody = JSON.parse(options.body);
+            categoriesList.push(postBody.name);
+            return Promise.resolve({
+              ok: true,
+              json: async () => ({ status: 'success', category: postBody.name }),
+            });
+          }
+          return Promise.resolve({
+            ok: true,
+            json: async () => categoriesList,
+          });
+        }
+        if (url.includes('/assets') || url.includes('/heirs')) {
+          return Promise.resolve({ ok: true, json: async () => [] });
+        }
+        return Promise.reject(new Error('Unknown URL: ' + url));
+      });
+
+      render(<AdminInventoryDashboard sessionId={sessionId} />);
+
+      // Open the category manager accordion
+      await waitFor(() => {
+        expect(screen.getByTestId('category-manager-toggle')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByTestId('category-manager-toggle'));
+
+      // Wait for the category content to appear
+      await waitFor(() => {
+        expect(screen.getByTestId('new-category-input')).toBeInTheDocument();
+      });
+
+      const input = screen.getByTestId('new-category-input');
+      fireEvent.change(input, { target: { value: 'Books' } });
+
+      // Find the form and submit it directly (jsdom sometimes doesn't propagate button click → form submit)
+      await waitFor(() => {
+        expect(screen.getByTestId('add-category-btn')).not.toBeDisabled();
+      });
+      const formElement = document.querySelector('.category-manager-content form');
+      fireEvent.submit(formElement);
+
+      await waitFor(() => {
+        expect(postBody).toEqual({ name: 'Books' });
+      }, { timeout: 3000 });
+      // Verify "Books" appears in the category accordion (use getAllByText since it may appear in filter dropdown too)
+      const bookElements = screen.getAllByText('Books');
+      expect(bookElements.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('allows deleting a category from Category Manager', async () => {
+      let categoriesList = ['Jewelry', 'Furniture', 'Art', 'Other', 'Books'];
+      let deletedName = null;
+      window.confirm = vi.fn(() => true);
+
+      global.fetch.mockImplementation((url, options) => {
+        if (url.includes('/categories')) {
+          if (options?.method === 'DELETE') {
+            const parts = url.split('/');
+            deletedName = decodeURIComponent(parts[parts.length - 1]);
+            categoriesList = categoriesList.filter(c => c !== deletedName);
+            return Promise.resolve({
+              ok: true,
+              json: async () => ({ status: 'success' }),
+            });
+          }
+          return Promise.resolve({
+            ok: true,
+            json: async () => categoriesList,
+          });
+        }
+        if (url.includes('/assets') || url.includes('/heirs')) {
+          return Promise.resolve({ ok: true, json: async () => [] });
+        }
+        return Promise.reject(new Error('Unknown URL'));
+      });
+
+      render(<AdminInventoryDashboard sessionId={sessionId} />);
+
+      // Open the category manager accordion
+      await waitFor(() => {
+        expect(screen.getByTestId('category-manager-toggle')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByTestId('category-manager-toggle'));
+
+      await waitFor(() => {
+        expect(screen.getByTestId('delete-category-Books')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByTestId('delete-category-Books'));
+
+      await waitFor(() => {
+        expect(window.confirm).toHaveBeenCalled();
+        expect(deletedName).toBe('Books');
+        expect(screen.queryByTestId('delete-category-Books')).not.toBeInTheDocument();
+      });
+    });
+
+    it('calls AI details generator endpoint and fills form', async () => {
+      const mockAssets = [{
+        id: 'asset-ai',
+        title: 'Old Painting',
+        description: '',
+        category: 'Art',
+        valuation_min: 100,
+        valuation_max: 200,
+        valuation_source: 'Personal Estimate',
+        status: 'STAGED',
+        ocr_status: 'COMPLETED',
+        image_uri: null,
+      }];
+
+      global.fetch.mockImplementation((url, options) => {
+        if (url.includes('/generate-details')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ title: 'AI Suggested Title', description: 'AI Suggested Description' }),
+          });
+        }
+        if (url.includes('/categories')) {
+          return Promise.resolve({ ok: true, json: async () => ['Jewelry', 'Furniture', 'Art', 'Other'] });
+        }
+        if (url.includes('/assets')) {
+          return Promise.resolve({ ok: true, json: async () => mockAssets });
+        }
+        if (url.includes('/heirs')) {
+          return Promise.resolve({ ok: true, json: async () => [] });
+        }
+        return Promise.reject(new Error('Unknown URL: ' + url));
+      });
+
+      render(<AdminInventoryDashboard sessionId={sessionId} />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('edit-btn-asset-ai')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByTestId('edit-btn-asset-ai'));
+
+      await waitFor(() => {
+        expect(screen.getByTestId('generate-ai-btn-asset-ai')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByTestId('generate-ai-btn-asset-ai'));
+
+      await waitFor(() => {
+        expect(screen.getByTestId('edit-title-asset-ai').value).toBe('AI Suggested Title');
+        expect(screen.getByTestId('edit-description-asset-ai').value).toBe('AI Suggested Description');
+      });
+    });
+
+    it('supports quick tag suggestion clicks when editing', async () => {
+      const mockAssets = [{
+        id: 'asset-tag',
+        title: 'Chest',
+        description: '',
+        category: 'Furniture',
+        valuation_min: 100,
+        valuation_max: 200,
+        valuation_source: 'Personal Estimate',
+        status: 'STAGED',
+        ocr_status: 'COMPLETED',
+        image_uri: null,
+        sentiment_tag: '',
+      }];
+
+      global.fetch.mockImplementation((url) => {
+        if (url.includes('/categories')) {
+          return Promise.resolve({ ok: true, json: async () => ['Jewelry', 'Furniture', 'Art', 'Other'] });
+        }
+        if (url.includes('/assets')) {
+          return Promise.resolve({ ok: true, json: async () => mockAssets });
+        }
+        if (url.includes('/heirs')) {
+          return Promise.resolve({ ok: true, json: async () => [] });
+        }
+        return Promise.reject(new Error('Unknown URL'));
+      });
+
+      render(<AdminInventoryDashboard sessionId={sessionId} />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('edit-btn-asset-tag')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByTestId('edit-btn-asset-tag'));
+
+      await waitFor(() => {
+        expect(screen.getByTestId('suggested-tag-Heirloom')).toBeInTheDocument();
+      });
+
+      // Click Heirloom suggestion to add it
+      fireEvent.click(screen.getByTestId('suggested-tag-Heirloom'));
+      expect(screen.getByTestId('edit-sentiment-asset-tag').value).toBe('Heirloom');
+
+      // Click Memento suggestion to append it
+      fireEvent.click(screen.getByTestId('suggested-tag-Memento'));
+      expect(screen.getByTestId('edit-sentiment-asset-tag').value).toBe('Heirloom, Memento');
+
+      // Click Heirloom suggestion again to remove it
+      fireEvent.click(screen.getByTestId('suggested-tag-Heirloom'));
+      expect(screen.getByTestId('edit-sentiment-asset-tag').value).toBe('Memento');
     });
   });
 });

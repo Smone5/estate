@@ -46,12 +46,12 @@ The `uv sync` command reads `backend/pyproject.toml` and installs all declared d
 | **Email Deliverability** | Python standard / aiosmtplib | Async SMTP relay for emailing PDF reports. |
 | **Mnemonic Phrase Key** | `mnemonic` (Python package) | Derives and validates BIP39 seed phrases for encryption key recovery. |
 
-### 2.1 Configurable LLM Abstraction Layer
+### 2.1 Configurable LiteLLM Abstraction Layer
 
-To enable seamless switching between open-source local-first compute and cloud LLM APIs, all node prompts, vision extractions, and embedding computations are routed through a unified LLM service factory (`app/services/llm_provider.py`). The active provider is loaded from environment variables on startup:
+To enable seamless switching between open-source local-first compute and cloud LLM APIs, all node prompts, vision extractions, and embedding computations are routed through a unified LLM service factory (`app/services/llm_provider.py`) built on top of **LiteLLM**. Every generation call is mapped to `litellm.completion()` or `litellm.embedding()`, allowing support for any provider simply by setting environment variables—no codebase changes required.
 
 1.  **Supported Providers**:
-    *   `LLM_PROVIDER`: `'ollama'` (default) | `'openai'` | `'anthropic'` | `'google'` (Vertex AI / Google AI Studio) | `'openrouter'` | `'nvidia'` (NVIDIA NIM).
+    *   `LLM_PROVIDER`: `'ollama'` (default) | `'openai'` | `'anthropic'` | `'google'` (Google AI Studio / Vertex AI) | `'openrouter'` | `'nvidia'` (NVIDIA NIM).
     *   `EMBEDDING_PROVIDER`: `'ollama'` (default) | `'openai'` | `'google'` | `'openrouter'` | `'nvidia'`.
     *   `VISION_PROVIDER`: `'ollama'` (default) | `'openai'` | `'google'` | `'anthropic'` | `'openrouter'` | `'nvidia'`.
 2.  **Configured Models**:
@@ -61,13 +61,19 @@ To enable seamless switching between open-source local-first compute and cloud L
     *   `EMBEDDING_MODEL`: e.g. `nomic-embed-text` (Ollama), `text-embedding-3-small` (OpenAI), `text-embedding-004` (Google).
 3.  **Unified API Interface**:
     *   `generate_text(model_key, system_prompt, user_input, temperature, history=None) -> str`
-    *   `generate_structured(model_key, system_prompt, user_input, response_model, temperature) -> BaseModel` (uses Pydantic schema schemas to force JSON schemas).
+    *   `generate_structured(model_key, system_prompt, user_input, response_model, temperature) -> BaseModel` (forces JSON schemas via provider-agnostic fallback rules).
     *   `generate_vision(model_key, image_bytes, prompt) -> str` (OCR extractions).
     *   `get_embeddings(model_key, text) -> List[float]` (returns dense vector matching the active model's dimension size).
 
 4.  **Local-First / Cost-Saving Fallback**:
-    If external API credentials are omitted or `LLM_PROVIDER=ollama`, the backend defaults to local Ollama endpoints (`OLLAMA_BASE_URL`). When switching to external APIs, the host must configure the matching provider API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`).
+    If external API credentials are omitted or `LLM_PROVIDER=ollama`, the backend defaults to local Ollama endpoints (`OLLAMA_BASE_URL`).
 
+### 2.2 Dynamic Settings Service (`settings_service.py`)
+
+To allow non-technical Executors to switch AI models or configure email servers directly in the UI, the backend provides a database-backed **Settings Service**.
+*   **Security Allowlist**: A strict registry (`SETTINGS_REGISTRY`) controls which configurations can be altered via the admin API. High-level infrastructure keys (such as `JWT_SECRET` or database passwords) are excluded from the registry.
+*   **Encrypted Storage**: Allowed settings are saved in the `app_settings` table, encrypted at rest via symmetric Fernet keys.
+*   **Dynamic Mirroring**: Values are loaded into `os.environ` on startup, and any runtime updates via the admin API immediately reload the LLM Provider singleton, applying the changes instantly without requiring a server reboot.
 
 ---
 

@@ -192,36 +192,22 @@ def test_mock_provider_timeout_scenario():
 
 # ---------------------------------------------------------------------------
 # LLMProvider factory routing tests (unit — no actual API calls)
+#
+# All providers now route through litellm.completion()/litellm.embedding(),
+# so routing is verified by faking those two module-level functions and
+# asserting the `model=` kwarg they were called with carries the expected
+# LiteLLM prefix for the active provider — one fake covers every provider.
 # ---------------------------------------------------------------------------
 
-class FakeOllamaResponse:
-    """Simulates ollama.ChatResponse."""
-    def __init__(self, text):
-        self.response = text
+
+def _fake_completion_response(text):
+    choice = mock.MagicMock()
+    choice.message.content = text
+    return mock.MagicMock(choices=[choice])
 
 
-class FakeOllamaEmbedResponse:
-    def __init__(self, vector):
-        self.embeddings = vector
-
-
-def _fake_ollama_client():
-    """Build a mock ollama client that returns canned responses."""
-    client = mock.MagicMock()
-    # Default response for generate_text
-    client.generate.return_value = FakeOllamaResponse("Mock mediator response")
-    client.embed.return_value = mock.MagicMock()
-    client.embed.return_value.get.return_value = [[0.1] * 768]
-    return client
-
-
-def _fake_ollama_client_structured():
-    """Build a mock ollama client that returns structured JSON."""
-    client = mock.MagicMock()
-    client.generate.return_value = FakeOllamaResponse('{"violation": false, "reason": ""}')
-    client.embed.return_value = mock.MagicMock()
-    client.embed.return_value.get.return_value = [[0.1] * 768]
-    return client
+def _fake_embedding_response(vector):
+    return mock.MagicMock(data=[{"embedding": vector}])
 
 
 def test_provider_generate_text_routes_to_ollama(monkeypatch):
@@ -231,11 +217,15 @@ def test_provider_generate_text_routes_to_ollama(monkeypatch):
     reset_provider()
 
     provider = get_provider()
-    provider._ollama_client = _fake_ollama_client()
+    fake_completion = mock.MagicMock(return_value=_fake_completion_response("Mock mediator response"))
+    monkeypatch.setattr("app.services.llm_provider.litellm.completion", fake_completion)
 
     result = provider.generate_text("fast", "system", "user", 0.5)
     assert isinstance(result, str)
     assert result == "Mock mediator response"
+    called_model = fake_completion.call_args.kwargs["model"]
+    assert called_model == "ollama_chat/test-model"
+    assert fake_completion.call_args.kwargs["api_base"] == "http://localhost:11111"
 
 
 def test_provider_generate_structured_routes_to_ollama(monkeypatch):
@@ -248,7 +238,10 @@ def test_provider_generate_structured_routes_to_ollama(monkeypatch):
     reset_provider()
 
     provider = get_provider()
-    provider._ollama_client = _fake_ollama_client_structured()
+    fake_completion = mock.MagicMock(
+        return_value=_fake_completion_response('{"violation": false, "reason": ""}')
+    )
+    monkeypatch.setattr("app.services.llm_provider.litellm.completion", fake_completion)
 
     result = provider.generate_structured("slow", "system", "user", CritiqueResult, 0.0)
     assert isinstance(result, CritiqueResult)
@@ -261,11 +254,13 @@ def test_provider_get_embeddings_routes_to_ollama(monkeypatch):
     reset_provider()
 
     provider = get_provider()
-    provider._ollama_client = _fake_ollama_client()
+    fake_embedding = mock.MagicMock(return_value=_fake_embedding_response([0.1] * 768))
+    monkeypatch.setattr("app.services.llm_provider.litellm.embedding", fake_embedding)
 
     result = provider.get_embeddings("embedding", "sample")
     assert isinstance(result, list)
     assert len(result) == 768
+    assert fake_embedding.call_args.kwargs["model"] == "ollama/test-embed"
 
 
 def test_provider_generate_vision_routes_to_ollama(monkeypatch):
@@ -274,13 +269,16 @@ def test_provider_generate_vision_routes_to_ollama(monkeypatch):
     reset_provider()
 
     provider = get_provider()
-    client = _fake_ollama_client()
-    client.generate.return_value = FakeOllamaResponse("OCR result text")
-    provider._ollama_client = client
+    fake_completion = mock.MagicMock(return_value=_fake_completion_response("OCR result text"))
+    monkeypatch.setattr("app.services.llm_provider.litellm.completion", fake_completion)
 
     result = provider.generate_vision("vision", b"\xff\xd8", "Describe")
     assert isinstance(result, str)
     assert result == "OCR result text"
+    assert fake_completion.call_args.kwargs["model"] == "ollama_chat/test-vision"
+    messages = fake_completion.call_args.kwargs["messages"]
+    image_url = messages[0]["content"][1]["image_url"]["url"]
+    assert not image_url.startswith("data:")
 
 
 def test_provider_raises_on_unsupported_text_provider(monkeypatch):
@@ -313,60 +311,49 @@ def test_provider_generate_text_routes_to_openrouter(monkeypatch):
     provider = get_provider()
     assert provider.llm_provider == PROVIDER_OPENROUTER
 
-    # Mock the OpenAI client used by OpenRouter
-    mock_openai_client = mock.MagicMock()
-    mock_choice = mock.MagicMock()
-    mock_choice.message.content = "OpenRouter response text"
-    mock_openai_client.chat.completions.create.return_value = mock.MagicMock(
-        choices=[mock_choice]
-    )
-    provider._openrouter_client = mock_openai_client
+    fake_completion = mock.MagicMock(return_value=_fake_completion_response("OpenRouter response text"))
+    monkeypatch.setattr("app.services.llm_provider.litellm.completion", fake_completion)
 
     result = provider.generate_text("fast", "system", "user", 0.5)
     assert result == "OpenRouter response text"
+    # Already contains "/" — passed through to LiteLLM unprefixed
+    assert fake_completion.call_args.kwargs["model"] == "openai/gpt-4o-mini"
+    assert fake_completion.call_args.kwargs["api_key"] == "sk-test-key"
 
 
 def test_provider_generate_structured_routes_to_openrouter(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "openrouter")
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-key")
-    monkeypatch.setenv("SLOW_THINKER_MODEL", "anthropic/claude-3.5-sonnet")
+    monkeypatch.setenv("SLOW_THINKER_MODEL", "claude-3.5-sonnet")
     reset_provider()
 
     class TestModel(BaseModel):
         score: int
 
     provider = get_provider()
-    mock_openai_client = mock.MagicMock()
-    mock_choice = mock.MagicMock()
-    mock_choice.message.content = '{"score": 42}'
-    mock_openai_client.chat.completions.create.return_value = mock.MagicMock(
-        choices=[mock_choice]
-    )
-    provider._openrouter_client = mock_openai_client
+    fake_completion = mock.MagicMock(return_value=_fake_completion_response('{"score": 42}'))
+    monkeypatch.setattr("app.services.llm_provider.litellm.completion", fake_completion)
 
     result = provider.generate_structured("slow", "system", "user", TestModel, 0.0)
     assert isinstance(result, TestModel)
     assert result.score == 42
+    assert fake_completion.call_args.kwargs["model"] == "openrouter/claude-3.5-sonnet"
 
 
 def test_provider_get_embeddings_routes_to_openrouter(monkeypatch):
     monkeypatch.setenv("EMBEDDING_PROVIDER", "openrouter")
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-key")
-    monkeypatch.setenv("EMBEDDING_MODEL", "openai/text-embedding-3-small")
+    monkeypatch.setenv("EMBEDDING_MODEL", "text-embedding-3-small")
     reset_provider()
 
     provider = get_provider()
-    mock_openai_client = mock.MagicMock()
-    mock_embed_data = mock.MagicMock()
-    mock_embed_data.embedding = [0.2] * 1536
-    mock_openai_client.embeddings.create.return_value = mock.MagicMock(
-        data=[mock_embed_data]
-    )
-    provider._openrouter_client = mock_openai_client
+    fake_embedding = mock.MagicMock(return_value=_fake_embedding_response([0.2] * 1536))
+    monkeypatch.setattr("app.services.llm_provider.litellm.embedding", fake_embedding)
 
     result = provider.get_embeddings("embedding", "test text")
     assert isinstance(result, list)
     assert len(result) == 1536
+    assert fake_embedding.call_args.kwargs["model"] == "openrouter/text-embedding-3-small"
 
 
 def test_provider_generate_vision_routes_to_openrouter(monkeypatch):
@@ -376,16 +363,12 @@ def test_provider_generate_vision_routes_to_openrouter(monkeypatch):
     reset_provider()
 
     provider = get_provider()
-    mock_openai_client = mock.MagicMock()
-    mock_choice = mock.MagicMock()
-    mock_choice.message.content = "Vision OCR from OpenRouter"
-    mock_openai_client.chat.completions.create.return_value = mock.MagicMock(
-        choices=[mock_choice]
-    )
-    provider._openrouter_client = mock_openai_client
+    fake_completion = mock.MagicMock(return_value=_fake_completion_response("Vision OCR from OpenRouter"))
+    monkeypatch.setattr("app.services.llm_provider.litellm.completion", fake_completion)
 
     result = provider.generate_vision("vision", b"\xff\xd8", "Describe image")
     assert result == "Vision OCR from OpenRouter"
+    assert fake_completion.call_args.kwargs["model"] == "openai/gpt-4o-mini"
 
 
 # ---------------------------------------------------------------------------
@@ -444,41 +427,33 @@ def test_vision_provider_with_env_override(monkeypatch):
 def test_provider_generate_text_routes_to_nvidia(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "nvidia")
     monkeypatch.setenv("NVIDIA_API_KEY", "nv-test-key")
-    monkeypatch.setenv("FAST_THINKER_MODEL", "nvidia/llama-3.1-nemotron-70b-instruct")
+    monkeypatch.setenv("FAST_THINKER_MODEL", "llama-3.1-nemotron-70b-instruct")
     reset_provider()
 
     provider = get_provider()
     assert provider.llm_provider == PROVIDER_NVIDIA
 
-    mock_client = mock.MagicMock()
-    mock_choice = mock.MagicMock()
-    mock_choice.message.content = "NVIDIA NIM response"
-    mock_client.chat.completions.create.return_value = mock.MagicMock(
-        choices=[mock_choice]
-    )
-    provider._nvidia_client = mock_client
+    fake_completion = mock.MagicMock(return_value=_fake_completion_response("NVIDIA NIM response"))
+    monkeypatch.setattr("app.services.llm_provider.litellm.completion", fake_completion)
 
     result = provider.generate_text("fast", "system", "user", 0.5)
     assert result == "NVIDIA NIM response"
+    assert fake_completion.call_args.kwargs["model"] == "nvidia_nim/llama-3.1-nemotron-70b-instruct"
+    assert fake_completion.call_args.kwargs["api_key"] == "nv-test-key"
 
 
 def test_provider_generate_structured_routes_to_nvidia(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "nvidia")
     monkeypatch.setenv("NVIDIA_API_KEY", "nv-test-key")
-    monkeypatch.setenv("SLOW_THINKER_MODEL", "nvidia/llama-3.1-nemotron-70b-instruct")
+    monkeypatch.setenv("SLOW_THINKER_MODEL", "llama-3.1-nemotron-70b-instruct")
     reset_provider()
 
     class TestModel(BaseModel):
         score: int
 
     provider = get_provider()
-    mock_client = mock.MagicMock()
-    mock_choice = mock.MagicMock()
-    mock_choice.message.content = '{"score": 99}'
-    mock_client.chat.completions.create.return_value = mock.MagicMock(
-        choices=[mock_choice]
-    )
-    provider._nvidia_client = mock_client
+    fake_completion = mock.MagicMock(return_value=_fake_completion_response('{"score": 99}'))
+    monkeypatch.setattr("app.services.llm_provider.litellm.completion", fake_completion)
 
     result = provider.generate_structured("slow", "system", "user", TestModel, 0.0)
     assert isinstance(result, TestModel)
@@ -488,40 +463,32 @@ def test_provider_generate_structured_routes_to_nvidia(monkeypatch):
 def test_provider_get_embeddings_routes_to_nvidia(monkeypatch):
     monkeypatch.setenv("EMBEDDING_PROVIDER", "nvidia")
     monkeypatch.setenv("NVIDIA_API_KEY", "nv-test-key")
-    monkeypatch.setenv("EMBEDDING_MODEL", "nvidia/nv-embed-qa-4")
+    monkeypatch.setenv("EMBEDDING_MODEL", "nv-embed-qa-4")
     reset_provider()
 
     provider = get_provider()
-    mock_client = mock.MagicMock()
-    mock_embed_data = mock.MagicMock()
-    mock_embed_data.embedding = [0.3] * 1024
-    mock_client.embeddings.create.return_value = mock.MagicMock(
-        data=[mock_embed_data]
-    )
-    provider._nvidia_client = mock_client
+    fake_embedding = mock.MagicMock(return_value=_fake_embedding_response([0.3] * 1024))
+    monkeypatch.setattr("app.services.llm_provider.litellm.embedding", fake_embedding)
 
     result = provider.get_embeddings("embedding", "test text")
     assert isinstance(result, list)
     assert len(result) == 1024
+    assert fake_embedding.call_args.kwargs["model"] == "nvidia_nim/nv-embed-qa-4"
 
 
 def test_provider_generate_vision_routes_to_nvidia(monkeypatch):
     monkeypatch.setenv("VISION_PROVIDER", "nvidia")
     monkeypatch.setenv("NVIDIA_API_KEY", "nv-test-key")
-    monkeypatch.setenv("VISION_MODEL", "nvidia/neva-22b")
+    monkeypatch.setenv("VISION_MODEL", "neva-22b")
     reset_provider()
 
     provider = get_provider()
-    mock_client = mock.MagicMock()
-    mock_choice = mock.MagicMock()
-    mock_choice.message.content = "NVIDIA vision OCR"
-    mock_client.chat.completions.create.return_value = mock.MagicMock(
-        choices=[mock_choice]
-    )
-    provider._nvidia_client = mock_client
+    fake_completion = mock.MagicMock(return_value=_fake_completion_response("NVIDIA vision OCR"))
+    monkeypatch.setattr("app.services.llm_provider.litellm.completion", fake_completion)
 
     result = provider.generate_vision("vision", b"\xff\xd8", "Describe image")
     assert result == "NVIDIA vision OCR"
+    assert fake_completion.call_args.kwargs["model"] == "nvidia_nim/neva-22b"
 
 
 def test_nvidia_provider_with_env_override(monkeypatch):

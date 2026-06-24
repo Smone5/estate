@@ -28,8 +28,8 @@ graph TD
     *   The Heir reviews their data rights (including data portability, at-rest encryption, PII filtering, and the right to delete account records).
     *   **Age Verification Gate**: The Heir must check the mandatory age verification checkbox confirming they are 18+ or have guardian consent. The "Accept & Enter Workspace" action button is disabled until this is checked.
     *   **Decline Action**: If they decline, the browser redirects to an opt-out page, and no credentials or accounts are created.
-3.  **Authentication Handshake \u0026 Identity Verification Onboarding**:
-    *   If they accept and verify age, the frontend sends a **single atomic** `POST /api/invite/verify` request containing the token, consent flags (`consent_accepted: true`, `age_verified: true`), **and** all legal profile fields (`legal_first_name`, `legal_middle_name`, `legal_last_name`, `relationship_to_decedent`, `date_of_birth`). These legal fields are pre-populated from the Executor's registration entry and are editable during the consent flow if the Heir spots a typo, so that any corrections are persisted in the same transaction as the consent record. This is a single call — not two sequential steps.
+3.  **Authentication Handshake & Identity Verification Onboarding**:
+    *   If they accept and verify age, the frontend sends a **single atomic** `POST /api/invite/verify` request containing the token, consent flags (`consent_accepted: true`, `age_verified: true`), legal profile fields (`legal_first_name`, `legal_middle_name`, `legal_last_name`, `relationship_to_decedent`, `date_of_birth`), **and** structured physical address fields (`address_line1`, `address_line2`, `address_city`, `address_region`, `address_postal_code`, `address_country`). These fields are pre-populated from the Executor's data and are fully editable to ensure accurate records are committed in the same transaction.
     *   The backend validates the token, verifies that the compliance flags are `true`, updates the Heir user record (setting `invite_token_used = True`, `consent_accepted = True`, `age_verified = True`, `consent_timestamp = UTC_NOW`, and any corrected profile fields), sets the Heir's status to `'PROFILE_HOLD'`, and issues a secure HTTP-only JWT cookie.
     *   **ID Upload**: After the consent call completes, the browser displays the Government ID Verification form. The Heir uploads or camera-captures their government ID (`POST /api/heirs/me/upload-id`). The backend encrypts the scan, saves it at `id_scan_uri`, and the Heir remains in `'PROFILE_HOLD'`.
     *   **Verification Gate**: The Heir is client-routed to `/dashboard` in a read-only locked state (sliders and mediator chat disabled) while verification is pending. The Executor inspects the ID in the Admin Panel (`POST /api/heirs/{heir_id}/verify-identity` with action approve or reject).
@@ -97,20 +97,24 @@ graph TD
     ForceAlloc --> Commit
 ```
 
-### Step 0: Session Setup & Invitation Generation
+### Step 0: Session Setup, Onboarding Checklist & Invitation Generation
 1.  **Session Creation**: The Admin navigates to the Admin Panel and creates a new Estate Mediation Session.
-2.  **Heir Registration**: The Admin enters the names and verified email addresses of the participating Heirs.
-3.  **Token Generation**: The system creates individual profiles for each Heir, generating a unique secure UUID token (e.g., `550e8400-e29b-41d4-a716-446655440000`).
-4.  **Invitation Dispatch**: The Admin copies the generated invitation links `/invite/{token}` or clicks "Send Invites" to dispatch them to Heirs (using SMTP if configured).
+2.  **Admin Onboarding & Setup Checklist**: Before a session can transition to `'ACTIVE'`, the Admin must satisfy the requirements of the `AdminSetupChecklist`:
+    *   **Settings Configuration**: Verifies or updates LLM API keys (via LiteLLM / Settings tab), storage driver configurations (LOCAL/S3/GCS), and SMTP email settings.
+    *   **Estate Setup Requirements**: Confirms at least two heirs are registered, at least five assets are staged/published, and session categories are configured.
+3.  **Heir Registration**: The Admin enters the names and verified email addresses of the participating Heirs.
+4.  **Token Generation**: The system creates individual profiles for each Heir, generating a unique secure UUID token (e.g., `550e8400-e29b-41d4-a716-446655440000`).
+5.  **Invitation Dispatch**: The Admin copies the generated invitation links `/invite/{token}` or clicks "Send Invites" to dispatch them to Heirs (using SMTP if configured).
 
-### Step 1: Asset Staging & Vision OCR
-1.  **Asset Upload**: The Admin uploads an image of an estate asset.
-2.  **Vision Inference**: The backend sends the image to Ollama hosting the `llava` multimodal model.
-3.  **Metadata Extraction**: `llava` extracts:
+### Step 1: Asset Staging, Multi-Image Uploads & Vision OCR
+1.  **Asset Upload**: The Admin uploads a primary image and optional secondary images of an estate asset.
+2.  **Multi-Image Staging**: The Admin labels the angle/purpose of each uploaded image (e.g. `'Primary'`, `'Detail'`, `'Back'`) which are saved in the `asset_images` table.
+3.  **Vision Inference**: The backend sends the primary image to the configured vision provider via the LiteLLM router (defaulting to local `llava`).
+4.  **Metadata Extraction**: The vision model extracts:
     *   A descriptive title and detailed markdown description.
-    *   Suggested categories (`Jewelry`, `Furniture`, `Art`, `Other`).
+    *   Suggested session-specific category.
     *   Sentimental attributes and keywords.
-4.  **Review**: The Admin views the generated metadata in a staging form, edits the details if necessary, and saves it. The asset transitions from `STAGED` to `LIVE`.
+5.  **Review**: The Admin views the generated metadata, adjusts details (or category labels) in the staging form, and saves it. The asset transitions from `STAGED` to `LIVE`.
 
 ### Step 2: Governance & Session Monitoring
 1.  **Monitoring Console**: The Admin views a table of Heirs, tracking:
@@ -176,8 +180,10 @@ If an Heir experiences a technical issue, has a question, or gets overwhelmed, t
     *   A WebSocket notification immediately pushes to the Admin console, showing a pulsing Amber alert next to the active session.
     *   If SMTP email environment variables are active, the backend asynchronously emails the Admin: *"Heir [Name] is requesting help: '[Message]'."*
 3.  **Governance Response (Admin)**: 
-    *   The Admin opens the unresolved requests drawer.
-    *   If the Heir requested a pause or is overwhelmed, the Admin clicks **"Grief Pause (Lock Session)"** directly from the alert list. This immediately disables the sliders on all Heir panels.
-    *   The Admin contacts the Heir to resolve the issue. Once handled, they click **"Mark Resolved"** to archive the ticket and resume the session.
+    *   The Admin opens the unresolved requests drawer inside the **Admin Communications Panel**.
+    *   The Admin views the message and any uploaded heir attachments.
+    *   The Admin can type a direct response (`admin_response`), optionally attach a screenshot, and click **"Send Reply"** (changing the status to `'RESPONDED'`).
+    *   If the Heir requested a pause or is overwhelmed, the Admin clicks **"Grief Pause (Lock Session)"** directly from the lifecycle panel. This immediately disables the sliders on all Heir panels.
+    *   Once handled, the Admin clicks **"Mark Resolved"** to archive the ticket, transition status to `'RESOLVED'`, and resume the session.
 
 
