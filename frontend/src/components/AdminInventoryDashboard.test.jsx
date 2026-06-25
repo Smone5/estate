@@ -4,6 +4,11 @@ import { render, screen, fireEvent, waitFor, within } from '@testing-library/rea
 import React from 'react';
 import AdminInventoryDashboard from './AdminInventoryDashboard';
 import { useMediationStore } from '../store/useMediationStore';
+import {
+  deleteStagingItem,
+  saveStagingItem,
+  updateStagingItemStatus,
+} from '../utils/stagingDB';
 import '@testing-library/jest-dom';
 
 // Mock indexedDB for jsdom
@@ -176,6 +181,8 @@ describe('AdminInventoryDashboard Component', () => {
 
     // Reset fetch mocks
     global.fetch = vi.fn();
+    global.URL.createObjectURL = vi.fn(() => 'blob:http://localhost/test-preview');
+    global.URL.revokeObjectURL = vi.fn();
 
     // Mock navigator.mediaDevices.getUserMedia so tests fall back to file picker
     Object.defineProperty(navigator, 'mediaDevices', {
@@ -253,9 +260,140 @@ describe('AdminInventoryDashboard Component', () => {
     });
 
     expect(screen.getByText('Add first photo')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Take photo' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Upload images' })).toBeInTheDocument();
     expect(screen.getByTestId('auto-describe-toggle')).toBeChecked();
     expect(screen.queryByText(/Slot 1/)).not.toBeInTheDocument();
     expect(screen.getByTestId('stage-from-slots-btn')).toBeDisabled();
+  });
+
+  it('explains photo labels in plain language', async () => {
+    global.fetch.mockImplementation((url) => {
+      if (url.includes('/assets') || url.includes('/heirs')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      return Promise.reject(new Error('Unknown URL'));
+    });
+
+    render(<AdminInventoryDashboard sessionId={sessionId} />);
+
+    const helpButton = await screen.findByRole('button', {
+      name: 'What do the photo labels mean?',
+    });
+    expect(helpButton).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(helpButton);
+
+    expect(helpButton).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('region', { name: 'Photo label explanation' })).toBeInTheDocument();
+    expect(screen.getByText('Maker / brand mark')).toBeInTheDocument();
+    expect(screen.getByText(/signature, label, stamp, serial number/i)).toBeInTheDocument();
+    expect(screen.getByText('Primary photo')).toBeInTheDocument();
+  });
+
+  it('adds uploaded images to the quick-capture preview stack', async () => {
+    global.fetch.mockImplementation((url) => {
+      if (url.includes('/assets') || url.includes('/heirs')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      return Promise.reject(new Error('Unknown URL'));
+    });
+
+    render(<AdminInventoryDashboard sessionId={sessionId} />);
+
+    const fileInput = await screen.findByLabelText('Upload item images');
+    const file = new File(['photo'], 'vase.jpg', { type: 'image/jpeg' });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('staging-photo-0')).toBeInTheDocument();
+    });
+    expect(screen.getByAltText('Front')).toHaveAttribute(
+      'src',
+      'blob:http://localhost/test-preview',
+    );
+    expect(screen.getByRole('button', { name: 'Maker / brand mark' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Damage / wear' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Size reference' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Close-up detail' })).toBeInTheDocument();
+    expect(screen.getByTestId('stage-from-slots-btn')).toBeEnabled();
+  });
+
+  it('finishes staging after the server confirms the upload', async () => {
+    global.fetch.mockImplementation((url, options = {}) => {
+      if (options.method === 'POST' && url.includes('/assets/stage')) {
+        return Promise.resolve({
+          ok: true,
+          status: 201,
+          json: async () => ({ asset_id: 'test-uuid-1234', status: 'STAGED' }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+
+    render(<AdminInventoryDashboard sessionId={sessionId} />);
+
+    const fileInput = await screen.findByLabelText('Upload item images');
+    fireEvent.change(fileInput, {
+      target: {
+        files: [new File(['photo'], 'vase.jpg', { type: 'image/jpeg' })],
+      },
+    });
+
+    const stageButton = await screen.findByTestId('stage-from-slots-btn');
+    await waitFor(() => expect(stageButton).toBeEnabled());
+    fireEvent.click(stageButton);
+
+    await waitFor(() => {
+      expect(screen.getByText('✅ Staged!')).toBeInTheDocument();
+    });
+    expect(saveStagingItem).toHaveBeenCalled();
+    expect(deleteStagingItem).toHaveBeenCalledWith('test-uuid-1234');
+    expect(updateStagingItemStatus).not.toHaveBeenCalledWith('test-uuid-1234', 'uploaded');
+    expect(stageButton).toHaveTextContent('📤 Stage Item');
+  });
+
+  it('keeps the inventory workspace visible while the post-stage refresh is pending', async () => {
+    let resolveRefresh;
+    const pendingRefresh = new Promise((resolve) => {
+      resolveRefresh = resolve;
+    });
+    let assetRequestCount = 0;
+
+    global.fetch.mockImplementation((url, options = {}) => {
+      if (options.method === 'POST' && url.includes('/assets/stage')) {
+        return Promise.resolve({
+          ok: true,
+          status: 201,
+          json: async () => ({ asset_id: 'test-uuid-1234', status: 'STAGED' }),
+        });
+      }
+      if (url.includes('/assets')) {
+        assetRequestCount += 1;
+        if (assetRequestCount > 1) return pendingRefresh;
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+
+    render(<AdminInventoryDashboard sessionId={sessionId} />);
+
+    fireEvent.change(await screen.findByLabelText('Upload item images'), {
+      target: {
+        files: [new File(['photo'], 'vase.jpg', { type: 'image/jpeg' })],
+      },
+    });
+
+    const stageButton = await screen.findByTestId('stage-from-slots-btn');
+    await waitFor(() => expect(stageButton).toBeEnabled());
+    fireEvent.click(stageButton);
+
+    await waitFor(() => {
+      expect(screen.getByText('✅ Staged!')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Loading asset inventory...')).not.toBeInTheDocument();
+    expect(screen.getByTestId('admin-inventory-dashboard')).toBeInTheDocument();
+
+    resolveRefresh({ ok: true, json: async () => [] });
   });
 
   // ── Asset List Rendering ────────────────────────────────────────────────
@@ -633,8 +771,6 @@ describe('AdminInventoryDashboard Component', () => {
 
   // ── Delete Asset ────────────────────────────────────────────────────────
   it('deletes asset after confirmation', async () => {
-    window.confirm = vi.fn(() => true);
-
     const mockAssets = [
       {
         id: 'asset-del',
@@ -683,11 +819,49 @@ describe('AdminInventoryDashboard Component', () => {
 
     fireEvent.click(screen.getByTestId('delete-btn-asset-del'));
 
-    expect(window.confirm).toHaveBeenCalled();
+    const deleteDialog = screen.getByRole('dialog', { name: 'Permanently delete this asset?' });
+    expect(deleteDialog).toBeInTheDocument();
+    expect(within(deleteDialog).getByText('Old Chair')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('confirm-delete-asset'));
 
     await waitFor(() => {
       expect(screen.queryByTestId('asset-card-asset-del')).not.toBeInTheDocument();
     });
+  });
+
+  it('keeps the delete dialog open when deletion fails', async () => {
+    const mockAssets = [{
+      id: 'asset-delete-fails',
+      title: 'Protected Vase',
+      category: 'Art',
+      status: 'STAGED',
+      ocr_status: 'COMPLETED',
+      image_uri: 'static/uploads/vase.webp',
+    }];
+
+    global.fetch.mockImplementation((url, options = {}) => {
+      if (options.method === 'DELETE') {
+        return Promise.resolve({
+          ok: false,
+          status: 400,
+          json: async () => ({ detail: 'This asset cannot be deleted right now.' }),
+        });
+      }
+      if (url.includes('/assets')) {
+        return Promise.resolve({ ok: true, json: async () => mockAssets });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+
+    render(<AdminInventoryDashboard sessionId={sessionId} />);
+
+    fireEvent.click(await screen.findByTestId('delete-btn-asset-delete-fails'));
+    fireEvent.click(screen.getByTestId('confirm-delete-asset'));
+
+    await waitFor(() => {
+      expect(screen.getByText('This asset cannot be deleted right now.')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('delete-asset-dialog')).toBeInTheDocument();
   });
 
   // ── Pre-Allocation ──────────────────────────────────────────────────────

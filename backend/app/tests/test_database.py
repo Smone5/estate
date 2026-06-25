@@ -264,7 +264,7 @@ class TestAssetsModel:
             "valuation_min", "valuation_max", "valuation_source",
             "sentiment_tag", "description_json",
             "image_uri", "audio_uri", "ocr_status",
-            "status", "allocated_to_id", "embedding",
+            "status", "allocated_to_id", "embedding", "ai_feedback",
         }
         assert set(table.columns.keys()) == expected_cols
 

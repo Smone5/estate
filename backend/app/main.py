@@ -1014,7 +1014,8 @@ async def _transcribe_audio_file(audio_uri: str) -> str:
             import io
             audio_file = io.BytesIO(audio_bytes)
             audio_file.name = "audio.wav"
-            transcript = client.audio.transcriptions.create(
+            transcript = await asyncio.to_thread(
+                client.audio.transcriptions.create,
                 model="whisper-1",
                 file=audio_file,
             )
@@ -1026,7 +1027,11 @@ async def _transcribe_audio_file(audio_uri: str) -> str:
     return "A beautiful keepsake handed down through the family, kept in pristine condition."
 
 
-async def analyze_staged_asset_background(asset_id: str, session_id: str):
+async def analyze_staged_asset_background(
+    asset_id: str,
+    session_id: str,
+    location: Optional[str] = None,
+):
     """
     Background worker that runs LLM Vision on a staged asset, optionally transcribing audio.
     Saves details and broadcasts the completion event via WebSocket.
@@ -1103,7 +1108,8 @@ async def analyze_staged_asset_background(asset_id: str, session_id: str):
 
             try:
                 provider = get_provider()
-                res = provider.generate_vision(
+                res = await asyncio.to_thread(
+                    provider.generate_vision,
                     model_key="vision",
                     image_bytes=image_bytes,
                     prompt=prompt,
@@ -1202,7 +1208,11 @@ async def analyze_staged_asset_background(asset_id: str, session_id: str):
         # 6. Compute embeddings
         try:
             text_to_embed = _build_asset_embedding_text(asset)
-            embedding = provider.get_embeddings("embedding", text_to_embed)
+            embedding = await asyncio.to_thread(
+                provider.get_embeddings,
+                "embedding",
+                text_to_embed,
+            )
             asset.embedding = embedding
         except Exception:
             logger.warning("Failed to compute embedding in background for asset %s", asset_id)
@@ -1428,6 +1438,15 @@ async def asset_stage(
                 ext = ".mp3"
             elif "wav" in content_type.lower() or filename_orig.lower().endswith(".wav"):
                 ext = ".wav"
+            elif "ogg" in content_type.lower() or filename_orig.lower().endswith(".ogg"):
+                ext = ".ogg"
+            elif (
+                "mp4" in content_type.lower()
+                or "m4a" in content_type.lower()
+                or "aac" in content_type.lower()
+                or filename_orig.lower().endswith((".mp4", ".m4a", ".aac"))
+            ):
+                ext = ".m4a"
             else:
                 ext = ".webm"
 
@@ -2244,6 +2263,52 @@ async def generate_asset_details(
         except Exception:
             logger.warning("Could not read secondary image %s for asset %s", img.image_uri, asset_id)
 
+    # Fetch positive few-shot examples from historical feedback
+    few_shot_examples = []
+    try:
+        feedback_assets = (
+            db.query(Asset)
+            .filter(Asset.ai_feedback.isnot(None))
+            .filter(Asset.ai_feedback.like('%"rating": "thumbs_up"%'))
+            .order_by(Asset.id)
+            .limit(2)
+            .all()
+        )
+        for fa in feedback_assets:
+            try:
+                import json as json_mod
+                desc_data = json_mod.loads(fa.description_json) if fa.description_json else {}
+                few_shot_examples.append({
+                    "title": fa.title,
+                    "item_overview": fa.description,
+                    "specifications": desc_data.get("specifications", ""),
+                    "condition_report": desc_data.get("condition_report", ""),
+                    "keywords": desc_data.get("keywords", ""),
+                    "valuation_min": fa.valuation_min,
+                    "valuation_max": fa.valuation_max,
+                    "sentiment_tags": fa.sentiment_tag,
+                })
+            except Exception:
+                continue
+    except Exception as e:
+        logger.warning("Failed to fetch few-shot examples: %s", e)
+
+    few_shot_text = ""
+    if few_shot_examples:
+        few_shot_text = "\n\nHere are some examples of high-quality listings approved by the user for reference:\n"
+        for idx, ex in enumerate(few_shot_examples, 1):
+            few_shot_text += (
+                f"Example {idx}:\n"
+                f"  title: {ex['title']}\n"
+                f"  item_overview: {ex['item_overview']}\n"
+                f"  specifications:\n{ex['specifications']}\n"
+                f"  condition_report: {ex['condition_report']}\n"
+                f"  keywords: {ex['keywords']}\n"
+                f"  valuation_min: {ex['valuation_min']}\n"
+                f"  valuation_max: {ex['valuation_max']}\n"
+                f"  sentiment_tags: {ex['sentiment_tags']}\n\n"
+            )
+
     prompt = (
         "You are an expert appraiser and estate sale liquidator. Analyze the provided image(s) of this item "
         "and generate a clean, highly accurate marketplace listing.\n\n"
@@ -2256,7 +2321,8 @@ async def generate_asset_details(
         "  valuation_min: Estimated minimum secondary market value as a float/number (e.g. 50.0). Estimate realistically based on the item.\n"
         "  valuation_max: Estimated maximum secondary market value as a float/number (e.g. 150.0). Estimate realistically based on the item.\n"
         "  sentiment_tags: Comma-separated sentiment labels. Select 1-3 relevant tags from: Heirloom, Memento, Practical, Antique, Handmade, Documents.\n\n"
-        "Do not use overly flowery language. Stick to descriptive facts that help a buyer buy.\n\n"
+        "Do not use overly flowery language. Stick to descriptive facts that help a buyer buy."
+        f"{few_shot_text}\n"
         "JSON:"
     )
 
@@ -2341,6 +2407,7 @@ async def generate_asset_details(
         "condition_report": listing.condition_report,
         "keywords": listing.keywords,
     })
+    asset.ai_feedback = None  # Clear any previous feedback for new generation
 
     # Compute embedding for staged asset (RAG readiness)
     try:
@@ -2366,6 +2433,48 @@ async def generate_asset_details(
             "sentiment_tags": listing.sentiment_tags or "",
         }
     )
+
+
+class AIFeedbackRequest(PydanticBaseModel_):
+    rating: str  # "thumbs_up" or "thumbs_down"
+    comment: str | None = None
+
+
+@app.post("/api/assets/{asset_id}/ai-feedback")
+@limiter.limit("20/minute")
+async def save_ai_feedback(
+    request: Request,
+    asset_id: str,
+    payload: AIFeedbackRequest,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Save user feedback (thumbs up / down + comment) for AI listing generation.
+    """
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    import json as json_mod
+    feedback_data = {
+        "rating": payload.rating,
+        "comment": payload.comment,
+        "submitted_at": datetime.now(timezone.utc).isoformat(),
+        # Snapshot of what was approved/rejected
+        "snapshot": {
+            "title": asset.title,
+            "description": asset.description,
+            "valuation_min": asset.valuation_min,
+            "valuation_max": asset.valuation_max,
+            "sentiment_tag": asset.sentiment_tag,
+            "description_json": asset.description_json,
+        }
+    }
+    asset.ai_feedback = json_mod.dumps(feedback_data)
+    db.commit()
+
+    return JSONResponse(content={"status": "success", "message": "Feedback saved."})
 
 
 # ---------------------------------------------------------------------------

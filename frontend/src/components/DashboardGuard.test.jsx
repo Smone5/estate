@@ -114,4 +114,19 @@ describe('DashboardGuard', () => {
     fireEvent.click(screen.getByTestId('view-support-reply-btn'));
     expect(mockStoreState.clearLatestSupportNotice).toHaveBeenCalledTimes(1);
   });
+
+  it('renders children directly and bypasses all banners/gates for variant="admin"', () => {
+    mockStoreState.sessionStatus = 'SETUP';
+    mockStoreState.userStatus = 'PROFILE_HOLD';
+
+    render(
+      <DashboardGuard variant="admin">
+        <div data-testid="admin-content">Admin console content</div>
+      </DashboardGuard>,
+    );
+
+    expect(screen.getByTestId('admin-content')).toBeInTheDocument();
+    expect(screen.queryByText(/AI Mediator Agent/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Welcome! The Executor is currently setting up/)).not.toBeInTheDocument();
+  });
 });

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useMediationStore } from '../store/useMediationStore';
+import { customConfirm, customPrompt } from '../store/useDialogStore';
 import AssetGallery from './AssetGallery';
 import AdminVoiceRecorder from './AdminVoiceRecorder';
 import ImageEditModal from './ImageEditModal';
@@ -41,8 +42,33 @@ const DEFAULT_ROOMS = [
 ];
 
 const ROOM_STORAGE_KEY = 'estate_steward_staging_room';
+const STATUS_MESSAGES = [
+  'Analyzing image composition...',
+  'Extracting visual characteristics...',
+  'Identifying materials and era...',
+  'Generating title suggestions...',
+  'Drafting short item overview...',
+  'Composing detailed specifications...',
+  'Writing condition report and wear details...',
+  'Compiling search keywords...',
+  'Calibrating secondary market valuation...',
+  'Selecting relevant sentiment tags...',
+  'Saving to database & updating index...'
+];
+
 const MAX_STAGING_PHOTOS = 12;
-const PHOTO_LABEL_SUGGESTIONS = ['Front', 'Back', 'Maker mark', 'Damage', 'Scale', 'Detail'];
+const STAGING_UPLOAD_TIMEOUT_MS = 45_000;
+const INVENTORY_REFRESH_TIMEOUT_MS = 15_000;
+const OCR_POLL_INTERVAL_MS = 5_000;
+const MAX_OCR_POLL_ATTEMPTS = 12;
+const PHOTO_LABEL_SUGGESTIONS = [
+  'Front',
+  'Back',
+  'Maker / brand mark',
+  'Damage / wear',
+  'Size reference',
+  'Close-up detail',
+];
 
 function getDisplayDescription(asset) {
   const description = asset?.description?.trim();
@@ -146,6 +172,38 @@ function getPersistedRoom() {
   return 'Living Room';
 }
 
+function getAudioFilename(blob) {
+  const mimeType = blob?.type?.toLowerCase() || '';
+  if (mimeType.includes('mp4') || mimeType.includes('m4a') || mimeType.includes('aac')) {
+    return 'recording.m4a';
+  }
+  if (mimeType.includes('ogg')) return 'recording.ogg';
+  if (mimeType.includes('wav')) return 'recording.wav';
+  return 'recording.webm';
+}
+
+function normalizeMediaSrc(src) {
+  if (!src) return '';
+  if (/^(https?:|data:|blob:)/i.test(src)) return src;
+  return src.startsWith('/') ? src : `/${src}`;
+}
+
+async function fetchWithTimeout(url, options, timeoutMs = STAGING_UPLOAD_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      throw new Error('Upload timed out. The item is saved locally and will retry automatically.');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 export default function AdminInventoryDashboard({
   sessionId,
   assets: propAssets,
@@ -186,8 +244,11 @@ export default function AdminInventoryDashboard({
   const [audioBlob, setAudioBlob] = useState(null);
   const [stageSuccess, setStageSuccess] = useState(null); // { asset_id, title }
   const [isStaging, setIsStaging] = useState(false);
+  const [stagingStatus, setStagingStatus] = useState('');
   const [uploadQueue, setUploadQueue] = useState([]); // items from IndexedDB pending upload
   const [uploadingIndexed, setUploadingIndexed] = useState(null); // asset_id currently uploading
+  const stagingFileInputRef = useRef(null);
+  const [showPhotoLabelHelp, setShowPhotoLabelHelp] = useState(false);
 
   // Edit form state
   const [editForm, setEditForm] = useState({
@@ -215,7 +276,15 @@ export default function AdminInventoryDashboard({
   const [editingImage, setEditingImage] = useState(null);
   const [imageEditSaving, setImageEditSaving] = useState(false);
   const [previewAsset, setPreviewAsset] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteReason, setDeleteReason] = useState('');
+  const [deleteError, setDeleteError] = useState(null);
+  const [deletingAsset, setDeletingAsset] = useState(false);
   const [expandedDescriptionIds, setExpandedDescriptionIds] = useState(() => new Set());
+  const hasLoadedAssetsRef = useRef(propAssets !== undefined);
+  const assetFetchInFlightRef = useRef(false);
+  const ocrPollAttemptsRef = useRef(0);
+  const processingAssetKeyRef = useRef('');
 
   // Category manager states
   const [categories, setCategories] = useState(CATEGORIES);
@@ -224,6 +293,13 @@ export default function AdminInventoryDashboard({
 
   // AI Details generation state
   const [generatingDetails, setGeneratingDetails] = useState({});
+  const [loaderMessage, setLoaderMessage] = useState('');
+  
+  // AI Feedback states
+  const [feedbackRating, setFeedbackRating] = useState(null); // 'thumbs_up' | 'thumbs_down' | null
+  const [feedbackComment, setFeedbackComment] = useState('');
+  const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
+  const [showFeedbackCommentField, setShowFeedbackCommentField] = useState(false);
 
   // Pending batch updates
   const [pendingUpdatesCount, setPendingUpdatesCount] = useState(0);
@@ -293,7 +369,7 @@ export default function AdminInventoryDashboard({
   }
 
   async function handleDeleteCategory(name) {
-    if (!window.confirm(`Are you sure you want to delete the category "${name}"?`)) {
+    if (!await customConfirm(`Are you sure you want to delete the category "${name}"?`)) {
       return;
     }
     setError(null);
@@ -400,7 +476,7 @@ export default function AdminInventoryDashboard({
   }
 
   async function handleSecondaryDelete(assetId, imageId) {
-    if (!window.confirm('Are you sure you want to delete this secondary view?')) {
+    if (!await customConfirm('Are you sure you want to delete this secondary view?')) {
       return;
     }
 
@@ -457,28 +533,41 @@ export default function AdminInventoryDashboard({
   // ── Fetch assets and heirs ──────────────────────────────────────────────
   const fetchAssets = useCallback(async () => {
     if (!sessionId) return;
+    if (assetFetchInFlightRef.current) return;
+    assetFetchInFlightRef.current = true;
     if (onRefreshAssets) {
-      await onRefreshAssets();
       try {
-        const pRes = await fetch(`/api/sessions/${sessionId}/pending-updates`, {
-          credentials: 'same-origin',
-        });
-        if (pRes && pRes.ok) {
-          const pData = await pRes.json();
-          setPendingUpdatesCount(pData.pending_count || 0);
+        await onRefreshAssets();
+        try {
+          const pRes = await fetch(`/api/sessions/${sessionId}/pending-updates`, {
+            credentials: 'same-origin',
+          });
+          if (pRes && pRes.ok) {
+            const pData = await pRes.json();
+            setPendingUpdatesCount(pData.pending_count || 0);
+          }
+        } catch (e) {
+          // Pending update count is supplementary.
         }
-      } catch (e) {}
+      } finally {
+        assetFetchInFlightRef.current = false;
+      }
       return;
     }
     try {
-      setLoading(true);
-      const res = await fetch(`/api/sessions/${sessionId}/assets`, {
-        credentials: 'same-origin',
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setInternalAssets(Array.isArray(data) ? data : data.assets || []);
+      if (!hasLoadedAssetsRef.current) {
+        setLoading(true);
       }
+      const res = await fetchWithTimeout(`/api/sessions/${sessionId}/assets`, {
+        credentials: 'same-origin',
+      }, INVENTORY_REFRESH_TIMEOUT_MS);
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Inventory refresh failed: ${res.status}`);
+      }
+      const data = await res.json();
+      setInternalAssets(Array.isArray(data) ? data : data.assets || []);
+      hasLoadedAssetsRef.current = true;
       try {
         const pRes = await fetch(`/api/sessions/${sessionId}/pending-updates`, {
           credentials: 'same-origin',
@@ -490,15 +579,20 @@ export default function AdminInventoryDashboard({
       } catch (e) {}
     } catch (err) {
       console.error('Failed to fetch assets', err);
-      setError('Failed to load assets.');
+      setError(
+        hasLoadedAssetsRef.current
+          ? `The item was staged, but the inventory refresh is taking longer than expected. ${err.message}`
+          : `Failed to load assets. ${err.message}`
+      );
     } finally {
       setLoading(false);
+      assetFetchInFlightRef.current = false;
     }
   }, [sessionId, onRefreshAssets]);
 
   async function handlePublishUpdates() {
     if (pendingUpdatesCount === 0) return;
-    if (!window.confirm(`Are you sure you want to publish all ${pendingUpdatesCount} pending updates to beneficiaries? This will send them email notifications and update their dashboards.`)) {
+    if (!await customConfirm(`Are you sure you want to publish all ${pendingUpdatesCount} pending updates to beneficiaries? This will send them email notifications and update their dashboards.`)) {
       return;
     }
     setPublishingUpdates(true);
@@ -550,12 +644,31 @@ export default function AdminInventoryDashboard({
 
   // Poll for OCR status updates on PROCESSING assets
   useEffect(() => {
-    const processingCount = assets.filter((a) => a.ocr_status === 'PROCESSING').length;
-    if (processingCount === 0) return;
+    const processingAssetKey = assets
+      .filter((asset) => asset.ocr_status === 'PROCESSING')
+      .map((asset) => asset.id)
+      .sort()
+      .join(',');
+
+    if (!processingAssetKey) {
+      processingAssetKeyRef.current = '';
+      ocrPollAttemptsRef.current = 0;
+      return;
+    }
+
+    if (processingAssetKeyRef.current !== processingAssetKey) {
+      processingAssetKeyRef.current = processingAssetKey;
+      ocrPollAttemptsRef.current = 0;
+    }
 
     const interval = setInterval(() => {
+      if (ocrPollAttemptsRef.current >= MAX_OCR_POLL_ATTEMPTS) {
+        clearInterval(interval);
+        return;
+      }
+      ocrPollAttemptsRef.current += 1;
       fetchAssets();
-    }, 3000);
+    }, OCR_POLL_INTERVAL_MS);
 
     return () => clearInterval(interval);
   }, [assets, fetchAssets]);
@@ -586,6 +699,67 @@ export default function AdminInventoryDashboard({
   }
 
   // ── Quick Capture Photo Stack ───────────────────────────────────────────
+  async function addFilesToStaging(files) {
+    const availableSlots = MAX_STAGING_PHOTOS - stagingPhotos.length;
+    const selectedFiles = Array.from(files || []);
+
+    if (selectedFiles.length === 0) return;
+    if (selectedFiles.length > availableSlots) {
+      setError(`You can add ${availableSlots} more photo${availableSlots === 1 ? '' : 's'} to this item.`);
+      return;
+    }
+
+    const invalidFile = selectedFiles.find((file) => !file.type?.startsWith('image/'));
+    if (invalidFile) {
+      setError(`"${invalidFile.name}" is not a supported image file.`);
+      return;
+    }
+
+    const oversizedFile = selectedFiles.find((file) => file.size > 10 * 1024 * 1024);
+    if (oversizedFile) {
+      setError(`Image "${oversizedFile.name}" must be under 10MB.`);
+      return;
+    }
+
+    setError(null);
+
+    try {
+      const preparedPhotos = [];
+      for (const file of selectedFiles) {
+        const { blob: compressedBlob } = await autoCompress(file, 2048, 0.85);
+        preparedPhotos.push({
+          id: crypto.randomUUID
+            ? crypto.randomUUID()
+            : `photo-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          blob: compressedBlob,
+          previewUrl: URL.createObjectURL(compressedBlob),
+          originalName: file.name || 'capture.webp',
+          label: '',
+        });
+      }
+
+      setStagingPhotos((prev) => [
+        ...prev,
+        ...preparedPhotos.map((photo, index) => ({
+          ...photo,
+          label: prev.length === 0 && index === 0 ? 'Front' : photo.label,
+        })),
+      ]);
+
+      if (navigator.vibrate) {
+        navigator.vibrate([50, 50]);
+      }
+    } catch (err) {
+      console.error('Failed to process image:', err);
+      setError('Failed to process image. Please try another file.');
+    }
+  }
+
+  async function handleStagingFileUpload(e) {
+    await addFilesToStaging(e.target.files);
+    e.target.value = '';
+  }
+
   function triggerCameraCapture() {
     if (stagingPhotos.length >= MAX_STAGING_PHOTOS) {
       setError(`You can add up to ${MAX_STAGING_PHOTOS} photos for one item.`);
@@ -676,45 +850,6 @@ export default function AdminInventoryDashboard({
       });
     }
 
-    function fallbackFilePicker() {
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = 'image/*';
-      input.setAttribute('capture', 'environment');
-      input.onchange = async (e) => {
-        const picked = e.target.files?.[0];
-        if (!picked) return;
-        await finalizeCapture(picked);
-      };
-      input.click();
-    }
-
-    async function finalizeCapture(f) {
-      try {
-        const { blob: compressedBlob } = await autoCompress(f, 2048, 0.85);
-        const previewUrl = URL.createObjectURL(compressedBlob);
-        const photoId = crypto.randomUUID
-          ? crypto.randomUUID()
-          : `photo-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        setStagingPhotos((prev) => [
-          ...prev,
-          {
-            id: photoId,
-            blob: compressedBlob,
-            previewUrl,
-            originalName: f.name || 'capture.webp',
-            label: prev.length === 0 ? 'Front' : '',
-          },
-        ]);
-        if (navigator.vibrate) {
-          navigator.vibrate([50, 50]);
-        }
-      } catch (err) {
-        console.error('Failed to compress image:', err);
-        setError('Failed to process image. Please try again.');
-      }
-    }
-
     // Try getUserMedia synchronously (within the user-gesture click handler)
     try {
       navigator.mediaDevices.getUserMedia({
@@ -724,19 +859,15 @@ export default function AdminInventoryDashboard({
         // Camera opened successfully — show live preview overlay
         buildOverlay(stream).then((file) => {
           if (file) {
-            finalizeCapture(file);
-          } else {
-            // User cancelled camera — fall back to file picker
-            fallbackFilePicker();
+            addFilesToStaging([file]);
           }
         });
-      }).catch(() => {
-        // getUserMedia failed — fall back to file picker
-        fallbackFilePicker();
+      }).catch((err) => {
+        console.error('Unable to open camera:', err);
+        setError('Unable to open the camera. Check browser permissions or use Upload images instead.');
       });
     } catch (_) {
-      // navigator.mediaDevices undefined — fall back to file picker
-      fallbackFilePicker();
+      setError('This browser does not expose a camera. Use Upload images instead.');
     }
   }
 
@@ -813,6 +944,7 @@ export default function AdminInventoryDashboard({
     }
 
     setIsStaging(true);
+    setStagingStatus('Saving locally...');
     setError(null);
 
     try {
@@ -844,6 +976,7 @@ export default function AdminInventoryDashboard({
       });
 
       // Attempt immediate upload
+      setStagingStatus('Uploading photos and audio...');
       const formData = new FormData();
       formData.append('asset_id', assetId);
       formData.append('location', stagingRoom);
@@ -858,10 +991,10 @@ export default function AdminInventoryDashboard({
       });
 
       if (audioBlob) {
-        formData.append('audio', audioBlob, 'recording.webm');
+        formData.append('audio', audioBlob, getAudioFilename(audioBlob));
       }
 
-      const res = await fetch(`/api/sessions/${sessionId}/assets/stage`, {
+      const res = await fetchWithTimeout(`/api/sessions/${sessionId}/assets/stage`, {
         method: 'POST',
         credentials: 'same-origin',
         body: formData,
@@ -875,8 +1008,9 @@ export default function AdminInventoryDashboard({
 
       const data = await res.json();
 
-      // Mark as uploaded in IndexedDB
-      await updateStagingItemStatus(assetId, 'uploaded');
+      // The server confirmed persistence, so the offline copy is no longer needed.
+      setStagingStatus('Finalizing...');
+      await deleteStagingItem(assetId);
 
       // Clear staging photos
       clearStagingPhotos();
@@ -910,6 +1044,7 @@ export default function AdminInventoryDashboard({
       loadUploadQueue();
     } finally {
       setIsStaging(false);
+      setStagingStatus('');
     }
   }
 
@@ -967,10 +1102,10 @@ export default function AdminInventoryDashboard({
       });
 
       if (item.audio_blob) {
-        formData.append('audio', item.audio_blob, 'recording.webm');
+        formData.append('audio', item.audio_blob, getAudioFilename(item.audio_blob));
       }
 
-      const res = await fetch(`/api/sessions/${item.session_id}/assets/stage`, {
+      const res = await fetchWithTimeout(`/api/sessions/${item.session_id}/assets/stage`, {
         method: 'POST',
         credentials: 'same-origin',
         body: formData,
@@ -1005,78 +1140,6 @@ export default function AdminInventoryDashboard({
 
     return () => clearInterval(interval);
   }, [processUploadQueue]);
-
-  // ── WebSocket Listener for OCR Completion ───────────────────────────────
-  useEffect(() => {
-    if (!sessionId) return;
-
-    let ws = null;
-    let reconnectAttempts = 0;
-    const maxReconnect = 5;
-    let reconnectTimer = null;
-
-    function connect() {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/api/sessions/${encodeURIComponent(sessionId)}/ws`;
-      ws = new WebSocket(wsUrl);
-
-      ws.onopen = () => {
-        reconnectAttempts = 0;
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const frame = JSON.parse(event.data);
-          if (frame.type === 'asset_ocr_completed') {
-            // Update local asset list with the completed asset
-            setInternalAssets((prev) => {
-              const idx = prev.findIndex((a) => a.id === frame.id);
-              if (idx === -1) {
-                return [frame, ...prev];
-              }
-              const updated = [...prev];
-              updated[idx] = { ...updated[idx], ...frame };
-              return updated;
-            });
-            // If we're using propAssets, refresh via the callback
-            if (onRefreshAssets) {
-              onRefreshAssets();
-            }
-          }
-        } catch { /* ignore parse errors */ }
-      };
-
-      ws.onclose = (event) => {
-        ws = null;
-        if (reconnectTimer) clearTimeout(reconnectTimer);
-
-        if (event.code === 1000 || event.code === 1001) return;
-        if (reconnectAttempts < maxReconnect) {
-          const delay = 1000 * Math.pow(2, reconnectAttempts);
-          reconnectAttempts++;
-          reconnectTimer = setTimeout(connect, delay);
-        }
-      };
-
-      ws.onerror = () => {
-        // onclose will fire next
-      };
-    }
-
-    connect();
-
-    return () => {
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (ws) {
-        ws.onopen = null;
-        ws.onclose = null;
-        ws.onmessage = null;
-        ws.onerror = null;
-        ws.close();
-        ws = null;
-      }
-    };
-  }, [sessionId, onRefreshAssets]);
 
   // ── File Upload / Stage (original desktop flow preserved) ────────────────
   async function handleFileUpload(e) {
@@ -1182,7 +1245,7 @@ export default function AdminInventoryDashboard({
       let reason = null;
 
       if (isMajor) {
-        reason = window.prompt("A reason is required when publishing a new asset post-launch (during ACTIVE phase):");
+        reason = await customPrompt("A reason is required when publishing a new asset post-launch (during ACTIVE phase):");
         if (reason === null) return; // Cancelled
         if (!reason.trim()) {
           setError("A reason is required when publishing a new asset post-launch.");
@@ -1249,7 +1312,7 @@ export default function AdminInventoryDashboard({
       let reason = null;
 
       if (isMajor) {
-        reason = window.prompt("A reason for the change is required for major asset edits (value/title changes) post-launch:");
+        reason = await customPrompt("A reason for the change is required for major asset edits (value/title changes) post-launch:");
         if (reason === null) return; // Cancelled
         if (!reason.trim()) {
           setError("A reason is required to save major edits.");
@@ -1277,27 +1340,37 @@ export default function AdminInventoryDashboard({
   }
 
   // ── Delete Asset ────────────────────────────────────────────────────────
-  async function handleDelete(assetId) {
-    const originalAsset = assets.find((a) => a.id === assetId);
-    const isMajor = originalAsset.status === 'LIVE' || sessionStatus === 'ACTIVE';
-    let reason = null;
+  function handleDelete(assetId) {
+    const asset = assets.find((candidate) => candidate.id === assetId);
+    if (!asset) return;
+    setDeleteTarget(asset);
+    setDeleteReason('');
+    setDeleteError(null);
+  }
 
-    if (isMajor) {
-      reason = window.prompt("A reason is required when deleting an asset post-launch or after publishing:");
-      if (reason === null) return; // Cancelled
-      if (!reason.trim()) {
-        setError("A reason is required to delete the asset.");
-        return;
-      }
-    } else {
-      if (!window.confirm('Are you sure you want to permanently delete this asset and its associated image? This action cannot be undone.')) {
-        return;
-      }
+  function closeDeleteDialog() {
+    if (deletingAsset) return;
+    setDeleteTarget(null);
+    setDeleteReason('');
+    setDeleteError(null);
+  }
+
+  async function confirmDeleteAsset() {
+    if (!deleteTarget) return;
+    const isMajor = deleteTarget.status === 'LIVE' || sessionStatus === 'ACTIVE';
+    const reason = deleteReason.trim();
+    if (isMajor && !reason) {
+      setDeleteError('Enter a reason before permanently deleting this asset.');
+      return;
     }
 
+    setDeletingAsset(true);
+    setDeleteError(null);
     setError(null);
     try {
-      const url = reason ? `/api/assets/${assetId}?reason=${encodeURIComponent(reason)}` : `/api/assets/${assetId}`;
+      const url = reason
+        ? `/api/assets/${deleteTarget.id}?reason=${encodeURIComponent(reason)}`
+        : `/api/assets/${deleteTarget.id}`;
       const res = await fetch(url, {
         method: 'DELETE',
         credentials: 'same-origin',
@@ -1306,9 +1379,13 @@ export default function AdminInventoryDashboard({
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.detail || `Delete failed: ${res.status}`);
       }
+      setDeleteTarget(null);
+      setDeleteReason('');
       await fetchAssets();
     } catch (err) {
-      setError(err.message);
+      setDeleteError(err.message);
+    } finally {
+      setDeletingAsset(false);
     }
   }
 
@@ -1504,8 +1581,31 @@ export default function AdminInventoryDashboard({
     <div className="admin-inventory-dashboard" data-testid="admin-inventory-dashboard">
       {/* Error banner */}
       {error && (
-        <div className="banner banner-error" style={{ marginBottom: 'var(--space-md)' }}>
-          {error}
+        <div
+          className="banner banner-error"
+          style={{
+            marginBottom: 'var(--space-md)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 'var(--space-sm)',
+            flexWrap: 'wrap',
+          }}
+        >
+          <span>{error}</span>
+          {error.includes('inventory refresh') && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => {
+                setError(null);
+                fetchAssets();
+              }}
+              data-testid="retry-inventory-refresh"
+            >
+              Retry Inventory
+            </button>
+          )}
         </div>
       )}
 
@@ -1671,14 +1771,59 @@ export default function AdminInventoryDashboard({
           AI describe after upload
         </label>
 
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
-            gap: 'var(--space-sm)',
-            marginBottom: 'var(--space-md)',
-          }}
-        >
+        <div className="photo-label-help">
+          <button
+            type="button"
+            className="photo-label-help__trigger"
+            onClick={() => setShowPhotoLabelHelp((current) => !current)}
+            aria-expanded={showPhotoLabelHelp}
+            aria-controls="photo-label-help-panel"
+          >
+            <span className="photo-label-help__icon" aria-hidden="true">i</span>
+            What do the photo labels mean?
+          </button>
+          {showPhotoLabelHelp && (
+            <div
+              id="photo-label-help-panel"
+              className="photo-label-help__panel"
+              role="region"
+              aria-label="Photo label explanation"
+            >
+              <p>
+                Labels simply identify what each photo shows. They help people—and the optional
+                AI description—understand why the photo was included.
+              </p>
+              <dl>
+                <div>
+                  <dt>Front / Back</dt>
+                  <dd>The main sides of the item.</dd>
+                </div>
+                <div>
+                  <dt>Maker / brand mark</dt>
+                  <dd>A signature, label, stamp, serial number, or manufacturer logo.</dd>
+                </div>
+                <div>
+                  <dt>Damage / wear</dt>
+                  <dd>Scratches, cracks, stains, missing pieces, or other condition issues.</dd>
+                </div>
+                <div>
+                  <dt>Size reference</dt>
+                  <dd>The item beside a ruler or familiar object to show its approximate size.</dd>
+                </div>
+                <div>
+                  <dt>Close-up detail</dt>
+                  <dd>Craftsmanship, texture, hardware, decoration, or another important feature.</dd>
+                </div>
+                <div>
+                  <dt>Primary photo</dt>
+                  <dd>The main image people see first. Use the clearest overall view.</dd>
+                </div>
+              </dl>
+            </div>
+          )}
+        </div>
+
+        <div className="quick-capture-grid">
           {stagingPhotos.map((photo, idx) => (
             <div
               key={photo.id}
@@ -1715,11 +1860,19 @@ export default function AdminInventoryDashboard({
                 )}
               </div>
               <div style={{ padding: 'var(--space-xs)', display: 'flex', flexDirection: 'column', gap: 'var(--space-xs)' }}>
+                <label
+                  htmlFor={`staging-photo-label-${photo.id}`}
+                  className="text-xs"
+                  style={{ fontWeight: 700, color: 'var(--color-text-muted)' }}
+                >
+                  What does this photo show?
+                </label>
                 <input
+                  id={`staging-photo-label-${photo.id}`}
                   className="form-input"
                   value={photo.label}
                   onChange={(e) => updateStagingPhotoLabel(photo.id, e.target.value)}
-                  placeholder={idx === 0 ? 'Primary view' : 'View label'}
+                  placeholder="Type a label or choose one below"
                   data-testid={`staging-photo-label-${idx}`}
                   style={{ padding: '4px 8px', fontSize: '0.75rem' }}
                 />
@@ -1798,6 +1951,47 @@ export default function AdminInventoryDashboard({
           )}
         </div>
 
+        {stagingPhotos.length < MAX_STAGING_PHOTOS && (
+          <div style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            gap: 'var(--space-sm)',
+            marginBottom: 'var(--space-md)',
+          }}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={triggerCameraCapture}
+              data-testid="take-staging-photo"
+            >
+              Take photo
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => stagingFileInputRef.current?.click()}
+              data-testid="upload-staging-photos"
+            >
+              Upload images
+            </button>
+            <span className="text-xs text-muted">
+              Camera works on phones and laptops. You can upload several images at once.
+            </span>
+          </div>
+        )}
+
+        <input
+          ref={stagingFileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          style={{ display: 'none' }}
+          onChange={handleStagingFileUpload}
+          aria-label="Upload item images"
+          data-testid="staging-file-input"
+        />
+
         {/* Audio Recording for Staging */}
         <div style={{ marginBottom: 'var(--space-md)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-sm)', marginBottom: 'var(--space-xs)' }}>
@@ -1811,18 +2005,8 @@ export default function AdminInventoryDashboard({
           <AdminVoiceRecorder
             assetId="staging"
             onSaved={(blob) => handleRecordingSaved(blob)}
+            onCleared={clearAudio}
           />
-          {audioBlob && (
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={clearAudio}
-              style={{ marginTop: 4, fontSize: '0.7rem' }}
-              data-testid="clear-staging-audio"
-            >
-              Remove Recording
-            </button>
-          )}
         </div>
 
         {/* Stage Button */}
@@ -1834,7 +2018,7 @@ export default function AdminInventoryDashboard({
             disabled={isStaging || stagingPhotos.length === 0}
             data-testid="stage-from-slots-btn"
           >
-            {isStaging ? 'Staging...' : '📤 Stage Item'}
+            {isStaging ? stagingStatus || 'Staging...' : '📤 Stage Item'}
           </button>
           {stageSuccess && (
             <span style={{ color: 'var(--color-primary)', fontWeight: 600, fontSize: '0.85rem' }}>
@@ -1940,7 +2124,7 @@ export default function AdminInventoryDashboard({
           data-testid="category-manager-toggle"
         >
           <span>📂 Category Manager ({categories.length})</span>
-          <span>{isCategoryManagerOpen ? '▲' : '▼'}</span>
+          <span>▼</span>
         </button>
         {isCategoryManagerOpen && (
           <div className="category-manager-content">
@@ -2023,63 +2207,66 @@ export default function AdminInventoryDashboard({
 
       {/* RAG Search, Filter, and Sort Toolbar */}
       <div className="archival-card" style={{ marginBottom: 'var(--space-lg)', padding: 'var(--space-md)' }}>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-md)', alignItems: 'center' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-md)', alignItems: 'flex-end' }}>
           
           {/* Search bar with Enter support */}
-          <div style={{ flex: 1, minWidth: '240px', position: 'relative', display: 'flex', gap: 'var(--space-sm)' }}>
-            <div style={{ position: 'relative', flex: 1 }}>
-              <input
-                type="text"
-                className="form-input"
-                placeholder="Semantic RAG Search (e.g. mahogany table, gilded vase)..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-                style={{ paddingRight: searchQuery ? '2.5rem' : undefined }}
-                data-testid="admin-search-input"
-              />
-              {searchQuery && (
-                <button
-                  type="button"
-                  onClick={handleClearSearch}
-                  style={{
-                    position: 'absolute',
-                    right: 8,
-                    top: '50%',
-                    transform: 'translateY(-50%)',
-                    background: 'none',
-                    border: 'none',
-                    cursor: 'pointer',
-                    color: 'var(--color-text)',
-                    opacity: 0.5,
-                    fontSize: '1rem',
-                    padding: 4,
-                  }}
-                  aria-label="Clear search"
-                >
-                  ✕
-                </button>
-              )}
+          <div style={{ flex: 2, minWidth: '280px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <label className="form-label text-xs">Search Catalog</label>
+            <div style={{ display: 'flex', gap: 'var(--space-sm)', width: '100%', alignItems: 'stretch' }}>
+              <div style={{ position: 'relative', flex: 1 }}>
+                <input
+                  type="text"
+                  className="form-input"
+                  placeholder="Semantic RAG Search (e.g. mahogany table, gilded vase)..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+                  style={{ paddingRight: searchQuery ? '2.5rem' : undefined, width: '100%' }}
+                  data-testid="admin-search-input"
+                />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={handleClearSearch}
+                    style={{
+                      position: 'absolute',
+                      right: 8,
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      color: 'var(--color-text)',
+                      opacity: 0.5,
+                      fontSize: '1rem',
+                      padding: 4,
+                    }}
+                    aria-label="Clear search"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleSearch}
+                disabled={searching || !searchQuery.trim()}
+                data-testid="admin-search-submit"
+              >
+                {searching ? 'Searching...' : 'Search'}
+              </button>
             </div>
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={handleSearch}
-              disabled={searching || !searchQuery.trim()}
-              data-testid="admin-search-submit"
-            >
-              {searching ? 'Searching...' : 'Search'}
-            </button>
           </div>
 
           {/* Category Filter */}
-          <div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
             <label className="form-label text-xs">Category</label>
             <select
               className="form-input"
               value={filterCategory}
               onChange={(e) => setFilterCategory(e.target.value)}
-              style={{ minWidth: '140px', padding: '8px 10px' }}
+              style={{ minWidth: '140px' }}
               data-testid="admin-filter-category"
             >
               <option value="All">All Categories</option>
@@ -2088,13 +2275,13 @@ export default function AdminInventoryDashboard({
           </div>
 
           {/* Status Filter */}
-          <div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
             <label className="form-label text-xs">Status</label>
             <select
               className="form-input"
               value={filterStatus}
               onChange={(e) => setFilterStatus(e.target.value)}
-              style={{ minWidth: '140px', padding: '8px 10px' }}
+              style={{ minWidth: '140px' }}
               data-testid="admin-filter-status"
             >
               <option value="All">All Statuses</option>
@@ -2105,13 +2292,13 @@ export default function AdminInventoryDashboard({
           </div>
 
           {/* Sorting */}
-          <div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
             <label className="form-label text-xs">Sort By</label>
             <select
               className="form-input"
               value={sortOption}
               onChange={(e) => setSortOption(e.target.value)}
-              style={{ minWidth: '160px', padding: '8px 10px' }}
+              style={{ minWidth: '160px' }}
               data-testid="admin-sort-select"
             >
               <option value="id_desc">Date Created (Newest)</option>
@@ -2126,23 +2313,26 @@ export default function AdminInventoryDashboard({
           </div>
 
           {/* Grid/List Toggle */}
-          <div className="view-toggle-container" style={{ margin: 0 }}>
-            <button
-              type="button"
-              className={`view-toggle-btn ${viewMode === 'grid' ? 'active-toggle' : ''}`}
-              onClick={() => setViewMode('grid')}
-              data-testid="toggle-grid-view"
-            >
-              Grid View
-            </button>
-            <button
-              type="button"
-              className={`view-toggle-btn ${viewMode === 'list' ? 'active-toggle' : ''}`}
-              onClick={() => setViewMode('list')}
-              data-testid="toggle-list-view"
-            >
-              List View
-            </button>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <label className="form-label text-xs">Layout</label>
+            <div className="view-toggle-container" style={{ margin: 0 }}>
+              <button
+                type="button"
+                className={`view-toggle-btn ${viewMode === 'grid' ? 'active-toggle' : ''}`}
+                onClick={() => setViewMode('grid')}
+                data-testid="toggle-grid-view"
+              >
+                Grid View
+              </button>
+              <button
+                type="button"
+                className={`view-toggle-btn ${viewMode === 'list' ? 'active-toggle' : ''}`}
+                onClick={() => setViewMode('list')}
+                data-testid="toggle-list-view"
+              >
+                List View
+              </button>
+            </div>
           </div>
 
         </div>
@@ -2169,7 +2359,7 @@ export default function AdminInventoryDashboard({
             <div
               style={{
                 display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(290px, 1fr))',
                 gap: 'var(--space-md)',
               }}
             >
@@ -2446,7 +2636,10 @@ export default function AdminInventoryDashboard({
                 return (
                   <div key={asset.id} className="list-item-card" data-testid={`asset-card-${asset.id}`}>
                     <div className="list-item-thumb">
-                      <img src={asset.image_uri || 'static/uploads/placeholder.webp'} alt={asset.title || 'Keepsake'} />
+                      <img
+                        src={normalizeMediaSrc(asset.image_uri || 'static/uploads/placeholder.webp')}
+                        alt={asset.title || 'Keepsake'}
+                      />
                     </div>
                     
                     <div className="list-item-info">
@@ -2787,7 +2980,7 @@ export default function AdminInventoryDashboard({
                 </select>
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-sm)' }}>
+              <div className="admin-form-grid">
                 <div>
                   <label className="form-label">Min Value ($)</label>
                   <input
@@ -2941,7 +3134,11 @@ export default function AdminInventoryDashboard({
                     return assetImages.map((img) => (
                       <div key={img.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: 'var(--space-xs)', background: 'var(--color-card-bg)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-sm)' }}>
-                          <img src={img.image_uri} alt={img.angle_label} style={{ width: 32, height: 32, objectFit: 'cover', borderRadius: 'var(--radius-sm)' }} />
+                          <img
+                            src={normalizeMediaSrc(img.image_uri)}
+                            alt={img.angle_label}
+                            style={{ width: 32, height: 32, objectFit: 'cover', borderRadius: 'var(--radius-sm)' }}
+                          />
                           <span className="text-xs font-semibold">{img.angle_label || 'View'}</span>
                           {img.is_primary && <span className="badge badge-primary" style={{ fontSize: '0.55rem', padding: '0px 3px' }}>Primary</span>}
                         </div>
@@ -2979,7 +3176,7 @@ export default function AdminInventoryDashboard({
                 )}
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-xs)' }}>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-xs)' }}>
+                  <div className="admin-form-grid">
                     <div>
                       <label className="form-label text-xs" style={{ marginBottom: '2px' }}>Choose Photo File</label>
                       <input
@@ -3084,6 +3281,94 @@ export default function AdminInventoryDashboard({
                 onClick={cancelEditing}
               >
                 Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteTarget && (
+        <div
+          className="drawer-overlay"
+          role="presentation"
+          onClick={closeDeleteDialog}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 1200,
+            display: 'grid',
+            placeItems: 'center',
+            padding: 'var(--space-md)',
+            background: 'rgba(15, 23, 42, 0.55)',
+          }}
+        >
+          <div
+            className="archival-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-asset-title"
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              width: 'min(520px, calc(100vw - 32px))',
+              padding: 'var(--space-lg)',
+              boxShadow: '0 24px 70px rgba(15, 23, 42, 0.3)',
+            }}
+            data-testid="delete-asset-dialog"
+          >
+            <h3
+              id="delete-asset-title"
+              style={{ fontFamily: 'var(--font-serif)', marginBottom: 'var(--space-sm)' }}
+            >
+              Permanently delete this asset?
+            </h3>
+            <p style={{ marginBottom: 'var(--space-sm)' }}>
+              <strong>{deleteTarget.title || 'Untitled Asset'}</strong> and its uploaded photos
+              {deleteTarget.audio_uri ? ', audio recording,' : ''} will be permanently removed.
+            </p>
+            <p className="text-sm text-muted" style={{ marginBottom: 'var(--space-md)' }}>
+              This action cannot be undone.
+            </p>
+
+            {(deleteTarget.status === 'LIVE' || sessionStatus === 'ACTIVE') && (
+              <div style={{ marginBottom: 'var(--space-md)' }}>
+                <label className="form-label" htmlFor="delete-asset-reason">
+                  Reason for deletion
+                </label>
+                <textarea
+                  id="delete-asset-reason"
+                  className="form-input"
+                  rows={3}
+                  value={deleteReason}
+                  onChange={(event) => setDeleteReason(event.target.value)}
+                  placeholder="Explain why this published or active-session asset must be removed."
+                  data-testid="delete-asset-reason"
+                />
+              </div>
+            )}
+
+            {deleteError && (
+              <div className="banner banner-error" style={{ marginBottom: 'var(--space-md)' }}>
+                {deleteError}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-sm)' }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={closeDeleteDialog}
+                disabled={deletingAsset}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={confirmDeleteAsset}
+                disabled={deletingAsset}
+                data-testid="confirm-delete-asset"
+              >
+                {deletingAsset ? 'Deleting...' : 'Permanently Delete'}
               </button>
             </div>
           </div>

@@ -14,7 +14,7 @@ const baseSettings = {
     SMTP_HOST: { value: 'localhost', secret: false, choices: null },
   },
   storage: {
-    STORAGE_DRIVER: { value: 'LOCAL', secret: false, choices: ['LOCAL', 'S3', 'GCS'] },
+    STORAGE_DRIVER: { value: 'LOCAL', secret: false, choices: ['LOCAL', 'S3'] },
   },
 };
 
@@ -31,10 +31,13 @@ describe('AdminSettingsPanel', () => {
     global.fetch.mockResolvedValueOnce({ ok: true, json: async () => baseSettings });
 
     render(<AdminSettingsPanel />);
-    fireEvent.click(screen.getByRole('button', { name: /Runtime Settings/i }));
 
     expect(await screen.findByDisplayValue('ollama')).toBeInTheDocument();
-    expect(screen.getByDisplayValue('localhost')).toBeInTheDocument();
+    
+    // Switch to Email (SMTP) tab to see SMTP settings
+    fireEvent.click(screen.getByRole('button', { name: /Email \(SMTP\)/i }));
+    expect(await screen.findByDisplayValue('localhost')).toBeInTheDocument();
+    
     expect(global.fetch).toHaveBeenCalledWith(
       '/api/admin/settings',
       expect.objectContaining({ credentials: 'same-origin' }),
@@ -52,7 +55,6 @@ describe('AdminSettingsPanel', () => {
     global.fetch.mockResolvedValueOnce({ ok: true, json: async () => settingsWithSecret });
 
     render(<AdminSettingsPanel />);
-    fireEvent.click(screen.getByRole('button', { name: /Runtime Settings/i }));
 
     const secretInput = await screen.findByLabelText('Openai Api Key');
     expect(secretInput).toHaveAttribute('type', 'password');
@@ -72,7 +74,6 @@ describe('AdminSettingsPanel', () => {
       });
 
     render(<AdminSettingsPanel />);
-    fireEvent.click(screen.getByRole('button', { name: /Runtime Settings/i }));
 
     await screen.findByDisplayValue('ollama');
 
@@ -96,7 +97,6 @@ describe('AdminSettingsPanel', () => {
       .mockResolvedValueOnce({ ok: false, status: 400, json: async () => ({ detail: 'Unsupported setting key(s)' }) });
 
     render(<AdminSettingsPanel />);
-    fireEvent.click(screen.getByRole('button', { name: /Runtime Settings/i }));
 
     await screen.findByDisplayValue('ollama');
 

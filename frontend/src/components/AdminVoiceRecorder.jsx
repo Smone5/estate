@@ -19,7 +19,21 @@
 import React, { useState, useRef, useCallback } from 'react';
 
 const MAX_DURATION_SEC = 120; // 2 minutes
-const MIME_TYPE = 'audio/webm';
+const AUDIO_FORMATS = [
+  { mimeType: 'audio/mp4;codecs=mp4a.40.2', extension: 'm4a' },
+  { mimeType: 'audio/mp4', extension: 'm4a' },
+  { mimeType: 'audio/webm;codecs=opus', extension: 'webm' },
+  { mimeType: 'audio/webm', extension: 'webm' },
+  { mimeType: 'audio/ogg;codecs=opus', extension: 'ogg' },
+];
+
+function getRecordingFormat() {
+  if (typeof MediaRecorder === 'undefined') return null;
+  if (typeof MediaRecorder.isTypeSupported !== 'function') {
+    return { mimeType: '', extension: 'webm' };
+  }
+  return AUDIO_FORMATS.find(({ mimeType }) => MediaRecorder.isTypeSupported(mimeType)) || null;
+}
 
 function isSecureContext() {
   const protocol = window.location.protocol;
@@ -34,26 +48,104 @@ function formatTime(totalSeconds) {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
-export default function AdminVoiceRecorder({ assetId, onSaved }) {
+export default function AdminVoiceRecorder({ assetId, onSaved, onCleared }) {
   const [recordingState, setRecordingState] = useState('idle'); // idle | recording | recorded
   const [elapsed, setElapsed] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState(null);
   const [playbackUrl, setPlaybackUrl] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [showMicSetup, setShowMicSetup] = useState(false);
+  const [microphones, setMicrophones] = useState([]);
+  const [selectedMicId, setSelectedMicId] = useState('');
+  const [micSetupStatus, setMicSetupStatus] = useState('');
+  const [testingMic, setTestingMic] = useState(false);
 
   const mediaRecorderRef = useRef(null);
+  const setupStreamRef = useRef(null);
   const chunksRef = useRef([]);
   const timerRef = useRef(null);
+  const finalizeTimerRef = useRef(null);
   const playbackAudioRef = useRef(null);
+  const playbackUrlRef = useRef(null);
   const blobRef = useRef(null);
+  const recordingFormatRef = useRef(null);
 
   const secure = isSecureContext();
 
+  const stopSetupStream = useCallback(() => {
+    if (setupStreamRef.current) {
+      setupStreamRef.current.getTracks().forEach((track) => track.stop());
+      setupStreamRef.current = null;
+    }
+  }, []);
+
+  const testMicrophone = useCallback(async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setMicSetupStatus('Microphone access is not available in this browser.');
+      return;
+    }
+
+    setTestingMic(true);
+    setMicSetupStatus('Requesting microphone access...');
+    stopSetupStream();
+
+    try {
+      const audioConstraint = selectedMicId
+        ? { deviceId: { exact: selectedMicId } }
+        : true;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraint });
+      setupStreamRef.current = stream;
+
+      const devices = typeof navigator.mediaDevices.enumerateDevices === 'function'
+        ? await navigator.mediaDevices.enumerateDevices()
+        : [];
+      const audioInputs = devices.filter((device) => device.kind === 'audioinput');
+      setMicrophones(audioInputs);
+
+      const activeTrack = stream.getAudioTracks?.()[0] || stream.getTracks()[0];
+      const activeDeviceId = activeTrack?.getSettings?.().deviceId;
+      if (!selectedMicId && activeDeviceId) {
+        setSelectedMicId(activeDeviceId);
+      } else if (!selectedMicId && audioInputs[0]?.deviceId) {
+        setSelectedMicId(audioInputs[0].deviceId);
+      }
+
+      const deviceName = activeTrack?.label
+        || audioInputs.find((device) => device.deviceId === activeDeviceId)?.label
+        || 'Default microphone';
+      setMicSetupStatus(`Connected to ${deviceName}. You can record now.`);
+    } catch (err) {
+      if (err?.name === 'NotAllowedError') {
+        setMicSetupStatus('Microphone permission is blocked. Allow microphone access in Safari’s website settings, then try again.');
+      } else if (err?.name === 'NotFoundError') {
+        setMicSetupStatus('No microphone was found. Connect or enable a microphone, then try again.');
+      } else if (err?.name === 'OverconstrainedError') {
+        setSelectedMicId('');
+        setMicSetupStatus('The selected microphone is no longer available. Choose another input and try again.');
+      } else {
+        setMicSetupStatus('Could not connect to the microphone. Try another input or reset the site permission.');
+      }
+    } finally {
+      stopSetupStream();
+      setTestingMic(false);
+    }
+  }, [selectedMicId, stopSetupStream]);
+
   // ── Start Recording ─────────────────────────────────────────────────
   const startRecording = useCallback(async () => {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    if (
+      typeof MediaRecorder === 'undefined' ||
+      !navigator.mediaDevices ||
+      !navigator.mediaDevices.getUserMedia
+    ) {
       setError('MediaRecorder is not supported in this browser.');
+      return;
+    }
+
+    const recordingFormat = getRecordingFormat();
+    if (!recordingFormat) {
+      setError('This browser cannot record audio in a supported format.');
       return;
     }
 
@@ -61,8 +153,18 @@ export default function AdminVoiceRecorder({ assetId, onSaved }) {
     chunksRef.current = [];
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream, { mimeType: MIME_TYPE });
+      stopSetupStream();
+      const audioConstraint = selectedMicId
+        ? { deviceId: { exact: selectedMicId } }
+        : true;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraint });
+      const recorder = recordingFormat.mimeType
+        ? new MediaRecorder(stream, { mimeType: recordingFormat.mimeType })
+        : new MediaRecorder(stream);
+      recordingFormatRef.current = {
+        mimeType: recorder.mimeType || recordingFormat.mimeType || 'audio/webm',
+        extension: recordingFormat.extension,
+      };
 
       recorder.ondataavailable = (event) => {
         if (event.data && event.data.size > 0) {
@@ -74,19 +176,38 @@ export default function AdminVoiceRecorder({ assetId, onSaved }) {
         // Stop all tracks on the stream
         stream.getTracks().forEach((track) => track.stop());
 
-        // Build blob from accumulated chunks
-        const blob = new Blob(chunksRef.current, { type: MIME_TYPE });
-        blobRef.current = blob;
+        // Safari can deliver the final dataavailable event shortly after onstop.
+        // Give that event time to arrive before deciding the recording is empty.
+        finalizeTimerRef.current = setTimeout(() => {
+          const blob = new Blob(chunksRef.current, {
+            type: recordingFormatRef.current?.mimeType || 'audio/webm',
+          });
+          if (blob.size === 0) {
+            blobRef.current = null;
+            setPlaybackUrl(null);
+            setRecordingState('idle');
+            setError('No audio was captured. Check the selected microphone and try again.');
+            setShowMicSetup(true);
+            return;
+          }
+          blobRef.current = blob;
 
-        // Create playback URL
-        if (playbackUrl) {
-          URL.revokeObjectURL(playbackUrl);
-        }
-        const url = URL.createObjectURL(blob);
-        setPlaybackUrl(url);
-        setRecordingState('recorded');
+          if (playbackUrlRef.current) {
+            URL.revokeObjectURL(playbackUrlRef.current);
+          }
+          const url = URL.createObjectURL(blob);
+          playbackUrlRef.current = url;
+          setPlaybackUrl(url);
+          setRecordingState('recorded');
+          if (assetId === 'staging' && onSaved) {
+            onSaved(blob);
+          }
+          finalizeTimerRef.current = null;
+        }, 300);
       };
 
+      // Safari is more reliable when it emits one complete MP4/AAC recording
+      // at stop instead of producing timesliced fragments.
       recorder.start();
       mediaRecorderRef.current = recorder;
       setRecordingState('recording');
@@ -109,11 +230,20 @@ export default function AdminVoiceRecorder({ assetId, onSaved }) {
     } catch (err) {
       if (err?.name === 'NotAllowedError') {
         setError('Microphone access denied. Please enable microphone permissions.');
+        setShowMicSetup(true);
+      } else if (err?.name === 'NotFoundError') {
+        setError('No microphone was found. Open Microphone Setup to choose or reconnect one.');
+        setShowMicSetup(true);
+      } else if (err?.name === 'OverconstrainedError') {
+        setSelectedMicId('');
+        setError('The selected microphone is unavailable. Open Microphone Setup and choose another input.');
+        setShowMicSetup(true);
       } else {
         setError('Failed to access microphone.');
+        setShowMicSetup(true);
       }
     }
-  }, [playbackUrl]);
+  }, [assetId, onSaved, selectedMicId, stopSetupStream]);
 
   // ── Stop Recording ──────────────────────────────────────────────────
   const stopRecording = useCallback(() => {
@@ -128,48 +258,56 @@ export default function AdminVoiceRecorder({ assetId, onSaved }) {
   }, []);
 
   // ── Play / Pause Playback ───────────────────────────────────────────
-  const togglePlayback = useCallback(() => {
-    if (!playbackUrl) return;
-
-    if (!playbackAudioRef.current) {
-      const audio = new Audio(playbackUrl);
-      audio.onended = () => setIsPlaying(false);
-      audio.onerror = () => {
-        setIsPlaying(false);
-        setError('Failed to play recording.');
-      };
-      playbackAudioRef.current = audio;
-    }
+  const togglePlayback = useCallback(async () => {
+    const audio = playbackAudioRef.current;
+    if (!playbackUrl || !audio) return;
 
     if (isPlaying) {
-      playbackAudioRef.current.pause();
+      audio.pause();
       setIsPlaying(false);
     } else {
-      playbackAudioRef.current.currentTime = 0;
-      playbackAudioRef.current.play().catch(() => {
-        setError('Playback blocked by browser.');
-      });
-      setIsPlaying(true);
+      setError(null);
+      audio.currentTime = 0;
+      try {
+        await audio.play();
+        setIsPlaying(true);
+      } catch (err) {
+        setIsPlaying(false);
+        if (err?.name === 'NotAllowedError') {
+          setError('Playback was blocked. Click Play again or allow audio for this site.');
+        } else {
+          setError('This recording could not be played. Re-do it and check the selected microphone.');
+        }
+      }
     }
   }, [playbackUrl, isPlaying]);
 
   // ── Re-do / Delete ──────────────────────────────────────────────────
   const resetRecording = useCallback(() => {
+    if (finalizeTimerRef.current) {
+      clearTimeout(finalizeTimerRef.current);
+      finalizeTimerRef.current = null;
+    }
     if (playbackUrl) {
       URL.revokeObjectURL(playbackUrl);
     }
+    playbackUrlRef.current = null;
     if (playbackAudioRef.current) {
       playbackAudioRef.current.pause();
       playbackAudioRef.current = null;
     }
     setPlaybackUrl(null);
     blobRef.current = null;
+    recordingFormatRef.current = null;
     chunksRef.current = [];
     setRecordingState('idle');
     setElapsed(0);
     setError(null);
     setIsPlaying(false);
-  }, [playbackUrl]);
+    if (assetId === 'staging' && onCleared) {
+      onCleared();
+    }
+  }, [assetId, onCleared, playbackUrl]);
 
   // ── Save / Upload ───────────────────────────────────────────────────
   const saveRecording = useCallback(async () => {
@@ -182,11 +320,13 @@ export default function AdminVoiceRecorder({ assetId, onSaved }) {
     setError(null);
 
     try {
+      const extension = recordingFormatRef.current?.extension || 'webm';
       const formData = new FormData();
-      formData.append('file', blobRef.current, `voice_story_${assetId}.webm`);
+      formData.append('file', blobRef.current, `voice_story_${assetId}.${extension}`);
 
       const res = await fetch(`/api/assets/${assetId}/audio`, {
         method: 'POST',
+        credentials: 'same-origin',
         body: formData,
       });
 
@@ -209,13 +349,15 @@ export default function AdminVoiceRecorder({ assetId, onSaved }) {
   React.useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
-      if (playbackUrl) URL.revokeObjectURL(playbackUrl);
+      if (finalizeTimerRef.current) clearTimeout(finalizeTimerRef.current);
+      stopSetupStream();
+      if (playbackUrlRef.current) URL.revokeObjectURL(playbackUrlRef.current);
       if (playbackAudioRef.current) {
         playbackAudioRef.current.pause();
         playbackAudioRef.current = null;
       }
     };
-  }, [playbackUrl]);
+  }, [stopSetupStream]);
 
   // ── Render ──────────────────────────────────────────────────────────
   if (!secure) {
@@ -293,16 +435,149 @@ export default function AdminVoiceRecorder({ assetId, onSaved }) {
       )}
 
       {recordingState === 'recorded' && (
-        <p className="text-sm" style={{ color: 'var(--color-primary)', marginBottom: 'var(--space-sm)' }}>
-          ✅ Recording captured ({formatTime(elapsed)})
-        </p>
+        <>
+          <p className="text-sm" style={{ color: 'var(--color-primary)', marginBottom: 'var(--space-sm)' }}>
+            ✅ Recording captured ({formatTime(elapsed)})
+          </p>
+          {assetId === 'staging' && (
+            <p className="text-xs text-muted" style={{ marginBottom: 'var(--space-sm)' }}>
+              Attached to this item automatically.
+            </p>
+          )}
+          <audio
+            ref={playbackAudioRef}
+            src={playbackUrl || undefined}
+            preload="metadata"
+            onEnded={() => setIsPlaying(false)}
+            onPause={() => setIsPlaying(false)}
+            onError={() => {
+              setIsPlaying(false);
+              setError('This recording could not be played. Re-do it and check the selected microphone.');
+            }}
+          >
+            Your browser does not support audio playback.
+          </audio>
+        </>
       )}
 
       {/* Error display */}
       {error && (
-        <p className="text-sm" style={{ color: '#DC2626', marginBottom: 'var(--space-sm)' }}>
-          {error}
-        </p>
+        <div style={{ marginBottom: 'var(--space-sm)' }}>
+          <p className="text-sm" style={{ color: '#DC2626', marginBottom: '6px' }}>
+            {error}
+          </p>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => setShowMicSetup(true)}
+            data-testid={`open-mic-setup-${assetId}`}
+          >
+            🎙 Microphone Setup
+          </button>
+        </div>
+      )}
+
+      {showMicSetup && recordingState !== 'recording' && (
+        <div
+          style={{
+            marginBottom: 'var(--space-md)',
+            padding: 'var(--space-sm)',
+            borderLeft: '3px solid var(--color-primary)',
+            background: 'var(--color-card-bg)',
+          }}
+          data-testid={`mic-setup-${assetId}`}
+        >
+          <div style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 'var(--space-sm)',
+            marginBottom: 'var(--space-sm)',
+          }}>
+            <strong className="text-sm">Microphone Setup</strong>
+            <button
+              type="button"
+              className="btn-link"
+              onClick={() => setShowMicSetup(false)}
+              aria-label="Close microphone setup"
+            >
+              Close
+            </button>
+          </div>
+
+          {microphones.length > 0 && (
+            <div style={{ marginBottom: 'var(--space-sm)' }}>
+              <label className="form-label text-xs" htmlFor={`microphone-select-${assetId}`}>
+                Microphone
+              </label>
+              <select
+                id={`microphone-select-${assetId}`}
+                className="form-input"
+                value={selectedMicId}
+                onChange={(event) => {
+                  setSelectedMicId(event.target.value);
+                  setMicSetupStatus('');
+                }}
+                data-testid={`microphone-select-${assetId}`}
+              >
+                {microphones.map((device, index) => (
+                  <option key={device.deviceId || index} value={device.deviceId}>
+                    {device.label || `Microphone ${index + 1}`}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-sm)', alignItems: 'center' }}>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={testMicrophone}
+              disabled={testingMic}
+              data-testid={`test-microphone-${assetId}`}
+            >
+              {testingMic ? 'Connecting...' : 'Reconnect & Test'}
+            </button>
+            {selectedMicId && (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => {
+                  setSelectedMicId('');
+                  setMicSetupStatus('System default selected. Choose Reconnect & Test.');
+                }}
+                disabled={testingMic}
+                data-testid={`reset-microphone-${assetId}`}
+              >
+                Use System Default
+              </button>
+            )}
+            <span className="text-xs text-muted">
+              This re-requests access and refreshes the available inputs.
+            </span>
+          </div>
+
+          {micSetupStatus && (
+            <p
+              className="text-sm"
+              style={{
+                margin: 'var(--space-sm) 0 0',
+                color: micSetupStatus.startsWith('Connected')
+                  ? 'var(--color-primary)'
+                  : 'var(--color-text-muted)',
+              }}
+              role="status"
+            >
+              {micSetupStatus}
+            </p>
+          )}
+
+          <p className="text-xs text-muted" style={{ margin: 'var(--space-sm) 0 0' }}>
+            Safari: open Safari → Settings → Websites → Microphone, set localhost to Allow,
+            then return here and choose Reconnect & Test.
+          </p>
+        </div>
       )}
 
       {/* Uploading state */}
@@ -313,14 +588,26 @@ export default function AdminVoiceRecorder({ assetId, onSaved }) {
       {/* Controls */}
       <div style={{ display: 'flex', gap: 'var(--space-sm)', flexWrap: 'wrap' }}>
         {recordingState === 'idle' && (
-          <button
-            className="btn btn-primary btn-sm"
-            onClick={startRecording}
-            disabled={!secure}
-            data-testid={`record-btn-${assetId}`}
-          >
-            🔴 Record
-          </button>
+          <>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={startRecording}
+              disabled={!secure}
+              data-testid={`record-btn-${assetId}`}
+            >
+              🔴 Record
+            </button>
+            {!showMicSetup && (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => setShowMicSetup(true)}
+                data-testid={`setup-mic-btn-${assetId}`}
+              >
+                🎙 Setup Mic
+              </button>
+            )}
+          </>
         )}
 
         {recordingState === 'recording' && (
@@ -349,14 +636,16 @@ export default function AdminVoiceRecorder({ assetId, onSaved }) {
             >
               🔄 Re-do
             </button>
-            <button
-              className="btn btn-primary btn-sm"
-              onClick={saveRecording}
-              disabled={uploading}
-              data-testid={`save-recording-btn-${assetId}`}
-            >
-              💾 Save
-            </button>
+            {assetId !== 'staging' && (
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={saveRecording}
+                disabled={uploading}
+                data-testid={`save-recording-btn-${assetId}`}
+              >
+                💾 Save
+              </button>
+            )}
           </>
         )}
       </div>

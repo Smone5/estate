@@ -1,5 +1,8 @@
 # Estate Steward 🕊️
 
+> [!WARNING]
+> **Estate Steward is a work in progress.** It is under active development, is not feature-complete, and may contain bugs, incomplete workflows, or breaking changes. Please do not rely on it for legal, fiduciary, or production use without independently reviewing and validating the results.
+
 Estate Steward is an AI-powered, local-first probate mediation platform. It is designed to assist Executors and grieving families in navigating the emotional and logistical challenges of dividing estate keepsakes and personal property.
 
 By using the **Maximum Nash Welfare (MNW)** algorithm, Estate Steward guarantees a fair, mathematically optimal distribution of assets based on private points allocations from the heirs.
@@ -73,7 +76,21 @@ You can modify these workflows to push to your specific infrastructure (AWS ECS,
 
 ## 🤝 Contributing
 
-We welcome contributions from the community! Please read our [CONTRIBUTING.md](./CONTRIBUTING.md) for details on our code of conduct, development environment setup, and the process for submitting pull requests.
+Feedback and contributions are welcome, including from people who are new to open source. Please read [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup and pull request guidance.
+
+### Reporting Bugs and Suggesting Improvements
+
+If you find a problem or have an idea, please open a GitHub Issue using the repository's **Issues** tab.
+
+Before opening an issue:
+
+1. Search the existing issues to see whether it has already been reported.
+2. Use a clear title and describe what you expected to happen and what happened instead.
+3. Include steps that someone else can follow to reproduce the problem.
+4. Include relevant environment details, such as your operating system, browser, Docker version, and any useful error messages or logs.
+5. Remove passwords, API keys, personal information, estate records, and other sensitive data before sharing screenshots or logs.
+
+Maintainers may ask follow-up questions, combine duplicate reports, or close issues that cannot be reproduced. A submitted issue is helpful feedback, but it does not guarantee that or when a fix will be released.
 
 ## 📄 License
 

@@ -183,6 +183,8 @@ class Asset(Base):
         nullable=True,
     )
     embedding = Column(Vector(768), nullable=True)
+    ai_feedback = Column(Text, nullable=True)  # JSON-serialized feedback (rating, comment, generated text snapshot)
+
 
     __table_args__ = (
         CheckConstraint(

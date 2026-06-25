@@ -137,7 +137,18 @@ export async function updateStagingItemStatus(assetId, status) {
     };
     getReq.onerror = () => reject(getReq.error);
 
-    tx.oncomplete = () => db.close();
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error);
+    };
+    tx.onabort = () => {
+      db.close();
+      reject(tx.error || new Error('IndexedDB transaction was aborted'));
+    };
   });
 }
 

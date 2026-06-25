@@ -285,3 +285,41 @@ class TestAIDetailGeneration:
         mock_storage.get.assert_called_once_with("static/uploads/lamp.webp")
         mock_llm.generate_vision.assert_called_once()
         assert "appraiser" in mock_llm.generate_vision.call_args[1]["prompt"]
+
+    def test_save_ai_feedback_success(self, client):
+        test_client, mock_db, _, _ = client
+        asset = Asset(
+            id=ASSET_ID,
+            session_id=SESSION_ID,
+            image_uri="static/uploads/lamp.webp",
+            title="Beautiful Victorian Lamp",
+            description="An elegant antique brass lamp with a green glass shade.",
+            valuation_min=100.0,
+            valuation_max=200.0,
+            sentiment_tag="Antique",
+        )
+        mock_db.query.return_value.filter.return_value.first.return_value = asset
+
+        payload = {
+            "rating": "thumbs_up",
+            "comment": "Perfect description"
+        }
+        resp = test_client.post(f"/api/assets/{ASSET_ID}/ai-feedback", json=payload)
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "success"
+
+        # Verify it was serialized and saved to asset.ai_feedback
+        assert asset.ai_feedback is not None
+        import json as json_mod
+        saved = json_mod.loads(asset.ai_feedback)
+        assert saved["rating"] == "thumbs_up"
+        assert saved["comment"] == "Perfect description"
+        assert saved["snapshot"]["title"] == "Beautiful Victorian Lamp"
+
+    def test_save_ai_feedback_not_found(self, client):
+        test_client, mock_db, _, _ = client
+        mock_db.query.return_value.filter.return_value.first.return_value = None
+
+        resp = test_client.post(f"/api/assets/{ASSET_ID}/ai-feedback", json={"rating": "thumbs_up"})
+        assert resp.status_code == 404
+

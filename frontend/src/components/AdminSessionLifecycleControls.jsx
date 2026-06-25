@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useMediationStore } from '../store/useMediationStore';
+import { customConfirm } from '../store/useDialogStore';
 
 export default function AdminSessionLifecycleControls({ sessionId, onSessionChanged }) {
   const store = useMediationStore();
@@ -28,7 +29,7 @@ export default function AdminSessionLifecycleControls({ sessionId, onSessionChan
     errorPrefix,
     successMessage,
   }) {
-    if (confirmMessage && !window.confirm(confirmMessage)) return;
+    if (confirmMessage && !await customConfirm(confirmMessage)) return;
 
     setActionError(null);
     setActionSuccess(null);

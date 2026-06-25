@@ -10,6 +10,7 @@ import AdminDashboard from './routes/AdminDashboard';
 import FAQDrawer from './components/FAQDrawer';
 import HeirValuationPanel from './components/HeirValuationPanel';
 import { useWebSocket } from './hooks/useWebSocket';
+import CustomDialogOverlay from './components/CustomDialogOverlay';
 
 const PUBLIC_PATHS = ['/invite', '/login', '/opt-out'];
 
@@ -101,6 +102,7 @@ function App() {
   return (
     <BrowserRouter>
       <AppShell />
+      <CustomDialogOverlay />
     </BrowserRouter>
   );
 }

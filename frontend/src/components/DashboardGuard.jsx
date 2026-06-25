@@ -35,6 +35,15 @@ export default function DashboardGuard({ variant = 'heir', children }) {
     return null;
   }
 
+  // Admin variant bypasses all gates, banners, and disabled states
+  if (variant === 'admin') {
+    return (
+      <div className="app-main" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+        {children}
+      </div>
+    );
+  }
+
   // ── Abstention / Expiration Gate ──────────────────────────────────────
   if (userStatus === 'ABSTAINED' || userStatus === 'EXPIRED_NON_PARTICIPATING') {
     return <AbstentionWaitScreen />;

@@ -1,5 +1,11 @@
 import React, { useState } from 'react';
 
+function normalizeMediaSrc(src) {
+  if (!src) return '';
+  if (/^(https?:|data:|blob:)/i.test(src)) return src;
+  return src.startsWith('/') ? src : `/${src}`;
+}
+
 /**
  * AssetGallery Component
  * Displays a single keepsake image or a premium visual carousel with prev/next arrows,
@@ -54,7 +60,7 @@ export default function AssetGallery({
         }}
       >
         <img
-          src={img.image_uri}
+          src={normalizeMediaSrc(img.image_uri)}
           alt={`${title} - ${img.angle_label || 'Primary'}`}
           style={{ width: '100%', height: '100%', objectFit: 'cover' }}
           loading="lazy"
@@ -112,7 +118,7 @@ export default function AssetGallery({
         }}
       >
         <img
-          src={activeImg.image_uri}
+          src={normalizeMediaSrc(activeImg.image_uri)}
           alt={`${title} - ${activeImg.angle_label || `View ${activeIndex + 1}`}`}
           style={{ width: '100%', height: '100%', objectFit: 'cover', transition: 'all 0.3s ease-in-out' }}
           loading="lazy"

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useMediationStore } from '../store/useMediationStore';
 import AdminInspectIDModal from './AdminInspectIDModal';
+import { customConfirm } from '../store/useDialogStore';
 
 const emptyRegistrationForm = {
   username: '',
@@ -284,7 +285,7 @@ export default function AdminSessionControl({
 
   // ── Delete Heir ─────────────────────────────────────────────────────────
   async function handleDeleteHeir(heirId, heirName) {
-    if (!window.confirm(`Permanently delete heir "${heirName}"? This will purge all PII, chat history, and ID scans. This action cannot be undone.`)) {
+    if (!await customConfirm(`Permanently delete heir "${heirName}"? This will purge all PII, chat history, and ID scans. This action cannot be undone.`)) {
       return;
     }
 
@@ -384,7 +385,7 @@ export default function AdminSessionControl({
             Register Heir
           </h3>
           <form onSubmit={handleRegisterHeir}>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-sm) var(--space-md)' }}>
+            <div className="admin-form-grid">
               <div>
                 <label className="form-label" htmlFor="heir-username">
                   Display Name *
@@ -533,27 +534,22 @@ export default function AdminSessionControl({
               : 'No heirs registered for this session.'}
           </p>
         ) : (
-          <div style={{ overflowX: 'auto' }}>
+          <div className="responsive-table-container">
             <table
-              className="heir-monitor-table"
+              className="heir-monitor-table admin-table"
               data-testid="heir-monitor-table"
-              style={{
-                width: '100%',
-                borderCollapse: 'collapse',
-                fontSize: '0.85rem',
-              }}
             >
               <thead>
-                <tr style={{ borderBottom: '2px solid var(--color-border)' }}>
-                  <th style={thStyle}>Name</th>
-                  <th style={thStyle}>Email</th>
-                  <th style={thStyle}>Phone</th>
-                  <th style={thStyle}>Address</th>
-                  <th style={thStyle}>Status</th>
-                  <th style={thStyle}>Invite Token</th>
-                  <th style={thStyle}>Dispatched</th>
-                  <th style={thStyle}>Expires</th>
-                  <th style={thStyle}>Actions</th>
+                <tr>
+                  <th>Name</th>
+                  <th>Email</th>
+                  <th>Phone</th>
+                  <th>Address</th>
+                  <th>Status</th>
+                  <th>Invite Token</th>
+                  <th>Dispatched</th>
+                  <th>Expires</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -561,18 +557,17 @@ export default function AdminSessionControl({
                   <tr
                     key={heir.id}
                     data-testid={`heir-row-${heir.id}`}
-                    style={{ borderBottom: '1px solid var(--color-border)' }}
                   >
-                    <td style={tdStyle}>
+                    <td>
                       {heir.username || `${heir.legal_first_name || ''} ${heir.legal_last_name || ''}`.trim() || '—'}
                     </td>
-                    <td style={tdStyle}>{heir.email || '—'}</td>
-                    <td style={tdStyle}>{heir.phone || '—'}</td>
-                    <td style={{ ...tdStyle, maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <td>{heir.email || '—'}</td>
+                    <td>{heir.phone || '—'}</td>
+                    <td style={{ maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {composeAddress(heir) || heir.physical_address || '—'}
                     </td>
-                    <td style={tdStyle}>{statusCheckmark(heir.user_status || heir.status)}</td>
-                    <td style={tdStyle}>
+                    <td>{statusCheckmark(heir.user_status || heir.status)}</td>
+                    <td>
                       {heir.invite_token ? (
                         <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                           <code style={{ fontSize: '0.7rem' }}>
@@ -592,9 +587,9 @@ export default function AdminSessionControl({
                         '—'
                       )}
                     </td>
-                    <td style={tdStyle}>{formatDate(heir.invite_dispatched_at)}</td>
-                    <td style={tdStyle}>{formatDate(heir.invite_token_expires_at)}</td>
-                    <td style={tdStyle}>
+                    <td>{formatDate(heir.invite_dispatched_at)}</td>
+                    <td>{formatDate(heir.invite_token_expires_at)}</td>
+                    <td>
                       <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
                         {isSetup && (
                           <>

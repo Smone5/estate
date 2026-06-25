@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import ModelTransparencyModal from './ModelTransparencyModal';
+import { customConfirm } from '../store/useDialogStore';
 
 export default function AdminHelpPortal({ isOpen, onClose, sessionId }) {
   const [faqs, setFaqs] = useState([]);
@@ -74,7 +75,7 @@ export default function AdminHelpPortal({ isOpen, onClose, sessionId }) {
   }
 
   async function handleDelete(faqId) {
-    if (!window.confirm('Are you sure you want to delete this FAQ guideline?')) return;
+    if (!await customConfirm('Are you sure you want to delete this FAQ guideline?')) return;
     
     setError(null);
     try {

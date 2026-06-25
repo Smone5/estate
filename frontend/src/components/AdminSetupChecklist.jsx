@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useMediationStore } from '../store/useMediationStore';
+import { customConfirm } from '../store/useDialogStore';
 
 export default function AdminSetupChecklist({
   sessionId,
@@ -37,7 +38,7 @@ export default function AdminSetupChecklist({
   };
 
   const handleLaunch = async () => {
-    if (!window.confirm('Launch the session? This will lock the asset catalog and open mediation to all heirs. This action cannot be undone.')) {
+    if (!await customConfirm('Launch the session? This will lock the asset catalog and open mediation to all heirs. This action cannot be undone.')) {
       return;
     }
 

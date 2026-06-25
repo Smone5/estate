@@ -54,8 +54,7 @@ SETTINGS_REGISTRY: Dict[str, Dict[str, Any]] = {
     "SMTP_USE_TLS": {"section": "smtp", "secret": False, "choices": ["true", "false"]},
     "SMTP_SENDER": {"section": "smtp", "secret": False},
     # --- Storage ---
-    "STORAGE_DRIVER": {"section": "storage", "secret": False, "choices": ["LOCAL", "S3", "GCS"]},
-    "GCS_BUCKET_NAME": {"section": "storage", "secret": False},
+    "STORAGE_DRIVER": {"section": "storage", "secret": False, "choices": ["LOCAL", "S3"]},
     "S3_BUCKET_NAME": {"section": "storage", "secret": False},
     "S3_ENDPOINT_URL": {"section": "storage", "secret": False},
     "AWS_ACCESS_KEY_ID": {"section": "storage", "secret": True},

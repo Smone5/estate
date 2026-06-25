@@ -26,7 +26,13 @@ export default function AdminSettingsPanel() {
   // touched are sent on save — secrets left blank mean "leave unchanged".
   const [drafts, setDrafts] = useState({});
   const [touched, setTouched] = useState({});
-  const [isOpen, setIsOpen] = useState(false);
+  const [activeSection, setActiveSection] = useState('llm');
+
+  const SETTING_TABS = [
+    { id: 'llm', label: 'LLM Provider' },
+    { id: 'smtp', label: 'Email (SMTP)' },
+    { id: 'storage', label: 'Storage' },
+  ];
 
   const fetchSettings = useCallback(async () => {
     setLoading(true);
@@ -49,10 +55,10 @@ export default function AdminSettingsPanel() {
   }, []);
 
   useEffect(() => {
-    if (isOpen && !sections) {
+    if (!sections) {
       fetchSettings();
     }
-  }, [isOpen, sections, fetchSettings]);
+  }, [sections, fetchSettings]);
 
   function handleFieldChange(key, value) {
     setDrafts((d) => ({ ...d, [key]: value }));
@@ -144,54 +150,57 @@ export default function AdminSettingsPanel() {
 
   return (
     <div className="archival-card" data-testid="admin-settings-panel">
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          cursor: 'pointer',
-        }}
-        onClick={() => setIsOpen((o) => !o)}
-        role="button"
-        tabIndex={0}
-        aria-expanded={isOpen}
-      >
-        <div>
-          <h3 style={{ margin: 0 }}>Runtime Settings</h3>
-          <p className="text-sm text-muted" style={{ margin: 0 }}>
-            LLM provider, email, and storage configuration. Changes apply immediately, no restart required.
-          </p>
-        </div>
-        <span aria-hidden="true">{isOpen ? '▲' : '▼'}</span>
+      <div style={{ marginBottom: 'var(--space-md)' }}>
+        <h3 style={{ margin: 0, fontFamily: 'var(--font-serif)' }}>Runtime Settings</h3>
+        <p className="text-sm text-muted" style={{ margin: '4px 0 0 0' }}>
+          LLM provider, email, and storage configuration. Changes apply immediately, no restart required.
+        </p>
       </div>
 
-      {isOpen && (
-        <div style={{ marginTop: 'var(--space-lg)' }}>
-          {error && <div className="banner banner-error">{error}</div>}
-          {successMessage && <div className="banner banner-success">{successMessage}</div>}
+      <div className="admin-tab-nav" style={{ fontSize: '0.875rem', marginBottom: 'var(--space-md)' }}>
+        {SETTING_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            className={`btn btn-tab${activeSection === tab.id ? ' active' : ''}`}
+            onClick={() => setActiveSection(tab.id)}
+            data-testid={`settings-tab-${tab.id}`}
+            style={{
+              padding: 'var(--space-xs) var(--space-sm)',
+              fontSize: '0.85rem',
+            }}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
 
-          {loading && <p className="text-muted">Loading settings…</p>}
+      <div style={{ marginTop: 'var(--space-md)' }}>
+        {error && <div className="banner banner-error" style={{ marginBottom: 'var(--space-md)' }}>{error}</div>}
+        {successMessage && <div className="banner banner-success" style={{ marginBottom: 'var(--space-md)' }}>{successMessage}</div>}
 
-          {!loading && sections && SECTION_ORDER.map((section) => {
-            const fields = sections[section];
-            if (!fields) return null;
-            return (
-              <div key={section} style={{ marginBottom: 'var(--space-xl)' }}>
-                <h4 style={{ marginBottom: 'var(--space-sm)' }}>{SECTION_LABELS[section] || section}</h4>
-                {Object.entries(fields).map(([key, meta]) => renderField(key, meta))}
-                <button
-                  type="button"
-                  className="btn btn-primary btn-sm"
-                  onClick={() => handleSaveSection(section)}
-                  disabled={savingSection === section}
-                >
-                  {savingSection === section ? 'Saving…' : `Save ${SECTION_LABELS[section] || section}`}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      )}
+        {loading && <p className="text-muted">Loading settings…</p>}
+
+        {!loading && sections && (() => {
+          const fields = sections[activeSection];
+          if (!fields) return null;
+          return (
+            <div key={activeSection}>
+              {Object.entries(fields).map(([key, meta]) => renderField(key, meta))}
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                onClick={() => handleSaveSection(activeSection)}
+                disabled={savingSection === activeSection}
+                style={{ marginTop: 'var(--space-xs)' }}
+                data-testid={`save-settings-${activeSection}`}
+              >
+                {savingSection === activeSection ? 'Saving…' : `Save ${SECTION_LABELS[activeSection] || activeSection}`}
+              </button>
+            </div>
+          );
+        })()}
+      </div>
     </div>
   );
 }
