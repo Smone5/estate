@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useSearchParams } from 'react-router-dom';
 import InvitePage from './routes/Invite';
 import HeirLoginPage from './routes/HeirLogin';
@@ -9,7 +9,9 @@ import SemanticSearch from './components/SemanticSearch';
 import AdminDashboard from './routes/AdminDashboard';
 import FAQDrawer from './components/FAQDrawer';
 import HeirValuationPanel from './components/HeirValuationPanel';
+import SwitchEstateModal from './components/SwitchEstateModal';
 import { useWebSocket } from './hooks/useWebSocket';
+import { useMediationStore } from './store/useMediationStore';
 import CustomDialogOverlay from './components/CustomDialogOverlay';
 
 const PUBLIC_PATHS = ['/invite', '/login', '/opt-out'];
@@ -49,6 +51,8 @@ function AppShell() {
   const [searchParams, setSearchParams] = useSearchParams();
   const isHelpOpen = searchParams.get('help') === 'true';
   const isDashboard = location.pathname.startsWith('/dashboard');
+  const userRole = useMediationStore((s) => s.userRole);
+  const [isSwitchEstateOpen, setIsSwitchEstateOpen] = useState(false);
 
   const toggleHelp = () => {
     if (isHelpOpen) {
@@ -62,26 +66,49 @@ function AppShell() {
     <div className="app-shell">
       <header className="app-header">
         <h1>The Estate Steward</h1>
-        {isDashboard && (
-          <button
-            onClick={toggleHelp}
-            className="close-btn"
-            style={{
-              color: 'var(--color-text-muted)',
-              fontSize: '1.2rem',
-              padding: 'var(--space-xs) var(--space-sm)',
-              border: '1px solid var(--color-border)',
-              borderRadius: 'var(--radius-sm)',
-              background: 'none',
-              cursor: 'pointer'
-            }}
-            aria-label="Toggle Help"
-            data-testid="help-trigger-btn"
-          >
-            ❓
-          </button>
-        )}
+        <div style={{ display: 'flex', gap: 'var(--space-sm)' }}>
+          {isDashboard && userRole === 'HEIR' && (
+            <button
+              onClick={() => setIsSwitchEstateOpen(true)}
+              className="close-btn"
+              style={{
+                color: 'var(--color-text-muted)',
+                fontSize: '0.875rem',
+                padding: 'var(--space-xs) var(--space-sm)',
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--radius-sm)',
+                background: 'none',
+                cursor: 'pointer'
+              }}
+              aria-label="Switch Estate"
+              data-testid="switch-estate-btn"
+            >
+              Switch Estate
+            </button>
+          )}
+          {isDashboard && (
+            <button
+              onClick={toggleHelp}
+              className="close-btn"
+              style={{
+                color: 'var(--color-text-muted)',
+                fontSize: '1.2rem',
+                padding: 'var(--space-xs) var(--space-sm)',
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--radius-sm)',
+                background: 'none',
+                cursor: 'pointer'
+              }}
+              aria-label="Toggle Help"
+              data-testid="help-trigger-btn"
+            >
+              ❓
+            </button>
+          )}
+        </div>
       </header>
+
+      <SwitchEstateModal isOpen={isSwitchEstateOpen} onClose={() => setIsSwitchEstateOpen(false)} />
 
       <Routes>
         <Route path="/invite/:token" element={<InvitePage />} />

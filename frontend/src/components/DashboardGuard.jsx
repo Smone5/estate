@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useMediationStore } from '../store/useMediationStore';
 import AnnouncementAlertBanner from './AnnouncementAlertBanner';
 import AnnouncementLoginModal from './AnnouncementLoginModal';
@@ -23,15 +23,50 @@ export default function DashboardGuard({ variant = 'heir', children }) {
 
   const sessionId = useMediationStore((s) => s.session_id);
   const loadSessionDetails = useMediationStore((s) => s.loadSessionDetails);
+  const loadProfile = useMediationStore((s) => s.loadProfile);
+  const restoreHeirSession = useMediationStore((s) => s.restoreHeirSession);
+  const latestSupportNotice = useMediationStore((s) => s.latestSupportNotice);
+  const clearLatestSupportNotice = useMediationStore((s) => s.clearLatestSupportNotice);
+  const [restoring, setRestoring] = useState(() => !isAuthenticated && variant === 'heir');
+
+  useEffect(() => {
+    if (!isAuthenticated && variant === 'heir' && restoreHeirSession) {
+      let cancelled = false;
+      setRestoring(true);
+      restoreHeirSession()
+        .catch((err) => console.error('Failed to restore heir session', err))
+        .finally(() => {
+          if (!cancelled) setRestoring(false);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+    return undefined;
+  }, [isAuthenticated, variant, restoreHeirSession]);
 
   useEffect(() => {
     if (isAuthenticated && sessionId && variant === 'heir') {
       loadSessionDetails().catch((err) => console.error('Failed to load session details', err));
+      loadProfile?.().catch((err) => console.error('Failed to load heir profile', err));
+      const interval = window.setInterval(() => {
+        loadSessionDetails().catch((err) => console.error('Failed to load session details', err));
+        loadProfile?.().catch((err) => console.error('Failed to load heir profile', err));
+      }, 5000);
+      return () => window.clearInterval(interval);
     }
-  }, [isAuthenticated, sessionId, variant, loadSessionDetails]);
+    return undefined;
+  }, [isAuthenticated, sessionId, variant, loadSessionDetails, loadProfile]);
 
   // Redirect is handled by the router, but double-check here
   if (!isAuthenticated && variant !== 'placeholder') {
+    if (variant === 'heir' && restoring) {
+      return (
+        <div className="app-main flex items-center justify-center" style={{ flex: 1, padding: 'var(--space-lg)' }}>
+          <p className="text-muted">Restoring Dashboard</p>
+        </div>
+      );
+    }
     return null;
   }
 
@@ -125,6 +160,32 @@ export default function DashboardGuard({ variant = 'heir', children }) {
     <div className="app-main" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
       {variant === 'heir' && <AnnouncementAlertBanner />}
       {variant === 'heir' && <AnnouncementLoginModal />}
+      {variant === 'heir' && latestSupportNotice?.type === 'reply' && (
+        <div
+          className="banner banner-info"
+          data-testid="support-notice-banner"
+          style={{
+            borderRadius: 0,
+            borderLeft: 'none',
+            borderRight: 'none',
+            display: 'flex',
+            justifyContent: 'space-between',
+            gap: 'var(--space-sm)',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+          }}
+        >
+          <span>{latestSupportNotice.message}</span>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            data-testid="view-support-reply-btn"
+            onClick={clearLatestSupportNotice}
+          >
+            View Reply
+          </button>
+        </div>
+      )}
       {/* SB 1001 AI Mediator bot disclosure — permanent, always visible */}
       <div className="ai-mediator-banner banner banner-info" style={{ borderRadius: 0, borderTop: '1px solid var(--color-border)', borderBottom: '1px solid var(--color-border)' }}>
         <strong>AI Mediator Agent</strong>

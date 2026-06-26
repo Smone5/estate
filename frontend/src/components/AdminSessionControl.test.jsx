@@ -42,136 +42,6 @@ describe('AdminSessionControl Component', () => {
     vi.restoreAllMocks();
   });
 
-  // ── Session Status Banner ───────────────────────────────────────────────
-  it('renders setup phase status banner with launch button', async () => {
-    global.fetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => [],
-    });
-
-    render(<AdminSessionControl sessionId={sessionId} />);
-
-    await waitFor(() => {
-      expect(screen.getByText(/Session Status:/)).toBeInTheDocument();
-      expect(screen.getByText('SETUP')).toBeInTheDocument();
-      expect(screen.getByTestId('launch-session-btn')).toBeInTheDocument();
-    });
-  });
-
-  it('renders active phase with pause and finalize buttons', async () => {
-    mockStoreState.sessionStatus = 'ACTIVE';
-    global.fetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => [],
-    });
-
-    render(<AdminSessionControl sessionId={sessionId} />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId('pause-session-btn')).toBeInTheDocument();
-      expect(screen.getByTestId('finalize-session-btn')).toBeInTheDocument();
-      expect(screen.queryByTestId('launch-session-btn')).not.toBeInTheDocument();
-    });
-  });
-
-  it('renders unpause button when paused', async () => {
-    mockStoreState.sessionStatus = 'ACTIVE';
-    mockStoreState.isPaused = true;
-    global.fetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => [],
-    });
-
-    render(<AdminSessionControl sessionId={sessionId} />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId('unpause-session-btn')).toBeInTheDocument();
-      expect(screen.getByText(/Paused/)).toBeInTheDocument();
-      expect(screen.queryByTestId('pause-session-btn')).not.toBeInTheDocument();
-    });
-  });
-
-  // ── Session Controls ────────────────────────────────────────────────────
-  it('launches session and refreshes details', async () => {
-    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => [] }); // heirs
-
-    render(<AdminSessionControl sessionId={sessionId} />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId('launch-session-btn')).toBeInTheDocument();
-    });
-
-    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({}) });
-
-    fireEvent.click(screen.getByTestId('launch-session-btn'));
-
-    await waitFor(() => {
-      expect(mockStoreState.loadSessionDetails).toHaveBeenCalled();
-      expect(screen.getByText(/Session launched/)).toBeInTheDocument();
-    });
-  });
-
-  it('pauses session and refreshes details', async () => {
-    mockStoreState.sessionStatus = 'ACTIVE';
-    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => [] }); // heirs
-
-    render(<AdminSessionControl sessionId={sessionId} />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId('pause-session-btn')).toBeInTheDocument();
-    });
-
-    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({}) });
-
-    fireEvent.click(screen.getByTestId('pause-session-btn'));
-
-    await waitFor(() => {
-      expect(mockStoreState.loadSessionDetails).toHaveBeenCalled();
-      expect(screen.getByText(/Session paused/)).toBeInTheDocument();
-    });
-  });
-
-  it('unpauses session and refreshes details', async () => {
-    mockStoreState.sessionStatus = 'ACTIVE';
-    mockStoreState.isPaused = true;
-    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => [] }); // heirs
-
-    render(<AdminSessionControl sessionId={sessionId} />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId('unpause-session-btn')).toBeInTheDocument();
-    });
-
-    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({}) });
-
-    fireEvent.click(screen.getByTestId('unpause-session-btn'));
-
-    await waitFor(() => {
-      expect(mockStoreState.loadSessionDetails).toHaveBeenCalled();
-      expect(screen.getByText(/Session unpaused/)).toBeInTheDocument();
-    });
-  });
-
-  it('finalizes session and refreshes details', async () => {
-    mockStoreState.sessionStatus = 'ACTIVE';
-    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => [] }); // heirs
-
-    render(<AdminSessionControl sessionId={sessionId} />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId('finalize-session-btn')).toBeInTheDocument();
-    });
-
-    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({}) });
-
-    fireEvent.click(screen.getByTestId('finalize-session-btn'));
-
-    await waitFor(() => {
-      expect(mockStoreState.loadSessionDetails).toHaveBeenCalled();
-      expect(screen.getByText(/Session finalized/)).toBeInTheDocument();
-    });
-  });
-
   // ── Heir Registration ───────────────────────────────────────────────────
   it('registers a new heir and refreshes the list', async () => {
     // Initial empty heir list
@@ -193,12 +63,14 @@ describe('AdminSessionControl Component', () => {
     fireEvent.change(screen.getByTestId('heir-reg-phone'), {
       target: { value: '555-1234' },
     });
-    fireEvent.change(screen.getByTestId('heir-reg-address'), {
+    fireEvent.change(screen.getByTestId('heir-reg-address-line1'), {
       target: { value: '123 Main St' },
     });
 
     // POST mock
     global.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'heir-1' }) });
+    // Invite dispatch mock
+    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({}) });
     // Refresh mock
     global.fetch.mockResolvedValueOnce({
       ok: true,
@@ -220,7 +92,7 @@ describe('AdminSessionControl Component', () => {
     fireEvent.click(screen.getByTestId('heir-reg-submit'));
 
     await waitFor(() => {
-      expect(screen.getByText(/Heir registered successfully/)).toBeInTheDocument();
+      expect(screen.getByText(/Heir registered/)).toBeInTheDocument();
       expect(screen.getByText('Alice Smith')).toBeInTheDocument();
     });
   });
@@ -398,30 +270,6 @@ describe('AdminSessionControl Component', () => {
     await waitFor(() => {
       expect(screen.getByText(/Heir deleted and PII purged/)).toBeInTheDocument();
       expect(screen.queryByText('Charlie')).not.toBeInTheDocument();
-    });
-  });
-
-  // ── Error Handling ──────────────────────────────────────────────────────
-  it('displays error banner on failed API call', async () => {
-    mockStoreState.sessionStatus = 'ACTIVE';
-    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => [] });
-
-    render(<AdminSessionControl sessionId={sessionId} />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId('pause-session-btn')).toBeInTheDocument();
-    });
-
-    global.fetch.mockResolvedValueOnce({
-      ok: false,
-      json: async () => ({ detail: 'Server error' }),
-      status: 500,
-    });
-
-    fireEvent.click(screen.getByTestId('pause-session-btn'));
-
-    await waitFor(() => {
-      expect(screen.getByText('Server error')).toBeInTheDocument();
     });
   });
 

@@ -57,6 +57,8 @@ export function useWebSocket() {
   const flushOfflineQueue = useMediationStore((s) => s.flushOfflineQueue);
   const enqueueOfflineMessage = useMediationStore((s) => s.enqueueOfflineMessage);
   const setSession = useMediationStore((s) => s.setSession);
+  const recordSupportAlert = useMediationStore((s) => s.recordSupportAlert);
+  const recordSupportReply = useMediationStore((s) => s.recordSupportReply);
 
   /**
    * Close the current WebSocket connection cleanly.
@@ -153,6 +155,24 @@ export function useWebSocket() {
             });
             break;
           }
+          case 'support_alert': {
+            recordSupportAlert({
+              ticket_id: frame.ticket_id,
+              heir_name: frame.heir_name,
+              message: frame.message,
+              timestamp: frame.timestamp,
+            });
+            break;
+          }
+          case 'support_reply': {
+            recordSupportReply({
+              type: 'reply',
+              ticket_id: frame.ticket_id,
+              message: frame.message,
+              timestamp: frame.responded_at || frame.timestamp,
+            });
+            break;
+          }
           case 'error': {
             // Log server errors without crashing the UI
             console.warn(
@@ -209,7 +229,7 @@ export function useWebSocket() {
         setNetworkStatus('Reconnecting...');
       }
     };
-  }, [sessionId, disconnect, setNetworkStatus, flushOfflineQueue, addMessage, enqueueAudioChunk, setSession]);
+  }, [sessionId, disconnect, setNetworkStatus, flushOfflineQueue, addMessage, enqueueAudioChunk, setSession, recordSupportAlert, recordSupportReply]);
 
   /**
    * Send a JSON payload over the WebSocket.

@@ -223,6 +223,8 @@ export default function AdminInventoryDashboard({
 
   // Redesign states
   const [isCategoryManagerOpen, setIsCategoryManagerOpen] = useState(false);
+  const [isQuickCaptureOpen, setIsQuickCaptureOpen] = useState(false);
+  const [isFilterBarOpen, setIsFilterBarOpen] = useState(true);
   const [viewMode, setViewMode] = useState('grid');
   const [searchQuery, setSearchQuery] = useState('');
   const [filterCategory, setFilterCategory] = useState('All');
@@ -248,6 +250,7 @@ export default function AdminInventoryDashboard({
   const [uploadQueue, setUploadQueue] = useState([]); // items from IndexedDB pending upload
   const [uploadingIndexed, setUploadingIndexed] = useState(null); // asset_id currently uploading
   const stagingFileInputRef = useRef(null);
+  const cameraCaptureInputRef = useRef(null);
   const [showPhotoLabelHelp, setShowPhotoLabelHelp] = useState(false);
 
   // Edit form state
@@ -765,110 +768,16 @@ export default function AdminInventoryDashboard({
       setError(`You can add up to ${MAX_STAGING_PHOTOS} photos for one item.`);
       return;
     }
+    // Delegate to the OS camera via a capture-attributed file input.
+    // getUserMedia-based custom overlays are unreliable in installed
+    // (standalone-display) PWAs on iOS/Android, where camera permission
+    // prompts can silently fail to appear.
+    cameraCaptureInputRef.current?.click();
+  }
 
-    // Call getUserMedia synchronously inside the click handler so the browser
-    // recognizes it as a user-gesture-initiated media request.
-    // On failure, fall back to file input picker.
-    let mediaStream = null;
-    let videoEl = null;
-    let overlayEl = null;
-
-    function cleanupCamera() {
-      if (overlayEl && document.body.contains(overlayEl)) {
-        document.body.removeChild(overlayEl);
-      }
-      if (mediaStream) {
-        mediaStream.getTracks().forEach((t) => t.stop());
-      }
-    }
-
-    function buildOverlay(stream) {
-      mediaStream = stream;
-
-      videoEl = document.createElement('video');
-      videoEl.srcObject = stream;
-      videoEl.autoplay = true;
-      videoEl.playsInline = true;
-      videoEl.muted = true;
-      videoEl.style.cssText = 'width:100%;height:100%;object-fit:cover;';
-
-      overlayEl = document.createElement('div');
-      overlayEl.style.cssText =
-        'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:99999;background:#000;display:flex;flex-direction:column;';
-
-      const videoContainer = document.createElement('div');
-      videoContainer.style.cssText =
-        'flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;';
-      videoContainer.appendChild(videoEl);
-
-      const controls = document.createElement('div');
-      controls.style.cssText =
-        'display:flex;gap:16px;justify-content:center;padding:16px;background:#000;';
-
-      const snapBtn = document.createElement('button');
-      snapBtn.textContent = '📸 Snap';
-      snapBtn.style.cssText =
-        'width:72px;height:72px;border-radius:50%;border:4px solid #fff;background:rgba(255,255,255,0.15);color:#fff;font-size:14px;cursor:pointer;';
-
-      const cancelBtn = document.createElement('button');
-      cancelBtn.textContent = 'Cancel';
-      cancelBtn.style.cssText =
-        'background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.3);color:#fff;padding:12px 24px;border-radius:8px;font-size:16px;cursor:pointer;';
-
-      controls.appendChild(cancelBtn);
-      controls.appendChild(snapBtn);
-      overlayEl.appendChild(videoContainer);
-      overlayEl.appendChild(controls);
-      document.body.appendChild(overlayEl);
-
-      return new Promise((resolve) => {
-        snapBtn.onclick = () => {
-          const canvas = document.createElement('canvas');
-          canvas.width = videoEl.videoWidth || 2048;
-          canvas.height = videoEl.videoHeight || 2048;
-          const ctx = canvas.getContext('2d');
-          ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
-
-          canvas.toBlob(
-            (blob) => {
-              cleanupCamera();
-              if (blob) {
-                blob.name = 'camera-snap.webp';
-                resolve(blob);
-              } else {
-                resolve(null);
-              }
-            },
-            'image/webp',
-            0.9
-          );
-        };
-        cancelBtn.onclick = () => {
-          cleanupCamera();
-          resolve(null);
-        };
-      });
-    }
-
-    // Try getUserMedia synchronously (within the user-gesture click handler)
-    try {
-      navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 2048 }, height: { ideal: 2048 } },
-        audio: false,
-      }).then((stream) => {
-        // Camera opened successfully — show live preview overlay
-        buildOverlay(stream).then((file) => {
-          if (file) {
-            addFilesToStaging([file]);
-          }
-        });
-      }).catch((err) => {
-        console.error('Unable to open camera:', err);
-        setError('Unable to open the camera. Check browser permissions or use Upload images instead.');
-      });
-    } catch (_) {
-      setError('This browser does not expose a camera. Use Upload images instead.');
-    }
+  async function handleCameraCaptureChange(e) {
+    await addFilesToStaging(e.target.files);
+    e.target.value = '';
   }
 
   function removeStagingPhoto(photoId) {
@@ -1666,9 +1575,26 @@ export default function AdminInventoryDashboard({
         </div>
       )}
 
+      <div className="inventory-workbench">
+        <aside className="inventory-capture-pane" aria-label="Quick inventory capture">
+          <div className="collapsible-section">
+            <button
+              type="button"
+              className="collapsible-trigger"
+              onClick={() => setIsQuickCaptureOpen(!isQuickCaptureOpen)}
+              aria-expanded={isQuickCaptureOpen}
+              data-testid="quick-capture-toggle"
+            >
+              <span>📸 Quick Capture{stagingPhotos.length > 0 ? ` (${stagingPhotos.length}/${MAX_STAGING_PHOTOS})` : ''}</span>
+              <span>▼</span>
+            </button>
+          </div>
+
+      {isQuickCaptureOpen && (
+      <>
       {/* ── Mobile Camera Hub: Room Selector ─────────────────────────── */}
       <div
-        className="archival-card"
+        className="archival-card inventory-room-card"
         data-testid="staging-room-selector"
         style={{
           marginBottom: 'var(--space-lg)',
@@ -1738,7 +1664,7 @@ export default function AdminInventoryDashboard({
 
       {/* ── Mobile Camera Hub: Flexible Photo Stack ───────────────────── */}
       <div
-        className="archival-card"
+        className="archival-card inventory-quick-capture-card"
         data-testid="staging-slots"
         style={{
           marginBottom: 'var(--space-lg)',
@@ -1992,6 +1918,17 @@ export default function AdminInventoryDashboard({
           data-testid="staging-file-input"
         />
 
+        <input
+          ref={cameraCaptureInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          style={{ display: 'none' }}
+          onChange={handleCameraCaptureChange}
+          aria-label="Take a photo"
+          data-testid="camera-capture-input"
+        />
+
         {/* Audio Recording for Staging */}
         <div style={{ marginBottom: 'var(--space-md)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-sm)', marginBottom: 'var(--space-xs)' }}>
@@ -2032,11 +1969,13 @@ export default function AdminInventoryDashboard({
           )}
         </div>
       </div>
+      </>
+      )}
 
       {/* ── Recent Activity Reel ──────────────────────────────────────── */}
       {recentCompletedAssets.length > 0 && (
         <div
-          className="archival-card"
+          className="archival-card inventory-recent-reel"
           data-testid="recent-activity-reel"
           style={{ marginBottom: 'var(--space-lg)', padding: 'var(--space-md)' }}
         >
@@ -2113,6 +2052,20 @@ export default function AdminInventoryDashboard({
           </div>
         </div>
       )}
+
+        </aside>
+
+        <section className="inventory-management-pane" aria-label="Manage captured inventory">
+          <div className="inventory-pane-heading inventory-pane-heading--catalog">
+            <div>
+              <p className="allocation-eyebrow">Manage captured items</p>
+              <h3>Inventory Catalog</h3>
+            </div>
+            <div className="inventory-pane-stats" aria-label="Catalog summary">
+              <span>{assets.length} item{assets.length === 1 ? '' : 's'}</span>
+              <span>{categories.length} categor{categories.length === 1 ? 'y' : 'ies'}</span>
+            </div>
+          </div>
 
       {/* Collapsible Category Manager */}
       <div className="category-manager-accordion">
@@ -2206,9 +2159,20 @@ export default function AdminInventoryDashboard({
       />
 
       {/* RAG Search, Filter, and Sort Toolbar */}
-      <div className="archival-card" style={{ marginBottom: 'var(--space-lg)', padding: 'var(--space-md)' }}>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-md)', alignItems: 'flex-end' }}>
-          
+      <div className="collapsible-section" style={{ marginBottom: 'var(--space-md)' }}>
+        <button
+          type="button"
+          className="collapsible-trigger"
+          onClick={() => setIsFilterBarOpen(!isFilterBarOpen)}
+          aria-expanded={isFilterBarOpen}
+          data-testid="filter-bar-toggle"
+        >
+          <span>🔍 Search &amp; Filter</span>
+          <span>▼</span>
+        </button>
+        {isFilterBarOpen && (
+        <div className="collapsible-content" style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-md)', alignItems: 'flex-end' }}>
+
           {/* Search bar with Enter support */}
           <div style={{ flex: 2, minWidth: '280px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
             <label className="form-label text-xs">Search Catalog</label>
@@ -2336,6 +2300,7 @@ export default function AdminInventoryDashboard({
           </div>
 
         </div>
+        )}
       </div>
 
       {/* Zero match state */}
@@ -2745,6 +2710,9 @@ export default function AdminInventoryDashboard({
           )}
         </>
       )}
+
+        </section>
+      </div>
 
       {previewAsset && (() => {
         const displayDescription = getDisplayDescription(previewAsset);

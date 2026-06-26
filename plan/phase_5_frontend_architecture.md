@@ -27,6 +27,7 @@ Structure the React Vite application shell, Zustand global stores, custom client
      * `/dashboard` (protected path).
      * `/admin` (protected path).
      * `/opt-out` (exits onboarding).
+   * **Admin session index scalability**: `/admin` must not assume the Admin only has a handful of sessions. The session picker must support search, status filtering, sorting, compact/comfortable views, and pagination/incremental loading. Mobile must avoid long unbounded scrolls and repeated full-width edit/delete buttons; the primary action should be opening the session, with edit/delete visually subordinate.
 5. **Conditional UI Layout Rendering Guards**:
    * Disable sliders, text inputs, and chat panels (`disabled = true`) if any of these conditions are met:
      1. *Setup Phase*: `sessionStatus == 'SETUP'` (renders Setup Wait banner).
@@ -59,6 +60,7 @@ Structure the React Vite application shell, Zustand global stores, custom client
       * Build the Executor dashboard panel to manage heir profiles, send invitation emails, track progress with checkmark status tables, pause/unpause sessions, and trigger the finalization solver.
 12. **Admin Onboarding & Credentials Setup UI**:
       * Build the first-boot interface displaying the 24-word BIP39 paper recovery seed phrase and requiring confirmation before enabling session creation.
+      * Build the post-login Admin session index as a scalable management surface: summary chips, search, status filter, sort control, card/list density toggle, pagination or incremental loading, and mobile-friendly row actions.
 13. **GDPR Data Portability UI Button**:
       * Build the 'Export My Data (JSON)' button in the settings/help drawer. Trigger an authenticated fetch to `GET /api/heirs/me/export` and download the structured JSON file.
 14. **GDPR Account Deletion UI Drawer**:
@@ -121,8 +123,8 @@ Structure the React Vite application shell, Zustand global stores, custom client
 * **Verification**: Verify pause/unpause locks and unlocks screens, adding heirs triggers invite emails, and finalize triggers division outcome rendering.
 
 ### [ ] Task T54: Admin Onboarding & Credentials Setup UI
-* **Objective**: Build the first-boot interface displaying the 24-word BIP39 paper recovery seed phrase and requiring confirmation before enabling session creation. Depends on T17, T18, T39, and T27.
-* **Verification**: Verify the Setup Admin wizard enforces offline confirmation of the recovery phrase before unlocking dashboard pathways.
+* **Objective**: Build the first-boot interface displaying the 24-word BIP39 paper recovery seed phrase and requiring confirmation before enabling session creation. Also build the scalable post-login Admin session index for managing many estate sessions on desktop and mobile: search, status filter, sort, comfortable/compact density toggle, summary chips, and pagination/incremental loading. Depends on T17, T18, T39, and T27.
+* **Verification**: Verify the Setup Admin wizard enforces offline confirmation of the recovery phrase before unlocking dashboard pathways. Verify the Admin session index remains usable with at least 100 seeded sessions on mobile-width viewports, supports search/filter/sort, and does not require one long unbounded scroll to reach later sessions.
 
 ### [ ] Task T27: BIP39 Mnemonic Onboarding Screen
 * **Objective**: Create 24-word paper recovery seed phrase display screen for onboarding setup confirmation. Depends on T18 and T39.

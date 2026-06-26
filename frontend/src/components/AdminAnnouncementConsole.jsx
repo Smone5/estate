@@ -86,7 +86,7 @@ export default function AdminAnnouncementConsole({ sessionId }) {
   }
 
   return (
-    <div className="archival-card" style={{ padding: 'var(--space-lg)', marginTop: 'var(--space-md)' }}>
+    <div className="archival-card admin-announcement-card">
       <h3 style={{ fontFamily: 'var(--font-serif)', marginBottom: 'var(--space-sm)' }}>Active Session Announcement</h3>
       <p className="text-muted text-sm" style={{ marginBottom: 'var(--space-md)' }}>
         Broadcast an estate-specific alert or instruction to all heirs. This message will display immediately on their dashboard and block interaction upon login until acknowledged.
@@ -104,7 +104,7 @@ export default function AdminAnnouncementConsole({ sessionId }) {
       )}
 
       <form onSubmit={handleBroadcast}>
-        <div style={{ position: 'relative', marginBottom: 'var(--space-md)' }}>
+        <div className="announcement-input-wrap">
           <textarea
             id="announcement-input"
             className="form-input"
@@ -124,7 +124,7 @@ export default function AdminAnnouncementConsole({ sessionId }) {
           </span>
         </div>
 
-        <div style={{ display: 'flex', gap: 'var(--space-md)', justifyContent: 'flex-end' }}>
+        <div className="announcement-actions">
           <button
             type="button"
             className="btn btn-secondary btn-sm"

@@ -6,6 +6,7 @@ import '@testing-library/jest-dom';
 import AbstentionWaitScreen from './AbstentionWaitScreen';
 import AbstentionWaiverModal from './AbstentionWaiverModal';
 import HeirValuationPanel from './HeirValuationPanel';
+import { useMediationStore } from '../store/useMediationStore';
 
 // Mock Zustand store state
 const mockStoreState = {

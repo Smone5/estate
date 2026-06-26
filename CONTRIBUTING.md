@@ -19,14 +19,28 @@ The project uses Docker Compose for local development.
 
 ### Requirements
 - Docker and Docker Compose
-- Node.js (for frontend development outside of Docker, optional)
+- Node.js (used to build the frontend)
+- [uv](https://docs.astral.sh/uv/) (used to generate the local encryption key)
 - Python 3.11+ (for backend development outside of Docker, optional)
 
 ### Running Locally
-1. Copy `.env.example` to `.env`.
-2. Run `docker compose up --build`.
-3. The frontend is accessible at `http://localhost`.
-4. The backend API is accessible at `http://localhost/api/docs`.
+
+```bash
+./scripts/start_local.sh
+```
+
+This creates `.env`, generates an `ENCRYPTION_KEY`, builds the frontend, starts the Docker stack, runs migrations, and prints the URLs and first-run steps. Re-run it any time to restart everything.
+
+1. The frontend is accessible at `http://localhost`.
+2. The backend API is accessible at `http://localhost/api/docs`.
+
+If you'd rather do it manually: copy `.env.example` to `.env`, set a real `ENCRYPTION_KEY`, then run `docker compose up --build`.
+
+### Testing on a phone
+
+Several features (ID scanning, the inventory camera, voice story recording) are designed for mobile and are worth testing on real hardware, not just desktop browser emulation. See:
+- [Mobile & PWA Testing Guide](./docs/mobile-pwa-testing.md)
+- [Cloudflare Tunnel Setup](./docs/cloudflare-tunnel-setup.md) (needed for voice recording to work — it requires HTTPS)
 
 ## Code Style
 

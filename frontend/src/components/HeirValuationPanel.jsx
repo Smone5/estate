@@ -9,6 +9,7 @@ export default function HeirValuationPanel() {
   const isSubmitted = useMediationStore((s) => s.isSubmitted);
   const sessionStatus = useMediationStore((s) => s.sessionStatus);
   const submitValuations = useMediationStore((s) => s.submitValuations);
+  const inventoryUpdatedNotice = useMediationStore((s) => s.inventoryUpdatedNotice);
 
   const [isWaiverOpen, setIsWaiverOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -51,6 +52,31 @@ export default function HeirValuationPanel() {
 
   return (
     <div className="archival-card" style={{ marginBottom: 'var(--space-md)', padding: 'var(--space-md)' }}>
+      {inventoryUpdatedNotice && (
+        <div
+          className="banner banner-amber"
+          data-testid="inventory-update-warning-banner"
+          style={{
+            marginBottom: 'var(--space-md)',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'flex-start',
+            gap: 'var(--space-sm)',
+            flexWrap: 'wrap',
+          }}
+        >
+          <span>
+            {inventoryUpdatedNotice} Your submission status has been reset so you can review the updated catalog.
+          </span>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => useMediationStore.setState({ inventoryUpdatedNotice: null })}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-md)' }}>
         <div>
           <h3 style={{ fontFamily: 'var(--font-serif)', fontSize: '1.25rem', marginBottom: '4px' }}>

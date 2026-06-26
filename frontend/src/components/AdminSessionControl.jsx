@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useMediationStore } from '../store/useMediationStore';
 import AdminInspectIDModal from './AdminInspectIDModal';
 import { customConfirm } from '../store/useDialogStore';
@@ -13,6 +13,17 @@ const emptyRegistrationForm = {
   address_region: '',
   address_postal_code: '',
   address_country: 'United States',
+};
+
+const HEIR_PAGE_SIZE = 25;
+
+const STATUS_PRIORITY = {
+  PROFILE_HOLD: 0,
+  PENDING: 1,
+  ACTIVE: 2,
+  SUBMITTED: 3,
+  ABSTAINED: 4,
+  EXPIRED_NON_PARTICIPATING: 5,
 };
 
 function composeAddress(address) {
@@ -72,6 +83,7 @@ export default function AdminSessionControl({
   sessionId,
   heirs: propHeirs,
   onRefreshHeirs,
+  section = 'all',
 }) {
   const sessionStatus = useMediationStore((s) => s.sessionStatus);
 
@@ -81,6 +93,11 @@ export default function AdminSessionControl({
   const [actionSuccess, setActionSuccess] = useState(null);
   const [selectedIdentityHeir, setSelectedIdentityHeir] = useState(null);
   const [heirOverrides, setHeirOverrides] = useState({});
+  const [heirSearch, setHeirSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [sortMode, setSortMode] = useState('priority');
+  const [cardDensity, setCardDensity] = useState('compact');
+  const [visibleCount, setVisibleCount] = useState(HEIR_PAGE_SIZE);
 
   const baseHeirs = propHeirs !== undefined ? propHeirs : internalHeirs;
   const heirs = baseHeirs.map((heir) => (
@@ -89,6 +106,51 @@ export default function AdminSessionControl({
   const identityReviewHeirs = heirs.filter(
     (heir) => (heir.status === 'PROFILE_HOLD' || heir.user_status === 'PROFILE_HOLD') && heir.id_scan_uri,
   );
+  const rosterStats = useMemo(() => {
+    const stats = {
+      all: heirs.length,
+      needsAction: 0,
+      pending: 0,
+      active: 0,
+      submitted: 0,
+    };
+    heirs.forEach((heir) => {
+      const status = getHeirStatusValue(heir);
+      if (needsHeirAction(heir)) stats.needsAction += 1;
+      if (status === 'PENDING') stats.pending += 1;
+      if (status === 'ACTIVE') stats.active += 1;
+      if (status === 'SUBMITTED') stats.submitted += 1;
+    });
+    return stats;
+  }, [heirs]);
+  const filteredHeirs = useMemo(() => {
+    const query = heirSearch.trim().toLowerCase();
+
+    return heirs
+      .filter((heir) => {
+        const status = getHeirStatusValue(heir);
+        if (statusFilter === 'needs_action' && !needsHeirAction(heir)) return false;
+        if (statusFilter !== 'all' && statusFilter !== 'needs_action' && status !== statusFilter) return false;
+        if (!query) return true;
+
+        return [
+          getHeirDisplayName(heir),
+          heir.email,
+          heir.phone,
+          composeAddress(heir),
+          heir.physical_address,
+          heir.invite_token,
+          status,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase()
+          .includes(query);
+      })
+      .sort((a, b) => compareHeirs(a, b, sortMode));
+  }, [heirs, heirSearch, statusFilter, sortMode]);
+  const visibleHeirs = filteredHeirs.slice(0, visibleCount);
+  const hasMoreHeirs = filteredHeirs.length > visibleHeirs.length;
 
   // Registration form
   const [regForm, setRegForm] = useState(emptyRegistrationForm);
@@ -150,6 +212,10 @@ export default function AdminSessionControl({
       return () => clearTimeout(timer);
     }
   }, [actionError, actionSuccess]);
+
+  useEffect(() => {
+    setVisibleCount(HEIR_PAGE_SIZE);
+  }, [heirSearch, statusFilter, sortMode, heirs.length]);
 
   // ── Register Heir ───────────────────────────────────────────────────────
   async function handleRegisterHeir(e) {
@@ -283,6 +349,51 @@ export default function AdminSessionControl({
     );
   }
 
+  function getHeirStatusValue(heir) {
+    return heir.user_status || heir.status || 'PENDING';
+  }
+
+  function getHeirDisplayName(heir) {
+    return heir.username || `${heir.legal_first_name || ''} ${heir.legal_last_name || ''}`.trim() || 'Unnamed heir';
+  }
+
+  function needsHeirAction(heir) {
+    const status = getHeirStatusValue(heir);
+    return (
+      status === 'PENDING' ||
+      status === 'PROFILE_HOLD' ||
+      status === 'EXPIRED_NON_PARTICIPATING' ||
+      Boolean(heir.id_scan_uri) ||
+      !heir.invite_dispatched_at
+    );
+  }
+
+  function compareHeirs(a, b, mode) {
+    const statusA = getHeirStatusValue(a);
+    const statusB = getHeirStatusValue(b);
+    const nameA = getHeirDisplayName(a).toLowerCase();
+    const nameB = getHeirDisplayName(b).toLowerCase();
+
+    if (mode === 'name') return nameA.localeCompare(nameB);
+    if (mode === 'status') {
+      return (STATUS_PRIORITY[statusA] ?? 99) - (STATUS_PRIORITY[statusB] ?? 99) || nameA.localeCompare(nameB);
+    }
+    if (mode === 'expires') {
+      const timeA = a.invite_token_expires_at ? new Date(a.invite_token_expires_at).getTime() : Number.MAX_SAFE_INTEGER;
+      const timeB = b.invite_token_expires_at ? new Date(b.invite_token_expires_at).getTime() : Number.MAX_SAFE_INTEGER;
+      return timeA - timeB || nameA.localeCompare(nameB);
+    }
+    if (mode === 'recent_invite') {
+      const timeA = a.invite_dispatched_at ? new Date(a.invite_dispatched_at).getTime() : 0;
+      const timeB = b.invite_dispatched_at ? new Date(b.invite_dispatched_at).getTime() : 0;
+      return timeB - timeA || nameA.localeCompare(nameB);
+    }
+
+    const actionA = needsHeirAction(a) ? 0 : 1;
+    const actionB = needsHeirAction(b) ? 0 : 1;
+    return actionA - actionB || (STATUS_PRIORITY[statusA] ?? 99) - (STATUS_PRIORITY[statusB] ?? 99) || nameA.localeCompare(nameB);
+  }
+
   // ── Delete Heir ─────────────────────────────────────────────────────────
   async function handleDeleteHeir(heirId, heirName) {
     if (!await customConfirm(`Permanently delete heir "${heirName}"? This will purge all PII, chat history, and ID scans. This action cannot be undone.`)) {
@@ -308,13 +419,53 @@ export default function AdminSessionControl({
   }
 
   // ── Status helpers ──────────────────────────────────────────────────────
-  function statusCheckmark(status) {
-    if (status === 'SUBMITTED') return '✅';
-    if (status === 'ABSTAINED') return '⚪ Abstained';
-    if (status === 'EXPIRED_NON_PARTICIPATING') return '⏹ Expired';
-    if (status === 'PROFILE_HOLD') return '🆔 ID Hold';
-    if (status === 'ACTIVE') return '⏳ Active';
-    return '⏳ Pending';
+  function heirStatus(status) {
+    if (status === 'SUBMITTED') {
+      return {
+        icon: '✅',
+        label: 'Submitted',
+        className: 'heir-status-pill heir-status-pill--submitted',
+        guidance: 'Valuations locked',
+      };
+    }
+    if (status === 'ABSTAINED') {
+      return {
+        icon: '○',
+        label: 'Abstained',
+        className: 'heir-status-pill heir-status-pill--quiet',
+        guidance: 'Waiver recorded',
+      };
+    }
+    if (status === 'EXPIRED_NON_PARTICIPATING') {
+      return {
+        icon: '□',
+        label: 'Expired',
+        className: 'heir-status-pill heir-status-pill--quiet',
+        guidance: 'Notice window closed',
+      };
+    }
+    if (status === 'PROFILE_HOLD') {
+      return {
+        icon: '!',
+        label: 'ID Hold',
+        className: 'heir-status-pill heir-status-pill--review',
+        guidance: 'Review identity',
+      };
+    }
+    if (status === 'ACTIVE') {
+      return {
+        icon: '•',
+        label: 'Active',
+        className: 'heir-status-pill heir-status-pill--active',
+        guidance: 'Can participate',
+      };
+    }
+    return {
+      icon: '⏳',
+      label: 'Pending',
+      className: 'heir-status-pill heir-status-pill--pending',
+      guidance: 'Invite not completed',
+    };
   }
 
   function formatDate(dateStr) {
@@ -328,6 +479,8 @@ export default function AdminSessionControl({
 
   // ── Render ──────────────────────────────────────────────────────────────
   const isSetup = sessionStatus === 'SETUP';
+  const showRegisterSection = isSetup && (section === 'all' || section === 'register');
+  const showMonitorSection = section === 'all' || section === 'monitor';
 
   if (!sessionId) {
     return (
@@ -379,8 +532,8 @@ export default function AdminSessionControl({
       )}
 
       {/* Heir Registration Panel (Setup only) */}
-      {isSetup && (
-        <div id="register-heir-section" className="archival-card" style={{ marginBottom: 'var(--space-lg)' }}>
+      {showRegisterSection && (
+        <div id="register-heir-section" className="archival-card" style={{ marginBottom: showMonitorSection ? 'var(--space-lg)' : 0 }}>
           <h3 style={{ fontFamily: 'var(--font-serif)', marginBottom: 'var(--space-md)' }}>
             Register Heir
           </h3>
@@ -520,10 +673,38 @@ export default function AdminSessionControl({
       )}
 
       {/* Heir Monitor Table */}
+      {showMonitorSection && (
       <div className="archival-card">
-        <h3 style={{ fontFamily: 'var(--font-serif)', marginBottom: 'var(--space-md)' }}>
-          Heir Monitor
-        </h3>
+        <div className="heir-monitor-heading">
+          <div>
+            <h3 style={{ fontFamily: 'var(--font-serif)', marginBottom: 'var(--space-xs)' }}>
+              Heir Monitor
+            </h3>
+            {!loading && heirs.length > 0 && (
+              <p className="text-muted text-sm">
+                Showing {visibleHeirs.length} of {filteredHeirs.length} matching heirs.
+              </p>
+            )}
+          </div>
+          {!loading && heirs.length > 0 && (
+            <div className="heir-density-toggle" aria-label="Heir card density">
+              <button
+                type="button"
+                className={cardDensity === 'compact' ? 'active' : ''}
+                onClick={() => setCardDensity('compact')}
+              >
+                Roster
+              </button>
+              <button
+                type="button"
+                className={cardDensity === 'detail' ? 'active' : ''}
+                onClick={() => setCardDensity('detail')}
+              >
+                Full Card
+              </button>
+            </div>
+          )}
+        </div>
 
         {loading ? (
           <p className="text-muted">Loading heirs...</p>
@@ -534,122 +715,232 @@ export default function AdminSessionControl({
               : 'No heirs registered for this session.'}
           </p>
         ) : (
-          <div className="responsive-table-container">
-            <table
-              className="heir-monitor-table admin-table"
-              data-testid="heir-monitor-table"
-            >
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Email</th>
-                  <th>Phone</th>
-                  <th>Address</th>
-                  <th>Status</th>
-                  <th>Invite Token</th>
-                  <th>Dispatched</th>
-                  <th>Expires</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {heirs.map((heir) => (
-                  <tr
-                    key={heir.id}
-                    data-testid={`heir-row-${heir.id}`}
+          <>
+            <div className="heir-monitor-toolbar">
+              <div className="heir-stat-strip" aria-label="Heir status summary">
+                <button type="button" className={statusFilter === 'all' ? 'active' : ''} onClick={() => setStatusFilter('all')}>
+                  <span>{rosterStats.all}</span>
+                  <small>All</small>
+                </button>
+                <button type="button" className={statusFilter === 'needs_action' ? 'active' : ''} onClick={() => setStatusFilter('needs_action')}>
+                  <span>{rosterStats.needsAction}</span>
+                  <small>Needs Action</small>
+                </button>
+                <button type="button" className={statusFilter === 'PENDING' ? 'active' : ''} onClick={() => setStatusFilter('PENDING')}>
+                  <span>{rosterStats.pending}</span>
+                  <small>Pending</small>
+                </button>
+                <button type="button" className={statusFilter === 'ACTIVE' ? 'active' : ''} onClick={() => setStatusFilter('ACTIVE')}>
+                  <span>{rosterStats.active}</span>
+                  <small>Active</small>
+                </button>
+                <button type="button" className={statusFilter === 'SUBMITTED' ? 'active' : ''} onClick={() => setStatusFilter('SUBMITTED')}>
+                  <span>{rosterStats.submitted}</span>
+                  <small>Submitted</small>
+                </button>
+              </div>
+
+              <div className="heir-filter-grid">
+                <div>
+                  <label className="form-label" htmlFor="heir-monitor-search">Search heirs</label>
+                  <input
+                    id="heir-monitor-search"
+                    className="form-input"
+                    value={heirSearch}
+                    onChange={(e) => setHeirSearch(e.target.value)}
+                    placeholder="Name, email, phone, token..."
+                    data-testid="heir-monitor-search"
+                  />
+                </div>
+                <div>
+                  <label className="form-label" htmlFor="heir-monitor-status">Filter</label>
+                  <select
+                    id="heir-monitor-status"
+                    className="form-input"
+                    value={statusFilter}
+                    onChange={(e) => setStatusFilter(e.target.value)}
+                    data-testid="heir-monitor-status-filter"
                   >
-                    <td>
-                      {heir.username || `${heir.legal_first_name || ''} ${heir.legal_last_name || ''}`.trim() || '—'}
-                    </td>
-                    <td>{heir.email || '—'}</td>
-                    <td>{heir.phone || '—'}</td>
-                    <td style={{ maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {composeAddress(heir) || heir.physical_address || '—'}
-                    </td>
-                    <td>{statusCheckmark(heir.user_status || heir.status)}</td>
-                    <td>
+                    <option value="all">All statuses</option>
+                    <option value="needs_action">Needs action</option>
+                    <option value="PENDING">Pending</option>
+                    <option value="PROFILE_HOLD">ID hold</option>
+                    <option value="ACTIVE">Active</option>
+                    <option value="SUBMITTED">Submitted</option>
+                    <option value="ABSTAINED">Abstained</option>
+                    <option value="EXPIRED_NON_PARTICIPATING">Expired</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="form-label" htmlFor="heir-monitor-sort">Sort</label>
+                  <select
+                    id="heir-monitor-sort"
+                    className="form-input"
+                    value={sortMode}
+                    onChange={(e) => setSortMode(e.target.value)}
+                    data-testid="heir-monitor-sort"
+                  >
+                    <option value="priority">Priority first</option>
+                    <option value="name">Name A-Z</option>
+                    <option value="status">Status</option>
+                    <option value="expires">Invite expiring soon</option>
+                    <option value="recent_invite">Recently invited</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {filteredHeirs.length === 0 ? (
+              <div className="heir-monitor-empty">
+                <strong>No matching heirs</strong>
+                <span>Adjust the search or filters to widen the roster.</span>
+              </div>
+            ) : (
+              <div className={`heir-card-grid heir-card-grid--${cardDensity}`} data-testid="heir-monitor-table">
+                {visibleHeirs.map((heir) => {
+              const status = heirStatus(heir.user_status || heir.status);
+              const displayName = getHeirDisplayName(heir);
+              const address = composeAddress(heir) || heir.physical_address || 'No address on file';
+
+              return (
+                <article key={heir.id} className={`heir-card heir-card--${cardDensity}`} data-testid={`heir-row-${heir.id}`}>
+                  <div className="heir-card-header">
+                    <div className="heir-card-identity">
+                      <h4 className="heir-card-name">{displayName}</h4>
+                      <p className="heir-card-guidance">{status.guidance}</p>
+                    </div>
+                    <span className={status.className}>
+                      {status.label === 'Pending' ? (
+                        <span>{status.icon} {status.label}</span>
+                      ) : (
+                        <>
+                          <span className="heir-status-icon" aria-hidden="true">{status.icon}</span>{' '}
+                          <span>{status.label}</span>
+                        </>
+                      )}
+                    </span>
+                  </div>
+
+                  <div className="heir-compact-meta" aria-label={`${displayName} roster summary`}>
+                    <span>{heir.email || 'No email on file'}</span>
+                    <span>Expires {formatDate(heir.invite_token_expires_at)}</span>
+                  </div>
+
+                  <div className="heir-contact-stack" aria-label={`${displayName} contact details`}>
+                    <div className="heir-contact-line">
+                      <span className="heir-card-label">Email</span>
+                      <span className="heir-card-value">{heir.email || 'No email on file'}</span>
+                    </div>
+                    <div className="heir-contact-line">
+                      <span className="heir-card-label">Phone</span>
+                      <span className="heir-card-value">{heir.phone || 'No phone on file'}</span>
+                    </div>
+                    <div className="heir-contact-line heir-contact-line--address">
+                      <span className="heir-card-label">Address</span>
+                      <span className="heir-card-value">{address}</span>
+                    </div>
+                  </div>
+
+                  <div className="heir-invite-panel">
+                    <div className="heir-token-row">
+                      <span className="heir-card-label">Invite Token</span>
                       {heir.invite_token ? (
-                        <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                          <code style={{ fontSize: '0.7rem' }}>
-                            {heir.invite_token.substring(0, 8)}...
-                          </code>
+                        <div className="heir-token-value">
+                          <code>{heir.invite_token.substring(0, 8)}...</code>
                           <button
-                            className="btn btn-secondary"
-                            style={{ padding: '0 4px', fontSize: '0.65rem', lineHeight: 1.2 }}
+                            className="btn btn-secondary btn-sm heir-token-copy"
                             onClick={() => handleCopyToken(heir.invite_token)}
-                            title="Copy token"
+                            title="Copy invite token"
                             data-testid={`copy-token-${heir.id}`}
                           >
-                            📋
+                            Copy
                           </button>
-                        </span>
+                        </div>
                       ) : (
-                        '—'
+                        <span className="heir-card-value">No token</span>
                       )}
-                    </td>
-                    <td>{formatDate(heir.invite_dispatched_at)}</td>
-                    <td>{formatDate(heir.invite_token_expires_at)}</td>
-                    <td>
-                      <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                        {isSetup && (
-                          <>
-                            <button
-                              className="btn btn-secondary btn-sm"
-                              onClick={() => handleRegenerateToken(heir.id)}
-                              style={{ fontSize: '0.65rem', padding: '2px 6px' }}
-                              data-testid={`regen-token-${heir.id}`}
-                            >
-                              🔄 Token
-                            </button>
-                            <button
-                              className="btn btn-primary btn-sm"
-                              onClick={() => handleSendInvite(heir.id)}
-                              style={{ fontSize: '0.65rem', padding: '2px 6px' }}
-                              data-testid={`send-invite-${heir.id}`}
-                            >
-                              ✉ Send
-                            </button>
-                            {heir.invite_token && (
-                              <button
-                                className="btn btn-secondary btn-sm"
-                                onClick={() => handleCopyInvite(heir)}
-                                style={{ fontSize: '0.65rem', padding: '2px 6px' }}
-                                data-testid={`copy-invite-${heir.id}`}
-                              >
-                                Copy Invite
-                              </button>
-                            )}
-                          </>
-                        )}
-                        {(heir.status === 'PROFILE_HOLD' || heir.user_status === 'PROFILE_HOLD' || heir.id_scan_uri) && (
-                          <button
-                            className="btn btn-secondary btn-sm"
-                            onClick={() => setSelectedIdentityHeir(heir)}
-                            style={{ fontSize: '0.65rem', padding: '2px 6px' }}
-                            data-testid={`inspect-id-${heir.id}`}
-                          >
-                            Inspect ID
-                          </button>
-                        )}
-                        {isSetup && (
-                          <button
-                            className="btn btn-secondary btn-sm"
-                            onClick={() => handleDeleteHeir(heir.id, heir.username || heir.email)}
-                            style={{ fontSize: '0.65rem', padding: '2px 6px', color: '#DC2626' }}
-                            data-testid={`delete-heir-${heir.id}`}
-                          >
-                            🗑
-                          </button>
-                        )}
+                    </div>
+
+                    <div className="heir-date-grid">
+                      <div>
+                        <span className="heir-card-label">Dispatched</span>
+                        <span className="heir-card-value">{formatDate(heir.invite_dispatched_at)}</span>
                       </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                      <div>
+                        <span className="heir-card-label">Expires</span>
+                        <span className="heir-card-value">{formatDate(heir.invite_token_expires_at)}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="heir-card-actions">
+                    {isSetup && (
+                      <>
+                        <button
+                          className="btn btn-secondary btn-sm heir-secondary-action"
+                          onClick={() => handleRegenerateToken(heir.id)}
+                          data-testid={`regen-token-${heir.id}`}
+                        >
+                          Renew Token
+                        </button>
+                        <button
+                          className="btn btn-primary btn-sm"
+                          onClick={() => handleSendInvite(heir.id)}
+                          data-testid={`send-invite-${heir.id}`}
+                        >
+                          Send Invite
+                        </button>
+                        {heir.invite_token && (
+                          <button
+                            className="btn btn-secondary btn-sm heir-secondary-action"
+                            onClick={() => handleCopyInvite(heir)}
+                            data-testid={`copy-invite-${heir.id}`}
+                          >
+                            Copy Invite
+                          </button>
+                        )}
+                      </>
+                    )}
+                    {(heir.status === 'PROFILE_HOLD' || heir.user_status === 'PROFILE_HOLD' || heir.id_scan_uri) && (
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => setSelectedIdentityHeir(heir)}
+                        data-testid={`inspect-id-${heir.id}`}
+                      >
+                        Inspect ID
+                      </button>
+                    )}
+                    {isSetup && (
+                      <button
+                        className="btn btn-danger btn-sm heir-delete-btn heir-secondary-action"
+                        onClick={() => handleDeleteHeir(heir.id, heir.username || heir.email)}
+                        data-testid={`delete-heir-${heir.id}`}
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                </article>
+              );
+                })}
+              </div>
+            )}
+
+            {hasMoreHeirs && (
+              <div className="heir-load-more">
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setVisibleCount((count) => count + HEIR_PAGE_SIZE)}
+                >
+                  Show {Math.min(HEIR_PAGE_SIZE, filteredHeirs.length - visibleHeirs.length)} More
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
+      )}
 
       {selectedIdentityHeir && (
         <AdminInspectIDModal
@@ -661,17 +952,3 @@ export default function AdminSessionControl({
     </div>
   );
 }
-
-const thStyle = {
-  padding: 'var(--space-sm)',
-  textAlign: 'left',
-  fontWeight: 600,
-  color: 'var(--color-text)',
-  whiteSpace: 'nowrap',
-};
-
-const tdStyle = {
-  padding: 'var(--space-sm)',
-  verticalAlign: 'top',
-  color: 'var(--color-text)',
-};

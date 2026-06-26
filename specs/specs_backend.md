@@ -328,6 +328,10 @@ def generate_hash(row_id: int, event_type: str, scrubbed_snapshot_json: str, pre
 
 ### 6.3 Authentication & Session Management
 * Admins use Argon2 credentials. Heirs authenticate via a single-use UUID invite link `/invite/{token}` that grants an HTTP-only JWT cookie.
+* Future federated login support must use generic OpenID Connect Authorization Code Flow with PKCE. Google, Apple, Facebook, Microsoft, and similar providers should be supported through a configurable OIDC issuer or an open-source broker such as Keycloak or Authentik, not hardcoded provider-specific flows.
+* Local Argon2 login remains the required bootstrap and recovery path. Federated login is optional and cannot be the only initial Admin setup method.
+* External identities are linked by stable `issuer + subject`, not by email alone. Email may be stored for display/audit only after provider verification.
+* Heir SSO linking must occur only after Executor identity approval (`identity_verified = true`, status `'ACTIVE'`). Invite acceptance and `PROFILE_HOLD` may not create durable external identity links. An external identity cannot claim an invite or account solely because its email matches the registered heir email.
 
 ### 6.4 BIP39 Encryption Key Recovery (Paper Recovery Key)
 
@@ -766,6 +770,45 @@ All administrative, session management, and verification actions are executed vi
     *   **Request Body**: `{"username": "admin_username", "password": "admin_password"}`
     *   **Logic**: Verifies the admin password hash against the database using Argon2. On success, generates a JWT token and returns it in a secure, HTTP-only cookie.
     *   **Response**: `{"status": "authenticated", "role": "ADMIN"}`
+*   **`GET /api/auth/me`**
+    *   **Access**: Protected by the HTTP-only JWT session cookie.
+    *   **Description**: Cookie-based session introspection and rehydration endpoint used after browser refresh for both Admin and Heir routes.
+    *   **Logic**: Validates the JWT cookie, looks up the current user, verifies that the user still exists and is permitted to use the encoded role/session scope, and returns the authenticated identity. On success, the endpoint may re-issue a fresh cookie to extend a valid session according to the configured session lifetime. Admin users return `session_id = null` unless the token is intentionally scoped to an active Admin console session.
+    *   **Response**: `{"status": "authenticated", "user_id": "UUID", "username": "...", "role": "ADMIN|HEIR", "session_id": "UUID|null"}`
+    *   **Frontend Contract**: `/admin` may restore only when `role == 'ADMIN'`; `/dashboard` may restore only when `role == 'HEIR'` and must then call `GET /api/heirs/me` for profile/session status. A valid cookie for the wrong role must not open the wrong surface.
+*   **`POST /api/auth/logout`**
+    *   **Access**: Public/idempotent; if a cookie is present, it is cleared.
+    *   **Description**: Clears the HTTP-only auth cookie so browser refresh cannot silently restore a logged-out user.
+    *   **Response**: `{"status": "success"}`
+*   **`POST /api/auth/heir-login`**
+    *   **Access**: Public. Rate-limited to 10/minute.
+    *   **Request Body**: `HeirLoginRequest` — `{"identifier": "email_or_username", "password": "...", "session_id": "UUID | null"}`. `session_id` is omitted on the first attempt and supplied on the disambiguation retry (see Logic step 4).
+    *   **Description**: Password-based re-login for already-onboarded Heirs. The invite link remains the first-entry path; this becomes the long-term credential afterward.
+    *   **Logic**:
+        1. **Same identifier across multiple estates**: `email` and `username` are not globally unique — the same person can be onboarded as an Heir in more than one mediation session (e.g. they are an heir to two different decedents administered by two different Executors), and each session-scoped record may carry its own password. The endpoint therefore queries **all** `users` rows with `role = 'HEIR'` matching the identifier (case-insensitive, email or username), then verifies the supplied password against every candidate's `pw_hash` individually — it never picks a row arbitrarily via an unscoped `.first()`.
+        2. If zero candidates verify, returns `401 Unauthorized` with `{"detail": "Invalid credentials"}`.
+        3. If `session_id` was supplied in the request, narrows the verified candidates to that session. If none remain, returns `401 Unauthorized`.
+        4. If more than one verified candidate remains (ambiguous — the same credentials are valid in 2+ sessions and no `session_id` was given to disambiguate), does **not** issue a cookie. Instead returns `200 OK` with `{"status": "multiple_sessions", "sessions": [{"session_id": "UUID", "title": "...", "status": "SETUP|ACTIVE|LOCKED|FINALIZED"}, ...]}` so the client can prompt the user to pick an estate and resubmit with `session_id` set.
+        5. If exactly one verified candidate remains, issues a secure HTTP-only JWT session cookie scoped to that Heir's `session_id` as normal.
+    *   **Response**: `{"status": "success", "role": "HEIR", "session_id": "UUID", "heir_id": "UUID", "user_status": "..."}`, or the `multiple_sessions` disambiguation payload described above.
+*   **`GET /api/auth/heir-sessions`**
+    *   **Access**: Protected (Heir JWT session cookie). Rate-limited to 30/minute.
+    *   **Description**: Lists sibling estate sessions for the currently authenticated Heir — i.e. every other Heir record sharing the same email or username — so the dashboard can offer a "Switch Estate" picker without the Heir re-entering their password.
+    *   **Logic**: Looks up the calling Heir by `user_id` from the JWT, then queries all `users` rows with `role = 'HEIR'` matching that Heir's email or username, and resolves each matched record's `session_id` into its parent `Session` row.
+    *   **Response**: `{"sessions": [{"session_id": "UUID", "title": "...", "status": "...", "is_current": bool}, ...]}`
+*   **`POST /api/auth/heir-switch-session`**
+    *   **Access**: Protected (Heir JWT session cookie). Rate-limited to 30/minute.
+    *   **Request Body**: `{"session_id": "UUID"}`
+    *   **Description**: Re-issues the JWT session cookie scoped to a sibling estate session, without requiring the Heir to re-enter their password. This is the action behind the "Switch Estate" button — a Heir who is onboarded into two or more estates can move between them from inside the dashboard instead of logging out and re-authenticating.
+    *   **Logic**: Verifies that a Heir record exists with the requested `session_id` **and** the same email/username as the calling Heir (a Heir cannot switch into a `session_id` that isn't tied to their own identity). If found, issues a fresh JWT cookie scoped to that record's `user_id`/`session_id`. If not found, returns `403 Forbidden` with `{"detail": "No matching estate session for this account"}`.
+    *   **Response**: `{"status": "success", "role": "HEIR", "session_id": "UUID", "heir_id": "UUID", "user_status": "..."}`
+*   **Future `GET /api/auth/oidc/start`**
+    *   **Access**: Public.
+    *   **Purpose**: Starts a generic OIDC Authorization Code + PKCE flow for Admin login, Heir login, Admin identity linking, or post-approval Heir identity linking.
+    *   **Logic**: Generates signed `state`, `nonce`, and PKCE verifier/challenge. If called for Heir linking, the request must come from an authenticated Heir whose `identity_verified = true` and status is `'ACTIVE'`, `'SUBMITTED'`, or another post-approval state.
+*   **Future `GET /api/auth/oidc/callback`**
+    *   **Access**: Public callback endpoint.
+    *   **Logic**: Validates `state`, `nonce`, issuer, audience, expiry, signature, and PKCE verifier; exchanges the authorization code; reads the ID token; then links or logs in by `issuer + subject`. The endpoint must reject email-only matches and must audit login/link failures.
 *   **`GET /api/heirs/me`**
     *   **Access**: Protected (Heir JWT session cookie).
     *   **Description**: Retrieves the profile details and lifecycle status of the currently logged-in Heir.
@@ -1265,4 +1308,3 @@ Every node execution inside `graph.py` must emit structured logs at the beginnin
 
 ### 14.5 PII Leakage Guard
 *   **CRITICAL RULE**: Raw, un-scrubbed user text (`input_text` state variable) is **FORBIDDEN** from ever being written to standard log streams. Logs must only print the length of the string, or print the PII-scrubbed version (`scrubbed_text` populated by Microsoft Presidio). Any violation of this rule compromises user privacy.
-

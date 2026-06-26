@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import React from 'react';
+import React, { act } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
@@ -56,8 +56,8 @@ describe('AdminCommunicationsPanel', () => {
 
     render(<AdminCommunicationsPanel sessionId={SESSION_ID} heirs={baseHeirs} />);
 
-    expect(await screen.findByText('Aaron Melton')).toBeInTheDocument();
-    expect(screen.getByText('Can you clarify who receives the clock?')).toBeInTheDocument();
+    expect((await screen.findAllByText('Aaron Melton')).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Can you clarify who receives the clock?').length).toBeGreaterThan(0);
   });
 
   it('sends an executor reply and shows it as an outgoing bubble', async () => {
@@ -76,7 +76,7 @@ describe('AdminCommunicationsPanel', () => {
     render(<AdminCommunicationsPanel sessionId={SESSION_ID} heirs={baseHeirs} />);
 
     // Wait for the heir message to appear
-    await screen.findByText('Can you clarify who receives the clock?');
+    expect((await screen.findAllByText('Can you clarify who receives the clock?')).length).toBeGreaterThan(0);
 
     // Type in the integrated composer and send
     fireEvent.change(screen.getByTestId('executor-reply-textarea'), {
@@ -116,7 +116,9 @@ describe('AdminCommunicationsPanel', () => {
 
     render(<AdminCommunicationsPanel sessionId={SESSION_ID} heirs={baseHeirs} />);
 
-    await screen.findByText('Aaron Melton');
+    await waitFor(() => {
+      expect(screen.getByTestId('executor-reply-textarea')).toBeInTheDocument();
+    });
 
     fireEvent.change(screen.getByTestId('executor-reply-textarea'), {
       target: { value: 'Please confirm your pickup window.' },
@@ -124,16 +126,14 @@ describe('AdminCommunicationsPanel', () => {
     fireEvent.click(screen.getByTestId('send-executor-reply-btn'));
 
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith(
-        `/api/sessions/${SESSION_ID}/help/direct`,
-        expect.objectContaining({
-          method: 'POST',
-          body: JSON.stringify({
-            heir_id: HEIR_ID,
-            message: 'Please confirm your pickup window.',
-          }),
-        }),
+      const directCall = global.fetch.mock.calls.find(
+        ([url]) => url === `/api/sessions/${SESSION_ID}/help/direct`,
       );
+      expect(directCall).toBeTruthy();
+      expect(directCall[1]).toEqual(expect.objectContaining({ method: 'POST' }));
+      expect(directCall[1].body).toBeInstanceOf(FormData);
+      expect(directCall[1].body.get('heir_id')).toBe(HEIR_ID);
+      expect(directCall[1].body.get('message')).toBe('Please confirm your pickup window.');
       expect(screen.getByText('Please confirm your pickup window.')).toBeInTheDocument();
     });
   });
@@ -154,7 +154,7 @@ describe('AdminCommunicationsPanel', () => {
 
     render(<AdminCommunicationsPanel sessionId={SESSION_ID} heirs={baseHeirs} />);
 
-    await screen.findByText('Can you clarify who receives the clock?');
+    expect((await screen.findAllByText('Can you clarify who receives the clock?')).length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByText('Mark Resolved'));
 
@@ -174,16 +174,20 @@ describe('AdminCommunicationsPanel', () => {
     render(<AdminCommunicationsPanel sessionId={SESSION_ID} heirs={baseHeirs} />);
 
     // Initial state: no messages for this heir
-    await screen.findByText('Aaron Melton');
-
-    // Simulate WebSocket alert → increments supportRefreshToken
-    useMediationStore.getState().recordSupportAlert({
-      ticket_id: openTicket.id,
-      heir_name: openTicket.legal_name,
-      message: openTicket.message,
-      timestamp: openTicket.created_at,
+    await waitFor(() => {
+      expect(screen.getByTestId('executor-reply-textarea')).toBeInTheDocument();
     });
 
-    expect(await screen.findByText('Can you clarify who receives the clock?')).toBeInTheDocument();
+    // Simulate WebSocket alert → increments supportRefreshToken
+    act(() => {
+      useMediationStore.getState().recordSupportAlert({
+        ticket_id: openTicket.id,
+        heir_name: openTicket.legal_name,
+        message: openTicket.message,
+        timestamp: openTicket.created_at,
+      });
+    });
+
+    expect((await screen.findAllByText('Can you clarify who receives the clock?')).length).toBeGreaterThan(0);
   });
 });

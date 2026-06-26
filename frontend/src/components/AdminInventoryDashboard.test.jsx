@@ -254,6 +254,7 @@ describe('AdminInventoryDashboard Component', () => {
     });
 
     render(<AdminInventoryDashboard sessionId={sessionId} />);
+    fireEvent.click(await screen.findByTestId('quick-capture-toggle'));
 
     await waitFor(() => {
       expect(screen.getByTestId('add-staging-photo')).toBeInTheDocument();
@@ -276,6 +277,7 @@ describe('AdminInventoryDashboard Component', () => {
     });
 
     render(<AdminInventoryDashboard sessionId={sessionId} />);
+    fireEvent.click(await screen.findByTestId('quick-capture-toggle'));
 
     const helpButton = await screen.findByRole('button', {
       name: 'What do the photo labels mean?',
@@ -300,6 +302,7 @@ describe('AdminInventoryDashboard Component', () => {
     });
 
     render(<AdminInventoryDashboard sessionId={sessionId} />);
+    fireEvent.click(await screen.findByTestId('quick-capture-toggle'));
 
     const fileInput = await screen.findByLabelText('Upload item images');
     const file = new File(['photo'], 'vase.jpg', { type: 'image/jpeg' });
@@ -332,6 +335,7 @@ describe('AdminInventoryDashboard Component', () => {
     });
 
     render(<AdminInventoryDashboard sessionId={sessionId} />);
+    fireEvent.click(await screen.findByTestId('quick-capture-toggle'));
 
     const fileInput = await screen.findByLabelText('Upload item images');
     fireEvent.change(fileInput, {
@@ -376,6 +380,7 @@ describe('AdminInventoryDashboard Component', () => {
     });
 
     render(<AdminInventoryDashboard sessionId={sessionId} />);
+    fireEvent.click(await screen.findByTestId('quick-capture-toggle'));
 
     fireEvent.change(await screen.findByLabelText('Upload item images'), {
       target: {

@@ -9,6 +9,7 @@ export default function HeirLoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  const [sessionChoices, setSessionChoices] = useState(null);
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -16,16 +17,84 @@ export default function HeirLoginPage() {
     setError(null);
 
     try {
-      await heirPasswordLogin({
+      const data = await heirPasswordLogin({
         identifier: identifier.trim(),
         password,
       });
+      if (data?.status === 'multiple_sessions') {
+        setSessionChoices(data.sessions);
+        return;
+      }
       navigate('/dashboard');
     } catch (err) {
       setError(err.message || 'Unable to sign in. Please verify your credentials.');
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function handleChooseSession(sessionId) {
+    setSubmitting(true);
+    setError(null);
+
+    try {
+      await heirPasswordLogin({
+        identifier: identifier.trim(),
+        password,
+        session_id: sessionId,
+      });
+      navigate('/dashboard');
+    } catch (err) {
+      setError(err.message || 'Unable to sign in. Please verify your credentials.');
+      setSessionChoices(null);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (sessionChoices) {
+    return (
+      <div className="app-main flex items-center justify-center" style={{ flex: 1 }}>
+        <div className="archival-card" style={{ maxWidth: 440, width: '100%' }}>
+          <h2 style={{ marginBottom: 'var(--space-sm)' }}>Choose an Estate</h2>
+          <p className="text-sm text-muted" style={{ marginBottom: 'var(--space-lg)' }}>
+            Your credentials match more than one mediation session. Select the estate you
+            would like to enter.
+          </p>
+
+          {error && (
+            <div className="banner banner-error" style={{ marginBottom: 'var(--space-md)' }}>
+              {error}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)' }}>
+            {sessionChoices.map((s) => (
+              <button
+                key={s.session_id}
+                type="button"
+                className="btn btn-secondary"
+                disabled={submitting}
+                onClick={() => handleChooseSession(s.session_id)}
+                style={{ textAlign: 'left' }}
+              >
+                {s.title}
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            className="btn btn-link"
+            style={{ marginTop: 'var(--space-md)' }}
+            onClick={() => setSessionChoices(null)}
+            disabled={submitting}
+          >
+            Back
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (

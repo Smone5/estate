@@ -25,6 +25,8 @@ export const useMediationStore = create((set, get) => ({
   sessionStatus: 'SETUP', // 'SETUP' | 'ACTIVE' | 'LOCKED' | 'FINALIZED'
   networkStatus: 'Disconnected', // 'Connected' | 'Reconnecting...' | 'Disconnected'
   openSupportRequests: [],
+  latestSupportNotice: null,
+  supportRefreshToken: 0,
   transientMessageQueue: [],
   announcement: null,
   announcement_updated_at: null,
@@ -50,22 +52,103 @@ export const useMediationStore = create((set, get) => ({
     await get().loadProfile();
   },
 
+  // ── Auth Actions ─────────────────────────────────────────────────────────
+  // Returns { status: 'multiple_sessions', sessions: [...] } when the same
+  // identifier/password matches heir records in more than one estate
+  // session; caller must re-invoke with session_id set to disambiguate.
+  heirPasswordLogin: async ({ identifier, password, session_id = null }) => {
+    const payload = { identifier, password };
+    if (session_id) payload.session_id = session_id;
+    const res = await fetch(`${API_BASE}/api/auth/heir-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      throw new Error(errorData.detail || `Sign in failed: ${res.status}`);
+    }
+    const data = await res.json();
+    if (data.status === 'multiple_sessions') {
+      return data;
+    }
+    set({
+      isAuthenticated: true,
+      userRole: data.role || 'HEIR',
+      session_id: data.session_id,
+      heir_id: data.heir_id,
+      userStatus: data.user_status,
+    });
+    await get().loadProfile();
+    await get().loadAssets();
+    return data;
+  },
+
+  // List sibling estate sessions sharing this heir's email/username, for
+  // the in-dashboard "Switch Estate" picker.
+  loadHeirSessions: async () => {
+    const res = await fetch(`${API_BASE}/api/auth/heir-sessions`);
+    if (!res.ok) throw new Error(`Load estate sessions failed: ${res.status}`);
+    const data = await res.json();
+    return data.sessions || [];
+  },
+
+  // Re-issues the JWT cookie scoped to a sibling estate session without
+  // re-entering a password, then refreshes profile/session state.
+  switchHeirSession: async (sessionId) => {
+    const res = await fetch(`${API_BASE}/api/auth/heir-switch-session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      throw new Error(errorData.detail || `Switch estate failed: ${res.status}`);
+    }
+    const data = await res.json();
+    set({
+      isAuthenticated: true,
+      userRole: data.role || 'HEIR',
+      session_id: data.session_id,
+      heir_id: data.heir_id,
+      userStatus: data.user_status,
+      // Clear session-scoped state so stale data from the previous estate
+      // doesn't briefly render before the new session's data loads.
+      assets: [],
+      valuations: {},
+      messages: [],
+      announcement: null,
+      announcement_updated_at: null,
+    });
+    await get().loadProfile();
+    return data;
+  },
+
   // ── Session Actions ──────────────────────────────────────────────────────
-  setSession: (sessionData) => set({
-    session_id: sessionData.session_id,
-    heir_id: sessionData.heir_id,
-    userRole: sessionData.user_role || 'HEIR',
-    userStatus: sessionData.user_status,
-    assets: sessionData.assets,
-    isPaused: sessionData.is_paused,
-    isDeadlocked: sessionData.is_deadlocked,
-    is_hitl_suspended: sessionData.is_hitl_suspended || false,
-    isSubmitted: sessionData.is_submitted,
-    isAuthenticated: sessionData.isAuthenticated ?? false,
-    draft_version: sessionData.draft_version || 0,
-    sessionStatus: sessionData.status,
-    announcement: sessionData.announcement ?? null,
-    announcement_updated_at: sessionData.announcement_updated_at ?? null,
+  setSession: (sessionData) => set((state) => {
+    const has = (key) => Object.prototype.hasOwnProperty.call(sessionData, key);
+    const pick = (key, fallback) => (has(key) ? sessionData[key] : fallback);
+    const isLoggingOut = sessionData.isAuthenticated === false;
+    const nextRole = isLoggingOut
+      ? null
+      : pick('user_role', pick('userRole', state.userRole || 'HEIR'));
+
+    return {
+      session_id: isLoggingOut ? null : pick('session_id', state.session_id),
+      heir_id: isLoggingOut ? null : pick('heir_id', state.heir_id),
+      userRole: nextRole,
+      userStatus: isLoggingOut ? 'PENDING' : pick('user_status', state.userStatus),
+      assets: isLoggingOut ? [] : pick('assets', state.assets),
+      isPaused: isLoggingOut ? false : pick('is_paused', state.isPaused),
+      isDeadlocked: isLoggingOut ? false : pick('is_deadlocked', state.isDeadlocked),
+      is_hitl_suspended: isLoggingOut ? false : pick('is_hitl_suspended', state.is_hitl_suspended),
+      isSubmitted: isLoggingOut ? false : pick('is_submitted', state.isSubmitted),
+      isAuthenticated: pick('isAuthenticated', state.isAuthenticated),
+      draft_version: isLoggingOut ? 0 : pick('draft_version', state.draft_version),
+      sessionStatus: isLoggingOut ? 'SETUP' : pick('status', state.sessionStatus),
+      announcement: isLoggingOut ? null : pick('announcement', state.announcement),
+      announcement_updated_at: isLoggingOut ? null : pick('announcement_updated_at', state.announcement_updated_at),
+    };
   }),
 
   // ── Valuation Actions ────────────────────────────────────────────────────
@@ -198,6 +281,29 @@ export const useMediationStore = create((set, get) => ({
     });
   },
 
+  loadAssets: async () => {
+    const state = get();
+    if (!state.session_id) return;
+    set({ assetsLoading: true, assetsError: null });
+    try {
+      const res = await fetch(`${API_BASE}/api/sessions/${state.session_id}/assets`);
+      if (!res.ok) throw new Error(`Load assets failed: ${res.status}`);
+      const assets = await res.json();
+      set({
+        assets: Array.isArray(assets) ? assets : [],
+        assetsLoadedForSession: state.session_id,
+        assetsLoading: false,
+        assetsError: null,
+      });
+    } catch (err) {
+      set({
+        assetsLoading: false,
+        assetsError: err.message || 'Failed to load assets',
+      });
+      throw err;
+    }
+  },
+
   // ── Chat Actions ─────────────────────────────────────────────────────────
   loadChatHistory: async () => {
     const state = get();
@@ -221,6 +327,21 @@ export const useMediationStore = create((set, get) => ({
   })),
 
   clearAudioChunks: () => set({ audioChunks: [] }),
+
+  recordSupportAlert: (notice) => set((state) => ({
+    openSupportRequests: [
+      notice,
+      ...state.openSupportRequests.filter((ticket) => ticket.ticket_id !== notice.ticket_id),
+    ],
+    supportRefreshToken: (state.supportRefreshToken || 0) + 1,
+  })),
+
+  recordSupportReply: (notice) => set((state) => ({
+    latestSupportNotice: notice,
+    supportRefreshToken: (state.supportRefreshToken || 0) + 1,
+  })),
+
+  clearLatestSupportNotice: () => set({ latestSupportNotice: null }),
 
   // ── Network Actions ──────────────────────────────────────────────────────
   setNetworkStatus: (status) => set({ networkStatus: status }),

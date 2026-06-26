@@ -135,6 +135,14 @@ class InviteLoginRequest(BaseModel):
 class HeirLoginRequest(BaseModel):
     identifier: str = Field(..., min_length=1, max_length=255)
     password: str = Field(..., min_length=1, max_length=128)
+    # Disambiguates which estate session to log into when the same
+    # identifier/password pair matches heir records in more than one
+    # session. Optional on the first attempt; required on the retry.
+    session_id: str | None = None
+
+
+class SwitchSessionRequest(BaseModel):
+    session_id: str
 
 
 ADDRESS_FIELD_NAMES = (
@@ -562,9 +570,17 @@ async def heir_password_login(
     This allows already-onboarded heirs to return after the invitation link
     expires. The invite remains the first-entry path; password login becomes
     the long-term credential after onboarding.
+
+    The same email/username may belong to separate heir records in more than
+    one estate session (e.g. a person is an heir to two different
+    decedents). Since each session-scoped record can have its own password,
+    we verify the password against every matching record rather than
+    picking one arbitrarily. If more than one record verifies, we ask the
+    caller to disambiguate by session instead of silently logging into a
+    random one.
     """
     identifier = body.identifier.strip().lower()
-    user = (
+    candidates = (
         db.query(User)
         .filter(
             User.role == "HEIR",
@@ -573,16 +589,37 @@ async def heir_password_login(
                 func.lower(User.username) == identifier,
             ),
         )
-        .first()
+        .all()
     )
 
-    if (
-        not user
-        or not user.invite_token_used
-        or not user.pw_hash
-        or not verify_password(body.password, user.pw_hash)
-    ):
+    matches = [
+        u for u in candidates
+        if u.invite_token_used and u.pw_hash and verify_password(body.password, u.pw_hash)
+    ]
+
+    if not matches:
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    if body.session_id:
+        matches = [u for u in matches if str(u.session_id) == body.session_id]
+        if not matches:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    if len(matches) > 1:
+        sessions = (
+            db.query(SessionModel)
+            .filter(SessionModel.id.in_([u.session_id for u in matches]))
+            .all()
+        )
+        return {
+            "status": "multiple_sessions",
+            "sessions": [
+                {"session_id": str(s.id), "title": s.title, "status": s.status}
+                for s in sessions
+            ],
+        }
+
+    user = matches[0]
 
     jwt_token = create_access_token(
         user_id=str(user.id),
@@ -598,6 +635,121 @@ async def heir_password_login(
         "session_id": str(user.session_id) if user.session_id else None,
         "heir_id": str(user.id),
         "user_status": user.status,
+    }
+
+
+@app.get("/api/auth/heir-sessions")
+@limiter.limit("30/minute")
+async def list_heir_sessions(
+    request: Request,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    List sibling estate sessions for the currently authenticated heir.
+
+    Looks up every other heir record sharing the same email or username as
+    the calling heir, so the dashboard can offer a "Switch Estate" picker
+    without requiring the heir to log out and re-enter their password.
+    """
+    if current_user.get("role") != "HEIR":
+        raise HTTPException(status_code=403, detail="Heir access required")
+
+    heir = db.query(User).filter(User.id == current_user.get("user_id")).first()
+    if not heir:
+        raise HTTPException(status_code=401, detail="Heir not found")
+
+    identifier_filters = []
+    if heir.email:
+        identifier_filters.append(func.lower(User.email) == heir.email.strip().lower())
+    if heir.username:
+        identifier_filters.append(func.lower(User.username) == heir.username.strip().lower())
+
+    if not identifier_filters:
+        siblings = [heir]
+    else:
+        siblings = (
+            db.query(User)
+            .filter(User.role == "HEIR", or_(*identifier_filters))
+            .all()
+        )
+
+    sessions = (
+        db.query(SessionModel)
+        .filter(SessionModel.id.in_([s.session_id for s in siblings if s.session_id]))
+        .all()
+    )
+
+    return {
+        "sessions": [
+            {
+                "session_id": str(s.id),
+                "title": s.title,
+                "status": s.status,
+                "is_current": str(s.id) == str(heir.session_id),
+            }
+            for s in sessions
+        ],
+    }
+
+
+@app.post("/api/auth/heir-switch-session")
+@limiter.limit("30/minute")
+async def switch_heir_session(
+    request: Request,
+    body: SwitchSessionRequest,
+    response: Response,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Re-issue the JWT session cookie scoped to a sibling estate session,
+    without requiring the heir to re-enter their password.
+
+    Only switches to a session that has a heir record sharing the same
+    email or username as the calling heir — a heir cannot use this to hop
+    into an arbitrary session_id that isn't theirs.
+    """
+    if current_user.get("role") != "HEIR":
+        raise HTTPException(status_code=403, detail="Heir access required")
+
+    heir = db.query(User).filter(User.id == current_user.get("user_id")).first()
+    if not heir:
+        raise HTTPException(status_code=401, detail="Heir not found")
+
+    identifier_filters = []
+    if heir.email:
+        identifier_filters.append(func.lower(User.email) == heir.email.strip().lower())
+    if heir.username:
+        identifier_filters.append(func.lower(User.username) == heir.username.strip().lower())
+
+    target = (
+        db.query(User)
+        .filter(
+            User.role == "HEIR",
+            User.session_id == body.session_id,
+            or_(*identifier_filters) if identifier_filters else User.id == heir.id,
+        )
+        .first()
+    )
+
+    if not target:
+        raise HTTPException(status_code=403, detail="No matching estate session for this account")
+
+    jwt_token = create_access_token(
+        user_id=str(target.id),
+        username=target.username,
+        role="HEIR",
+        session_id=str(target.session_id),
+    )
+
+    set_auth_cookie(response, jwt_token)
+    return {
+        "status": "success",
+        "role": "HEIR",
+        "session_id": str(target.session_id),
+        "heir_id": str(target.id),
+        "user_status": target.status,
     }
 
 

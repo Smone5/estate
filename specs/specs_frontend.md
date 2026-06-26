@@ -61,19 +61,34 @@ The application implements three main client-side routes:
     4. If verification succeeds, the backend sets the HTTP-only JWT session cookie, the frontend store updates `isAuthenticated = true`, and redirects the user to `/dashboard`.
     5. If verification fails, or if the user clicks "Decline & Exit", clears state and redirects to the `/opt-out` exit route.
 
-### 2.2 `/dashboard`
+### 2.2 `/login`
+*   **Access**: Public.
+*   **Logic (Heir password re-login)**:
+    1. The form collects `identifier` (email or display name/username) and `password`, then issues `POST /api/auth/heir-login` (see Backend Spec §9.5).
+    2. **Multi-session disambiguation**: Because the same identifier can belong to onboarded Heir records in more than one mediation session (e.g. the person is an heir to two different decedents, each session with its own password), a single `identifier`/`password` pair can validly match more than one session. If the response is `{"status": "multiple_sessions", "sessions": [...]}`, the frontend does **not** authenticate yet — it stores the candidate list and renders a **Choose an Estate** picker listing each session's `title`. Selecting one re-issues `POST /api/auth/heir-login` with `session_id` set to the chosen session's UUID.
+    3. If the response is `{"status": "success", ...}` (either on the first attempt, when the identifier/password pair is unambiguous, or after the disambiguation retry), the frontend store updates `isAuthenticated = true`, `session_id`, `heir_id`, and `userStatus` from the response, then redirects to `/dashboard`.
+    4. Any `401` response (no candidate's password verified, or no candidate remains in the chosen `session_id`) renders a generic "Invalid credentials" error — the endpoint never reveals which sessions or identifiers exist before the password is verified.
+
+### 2.3 `/dashboard`
 *   **Access**: Protected (requires JWT session cookie).
 *   **Logic**:
     1. If not authenticated, redirects to `/`.
     2. Establishes the WebSocket session connection `ws://<host>/api/sessions/{session_id}/ws` using the JWT cookie for authentication. The `session_id` is retrieved from the Zustand store (populated during login). This session-parameterized URL is required for the backend to isolate heir threads and authenticate the session scope (see Backend Spec §9.6).
     3. Renders the Heir Workspace according to the active session phase.
+    4. **Switch Estate**: For Heirs only (`userRole === 'HEIR'`), the dashboard header renders a "Switch Estate" button (`SwitchEstateModal` component). A Heir is not limited to one mediation session — the same email can legitimately be onboarded as an Heir in two or more separate estates. Clicking the button calls `GET /api/auth/heir-sessions` to list sibling sessions sharing the Heir's email/username (each annotated with `is_current`), and lets the Heir pick a different one. Selecting a non-current session calls `POST /api/auth/heir-switch-session` with that session's ID, which re-issues the JWT cookie scoped to the new session without requiring the Heir to re-enter a password. The store clears session-scoped state (`assets`, `valuations`, `messages`, `announcement`) on switch so stale data from the previous estate doesn't briefly render, then reloads the profile; the existing `session_id`-keyed effects (WebSocket connection, `DashboardGuard`'s session details fetch) pick up the new session automatically.
 
-### 2.3 `/admin`
+### 2.4 `/admin`
 *   **Access**: Protected (requires Admin role credentials).
 *   **Logic**:
-    1. Renders the Admin management panel, TanStack Monitor tables, and Resolution Console.
+    1. On mount, before rendering first-boot setup or the login form, the route attempts cookie-based session rehydration by calling `GET /api/auth/me` with same-origin credentials.
+    2. While rehydration is pending, renders a non-interactive restoring state such as "Restoring Executor Session".
+    3. If `/api/auth/me` returns `role == 'ADMIN'`, the frontend updates Zustand with `isAuthenticated = true`, `userRole = 'ADMIN'`, restores any available `session_id`, reloads the Admin session list, and renders the Admin management panel, TanStack Monitor tables, and Resolution Console without forcing a new password entry.
+    4. If `/api/auth/me` returns a non-Admin role, `401`, or another failure, the route falls through to the normal setup/login gate. A valid Heir cookie must never open the Admin console.
+    5. Admin logout calls `POST /api/auth/logout`, clears the server cookie, clears local Zustand auth/session state, removes the saved active Admin console session selection, and returns the user to the Admin login/setup gate.
+    6. A hard browser refresh on `/admin` must not log out an Admin while the HTTP-only cookie remains valid.
+    7. **Scalable session index**: The Admin landing state must treat session selection as an operational index, not a short static list. It must support search, status filtering, sorting, compact/comfortable density views, and pagination or equivalent incremental loading before the list grows large. Mobile layouts must avoid repeating full-width destructive buttons for every session; each session should render as a compact card/row with a primary open target and secondary edit/delete actions.
 
-### 2.4 `/opt-out`
+### 2.5 `/opt-out`
 *   **Access**: Public.
 *   **Logic**:
     1. Renders the opt-out/decline screen informing the user that they have declined consent, no personal data was saved, and their invitation remains uncompleted.
@@ -119,6 +134,49 @@ export const useMediationStore = create((set, get) => ({
     // Calls POST /api/invite/login with {"token": token}
     // On success, backend sets HTTP-only JWT cookie.
     // The action then sets isAuthenticated = true, calls loadProfile(), and redirects to /dashboard.
+  },
+
+  heirPasswordLogin: async ({ identifier, password, session_id = null }) => {
+    // Calls POST /api/auth/heir-login with {identifier, password, session_id}.
+    // If the response is {"status": "multiple_sessions", "sessions": [...]}, returns
+    // it as-is WITHOUT setting isAuthenticated — the same identifier/password matched
+    // Heir records in more than one mediation session, and the caller (HeirLoginPage)
+    // must render a session picker and re-invoke this action with session_id set to
+    // the chosen session's UUID to disambiguate.
+    // On {"status": "success", ...}, sets isAuthenticated = true, session_id, heir_id,
+    // userStatus from the response, calls loadProfile(), and returns the response.
+  },
+
+  loadHeirSessions: async () => {
+    // Calls GET /api/auth/heir-sessions (current session cookie, no password needed).
+    // Returns the sibling-session list: [{session_id, title, status, is_current}, ...]
+    // Powers the dashboard's "Switch Estate" picker (SwitchEstateModal).
+  },
+
+  switchHeirSession: async (sessionId) => {
+    // Calls POST /api/auth/heir-switch-session with {session_id: sessionId}.
+    // Backend verifies the target session has a Heir record sharing the calling
+    // Heir's email/username, then re-issues the JWT cookie scoped to it — no
+    // password re-entry required.
+    // On success, sets isAuthenticated = true, session_id, heir_id, userStatus from
+    // the response, clears session-scoped state (assets, valuations, messages,
+    // announcement) to avoid a stale flash of the previous estate's data, then calls
+    // loadProfile(). Existing session_id-keyed effects (useWebSocket, DashboardGuard's
+    // loadSessionDetails) pick up the new session automatically.
+  },
+
+  restoreAdminSession: async () => {
+    // Calls GET /api/auth/me with same-origin credentials.
+    // If the response is an authenticated ADMIN, sets isAuthenticated = true,
+    // userRole = 'ADMIN', restores the session_id if present, and lets the Admin
+    // route reload its session list. If the cookie is missing, expired, or belongs
+    // to a Heir, it does not authenticate the Admin route.
+  },
+
+  logoutAdmin: async () => {
+    // Calls POST /api/auth/logout, then clears local auth state and any saved
+    // Admin console session selection. Local state must not default userRole
+    // back to HEIR when isAuthenticated is explicitly false.
   },
 
   setSession: (sessionData) => set({ 
@@ -397,6 +455,18 @@ To maximize user experience across diverse screens, the React routing wrapper an
 
 To support the Executor/Admin role in setting up and directing the estate mediation session, the frontend implements four custom dashboard views:
 
+### 6.0 Scalable Admin Information Architecture
+Admin UI surfaces must be designed for growth from the first implementation, even when seed/demo data is small. Any Admin surface that can plausibly contain more than 10 records (sessions, heirs, assets, support tickets, categories, notices, documents, audit entries) must provide:
+*   **Findability**: Search by the most likely human identifier (estate title, heir name/email, asset title/category, ticket sender).
+*   **Filtering**: At minimum, status/phase filters for lifecycle records and category filters for catalog records.
+*   **Sorting**: At minimum, newest/oldest and alphabetical sorting where applicable.
+*   **Density control**: A comfortable card view for review and a compact list view for high-volume scanning.
+*   **Progressive disclosure**: Primary action is visible; secondary/destructive actions are grouped or visually subordinate so users are not overwhelmed.
+*   **Pagination or incremental loading**: Long lists must not render as one unbounded scroll on mobile. Default page/window size should be small enough for phone use (for example, 8 sessions per page) and can grow on desktop if performance and readability allow.
+*   **Responsive controls**: Mobile controls stack into a clear command bar. Desktop controls may use a horizontal toolbar. Controls must not force horizontal scrolling or truncate critical actions.
+
+The Admin session picker is the reference pattern: search + status filter + sort + card/list density + pagination + summary chips. Future list-like Admin features should reuse this interaction pattern unless a domain-specific workflow requires a stronger alternative.
+
 ### 6.1 `AdminSetupChecklist`
 Guarantees the estate catalog is fully prepared before launching. Renders:
 *   **Infrastructure Health**: Verifies connection pool status, dynamic LLM provider keys, and SMTP server connectivity.
@@ -419,4 +489,30 @@ Handles outputs and fiduciary accounting:
 *   **Probate Audit Ledger**: Fetches the encrypted JSON chain, verifies historical hashes, and triggers PDF rendering with page templates.
 *   **Keepsake Memory Books**: Triggers background tasks that generate custom keepsakes for each heir and emails them using the SMTP dispatch service.
 
+## 7. Mobile Distribution Strategy (Phone-Based Usage Without App Store Submission)
 
+**Missed requirement, identified post-launch-planning**: both roles need a phone-first experience without going through Apple's App Store or Google Play review process. The Admin/Executor needs a phone in-hand to walk the decedent's home, photograph inventory items, and monitor/communicate with heirs from anywhere. Heirs need a single-phone experience to complete the entire review/allocation process without a desktop.
+
+### 7.1 Decision: Progressive Web App (PWA), not a native app store submission
+*   The existing Vite/React frontend is extended with a `manifest.json` (app name, icons, `display: "standalone"`, theme colors) and a service worker (Workbox or hand-rolled), enabling "Add to Home Screen" installation on both iOS Safari and Android Chrome.
+*   This avoids Apple/Google marketplace review, signing, and release-cycle overhead entirely — the installed PWA is served directly from the same Cloudflare Tunnel / Nginx origin already used for browser access (see Backend Spec §Docker-Compose deployment, Phase 7 Cloudflare Tunnel).
+*   Camera access for both the Admin's inventory photography flow and the Heir's `IDScanner` government ID capture uses standard `<input type="file" accept="image/*" capture="environment">` / `getUserMedia` browser APIs, which already work inside an installed PWA with no additional native permissions plumbing.
+*   **Known limitation**: iOS web push (for "monitor and communicate at anytime" alerting) is only supported for installed PWAs on iOS 16.4+, and is materially less reliable than native push. Until this is hardened, the existing WebSocket reconnect loop (`useWebSocket` hook, Frontend Spec §5.2) remains the primary real-time channel while the app is foregrounded/backgrounded-briefly, and SMTP email dispatch (Backend Spec) is the fallback channel for alerts that must reach the user when the PWA is fully closed.
+*   **Implementation**: `frontend/vite.config.js` registers `vite-plugin-pwa` (`registerType: 'autoUpdate'`), which generates `dist/manifest.webmanifest` and a Workbox service worker (`dist/sw.js`) on every `npm run build`. API and WebSocket traffic (`/api/*`, `/ws`) is explicitly excluded from the Workbox cache (`NetworkOnly`) so mediation state, valuations, and chat never serve a stale offline copy. `frontend/index.html` carries the `apple-touch-icon`, `theme-color`, and `apple-mobile-web-app-*` meta tags Safari requires for a correct standalone-mode install. Icons (`frontend/public/icon-192.png`, `icon-512.png`) are rendered from the existing brand mark (`favicon.svg`).
+
+### 7.2 `scripts/install_on_phone.sh` — One-Command Phone Install
+To make installing the PWA on a physical iPhone/Android as low-friction as typing a URL by hand, `scripts/install_on_phone.sh`:
+1.  Runs `npm run build` in `frontend/` to (re)generate the manifest and service worker.
+2.  Starts the Docker stack (`app`, `nginx`) via `docker compose up -d`.
+3.  Reads `CLOUDFLARE_TUNNEL_TOKEN` / `PUBLIC_BASE_URL` from `.env`:
+    *   **If set**: also starts the `cloudflared` profile and prints the real public HTTPS URL — the only path where the service worker fully registers and offline caching works.
+    *   **If unset**: auto-detects the host machine's LAN IPv4 address (scans `en0`–`en3`, then falls back to scanning all interfaces for a private-range address) and prints `http://<lan-ip>` instead, with an explicit warning that this is HTTP-only — "Add to Home Screen" still creates the icon, but the service worker will not register without HTTPS, so this path is for quick visual testing only, not the real install.
+4.  Renders the chosen URL as a QR code and opens it as a PNG image (`open` on macOS) so a phone camera can scan a crisp, full-resolution image — terminal ASCII-art QR codes are unreliable for camera scanning due to font anti-aliasing distorting the module grid. Falls back to ASCII-art QR (with a warning) only if PNG rendering is unavailable.
+5.  Prints the iPhone-Safari / Android-Chrome "Add to Home Screen" steps.
+
+The generated `.qr-install.png` is gitignored (regenerated per run, not committed).
+
+### 7.3 Future Consideration: Native App Wrapper
+*   If PWA push reliability or offline photo-queueing limitations become a real adoption blocker, the React codebase can be wrapped with Capacitor (or React Native re-implementation of the view layer) to ship true native iOS/Android binaries with full background push and offline storage APIs.
+*   This is **not** scheduled in the current implementation plan — it is a deliberate future option, not a committed phase. Going this route would still require either official App Store/Play Store distribution (re-introducing the marketplace dependency this plan is trying to avoid) or enterprise/ad-hoc sideloading, which is high-friction for non-technical heirs.
+*   To keep this option viable without rework, frontend code should avoid baking browser-only assumptions into business logic (keep API calls, Zustand store actions, and validation logic decoupled from DOM/browser-specific code), so a future Capacitor wrap is primarily "add a native shell" rather than a rewrite.

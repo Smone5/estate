@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { useMediationStore } from '../store/useMediationStore';
 import DashboardGuard from '../components/DashboardGuard';
 import ForceAllocationConsole from '../components/ForceAllocationConsole';
@@ -9,6 +9,19 @@ import BIP39RestorePanel from '../components/BIP39RestorePanel';
 import AdminHelpPortal from '../components/AdminHelpPortal';
 import AdminAnnouncementConsole from '../components/AdminAnnouncementConsole';
 import AdminSettingsPanel from '../components/AdminSettingsPanel';
+import AdminSessionLifecycleControls from '../components/AdminSessionLifecycleControls';
+import AdminFinalDocumentsPanel from '../components/AdminFinalDocumentsPanel';
+
+const SESSION_PAGE_SIZE = 8;
+
+function formatSessionDate(value) {
+  if (!value) return 'No date';
+  try {
+    return new Date(value).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+  } catch {
+    return value;
+  }
+}
 
 export default function AdminDashboard() {
   const store = useMediationStore();
@@ -25,29 +38,105 @@ export default function AdminDashboard() {
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [showSetupWizard, setShowSetupWizard] = useState(false);
+  const [restoringAuth, setRestoringAuth] = useState(true);
   const [checkingSetupStatus, setCheckingSetupStatus] = useState(true);
-  const [viewingSession, setViewingSession] = useState(false);
+  const [viewingSession, setViewingSession] = useState(Boolean(sessionId));
   const [activeTab, setActiveTab] = useState('inventory');
+  const [sessionSubTab, setSessionSubTab] = useState('register');
   const [newSessionTitle, setNewSessionTitle] = useState('');
   const [creatingSession, setCreatingSession] = useState(false);
   const [createSessionError, setCreateSessionError] = useState(null);
+  const [editingSessionId, setEditingSessionId] = useState(null);
+  const [editingSessionTitle, setEditingSessionTitle] = useState('');
+  const [sessionSearch, setSessionSearch] = useState('');
+  const [sessionStatusFilter, setSessionStatusFilter] = useState('All');
+  const [sessionSort, setSessionSort] = useState('created_desc');
+  const [sessionView, setSessionView] = useState('comfortable');
+  const [sessionPage, setSessionPage] = useState(1);
 
   const TABS = [
     { id: 'inventory', label: 'Inventory' },
-    { id: 'session', label: 'Session Control' },
+    { id: 'session', label: 'Session' },
     { id: 'backup', label: 'Backup' },
     { id: 'settings', label: 'Settings' },
   ];
+  const sessionSubTabs = [
+    ...(sessionStatus === 'SETUP' ? [{ id: 'register', label: 'Register Heir' }] : []),
+    { id: 'monitor', label: 'Heir Monitor' },
+    { id: 'announcement', label: 'Announcement' },
+  ];
+  const visibleSessionSubTab = sessionSubTabs.some((tab) => tab.id === sessionSubTab)
+    ? sessionSubTab
+    : sessionSubTabs[0]?.id || 'monitor';
+  const selectedSession = sessions.find((s) => s.id === sessionId) || null;
+  const sessionStatusCounts = useMemo(() => sessions.reduce((counts, session) => {
+    const status = session.status || 'UNKNOWN';
+    return { ...counts, [status]: (counts[status] || 0) + 1 };
+  }, {}), [sessions]);
+  const sessionStatusOptions = useMemo(() => (
+    ['All', ...Array.from(new Set(sessions.map((session) => session.status || 'UNKNOWN')))]
+  ), [sessions]);
+  const filteredSessions = useMemo(() => {
+    const query = sessionSearch.trim().toLowerCase();
+    const list = sessions.filter((session) => {
+      const matchesSearch = !query || [
+        session.title,
+        session.status,
+        session.id,
+      ].filter(Boolean).some((value) => String(value).toLowerCase().includes(query));
+      const matchesStatus = sessionStatusFilter === 'All' || (session.status || 'UNKNOWN') === sessionStatusFilter;
+      return matchesSearch && matchesStatus;
+    });
 
-  // Determine whether first-boot admin setup has already happened, so we
-  // don't show the setup wizard to an already-provisioned instance.
+    return [...list].sort((a, b) => {
+      if (sessionSort === 'title_asc') return (a.title || '').localeCompare(b.title || '');
+      if (sessionSort === 'title_desc') return (b.title || '').localeCompare(a.title || '');
+      if (sessionSort === 'status_asc') return (a.status || '').localeCompare(b.status || '');
+      if (sessionSort === 'created_asc') return new Date(a.created_at || 0) - new Date(b.created_at || 0);
+      return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+    });
+  }, [sessionSearch, sessionSort, sessionStatusFilter, sessions]);
+  const sessionPageCount = Math.max(1, Math.ceil(filteredSessions.length / SESSION_PAGE_SIZE));
+  const visibleSessions = filteredSessions.slice(
+    (sessionPage - 1) * SESSION_PAGE_SIZE,
+    sessionPage * SESSION_PAGE_SIZE,
+  );
+
+  // Restore an existing admin cookie before falling back to setup/login gates.
   useEffect(() => {
     if (store.isAuthenticated) {
+      setRestoringAuth(false);
       setCheckingSetupStatus(false);
       return;
     }
     let cancelled = false;
     (async () => {
+      try {
+        const authRes = await fetch('/api/auth/me', { credentials: 'same-origin' });
+        if (authRes.ok) {
+          const authData = await authRes.json();
+          if (authData.role === 'ADMIN') {
+            store.setSession({
+              isAuthenticated: true,
+              user_role: 'ADMIN',
+              session_id: authData.session_id ?? null,
+            });
+            if (!cancelled) {
+              setViewingSession(Boolean(authData.session_id));
+              setShowSetupWizard(false);
+              setRestoringAuth(false);
+              setCheckingSetupStatus(false);
+            }
+            await fetchSessions();
+            return;
+          }
+        }
+      } catch (err) {
+        console.error('Failed to restore admin session', err);
+      } finally {
+        if (!cancelled) setRestoringAuth(false);
+      }
+
       try {
         const res = await fetch('/api/setup/status');
         if (res.ok) {
@@ -70,6 +159,28 @@ export default function AdminDashboard() {
     }
   }, [store.isAuthenticated, userRole]);
 
+  useEffect(() => {
+    if (sessionStatus !== 'SETUP' && sessionSubTab === 'register') {
+      setSessionSubTab('monitor');
+    }
+  }, [sessionStatus, sessionSubTab]);
+
+  useEffect(() => {
+    if (store.isAuthenticated && userRole === 'ADMIN' && sessionId) {
+      setViewingSession(true);
+    }
+  }, [store.isAuthenticated, userRole, sessionId]);
+
+  useEffect(() => {
+    setSessionPage(1);
+  }, [sessionSearch, sessionSort, sessionStatusFilter]);
+
+  useEffect(() => {
+    if (sessionPage > sessionPageCount) {
+      setSessionPage(sessionPageCount);
+    }
+  }, [sessionPage, sessionPageCount]);
+
   async function fetchSessions() {
     try {
       setLoadingSessions(true);
@@ -86,6 +197,7 @@ export default function AdminDashboard() {
   }
 
   function handleOpenSession(activeSess) {
+    localStorage.setItem('admin_selected_session_id', activeSess.id);
     store.setSession({
       isAuthenticated: true,
       user_role: 'ADMIN',
@@ -96,7 +208,67 @@ export default function AdminDashboard() {
       assets: [],
     });
     setActiveTab('inventory');
+    setSessionSubTab(activeSess.status === 'SETUP' ? 'register' : 'monitor');
     setViewingSession(true);
+  }
+
+  function startEditingSession(session) {
+    setEditingSessionId(session.id);
+    setEditingSessionTitle(session.title || '');
+  }
+
+  function cancelEditingSession() {
+    setEditingSessionId(null);
+    setEditingSessionTitle('');
+  }
+
+  async function handleRenameSession(targetSession) {
+    const title = editingSessionTitle.trim();
+    if (!title) return;
+    try {
+      const res = await fetch(`/api/sessions/${targetSession.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ title }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Rename failed: ${res.status}`);
+      }
+      setSessions((current) => current.map((session) => (
+        session.id === targetSession.id ? { ...session, title } : session
+      )));
+      cancelEditingSession();
+    } catch (err) {
+      setCreateSessionError(err.message);
+    }
+  }
+
+  async function handleDeleteSession(targetSession) {
+    if (!window.confirm(`Delete session "${targetSession.title}"? This cannot be undone.`)) return;
+    try {
+      const res = await fetch(`/api/sessions/${targetSession.id}`, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Delete failed: ${res.status}`);
+      }
+      if (sessionId === targetSession.id) {
+        localStorage.removeItem('admin_selected_session_id');
+        setViewingSession(false);
+        store.setSession({
+          isAuthenticated: true,
+          user_role: 'ADMIN',
+          session_id: null,
+        });
+      }
+      await fetchSessions();
+    } catch (err) {
+      setCreateSessionError(err.message);
+    }
   }
 
   async function handleCreateSession(e) {
@@ -166,7 +338,35 @@ export default function AdminDashboard() {
     fetchSessions();
   }
 
+  async function handleLogout() {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
+    } catch (err) {
+      console.error('Failed to clear auth cookie', err);
+    } finally {
+      localStorage.removeItem('admin_selected_session_id');
+      setViewingSession(false);
+      setSessions([]);
+      store.setSession({
+        isAuthenticated: false,
+        user_role: null,
+        session_id: null,
+      });
+    }
+  }
+
   // ── First-Boot Setup Wizard (Gate) ──────────────────────────────────────
+  if (!store.isAuthenticated && restoringAuth) {
+    return (
+      <div className="app-main flex items-center justify-center" style={{ flex: 1, padding: 'var(--space-lg)' }}>
+        <p className="text-muted">Restoring Executor Session</p>
+      </div>
+    );
+  }
+
   if (!store.isAuthenticated && checkingSetupStatus) {
     return (
       <div className="app-main flex items-center justify-center" style={{ flex: 1, padding: 'var(--space-lg)' }}>
@@ -243,42 +443,215 @@ export default function AdminDashboard() {
       <DashboardGuard variant="admin">
         <div className="admin-dashboard-container" style={{ flex: 1, padding: 'var(--space-lg)', overflowY: 'auto' }}>
           <div style={{ maxWidth: 800, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 'var(--space-lg)' }}>
-            <div className="flex justify-between items-center">
+            <div className="admin-console-header">
               <h2 style={{ fontFamily: 'var(--font-serif)' }}>Executor Console</h2>
-              <div style={{ display: 'flex', gap: 'var(--space-sm)' }}>
+              <div className="admin-console-actions">
                 <button className="btn btn-secondary btn-sm" onClick={() => setIsHelpOpen(true)}>
                   Quick-Start & FAQ Guide
                 </button>
                 <button
                   className="btn btn-secondary btn-sm"
-                  onClick={() => store.setSession({ isAuthenticated: false, userRole: null })}
+                  onClick={handleLogout}
                 >
                   Log Out
                 </button>
               </div>
             </div>
 
-            <div className="archival-card">
-              <h3 style={{ marginBottom: 'var(--space-md)' }}>Mediation Sessions</h3>
+            <div className="archival-card admin-session-index">
+              <div className="admin-session-index-header">
+                <div>
+                  <h3>Mediation Sessions</h3>
+                  <p className="text-sm text-muted">
+                    Find an estate, review its status, and jump back into the active workflow.
+                  </p>
+                </div>
+                <div className="admin-session-summary">
+                  <span>{sessions.length} total</span>
+                  {Object.entries(sessionStatusCounts).slice(0, 3).map(([status, count]) => (
+                    <span key={status}>{count} {status.toLowerCase()}</span>
+                  ))}
+                </div>
+              </div>
               {loadingSessions ? (
                 <p className="text-muted">Loading sessions...</p>
               ) : sessions.length === 0 ? (
                 <p className="text-muted">No sessions yet. Create one below to get started.</p>
               ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)' }}>
-                  {sessions.map((s) => (
-                    <button
-                      key={s.id}
-                      className="btn btn-secondary"
-                      style={{ justifyContent: 'space-between', display: 'flex', textAlign: 'left' }}
-                      onClick={() => handleOpenSession(s)}
-                      data-testid={`session-open-${s.id}`}
-                    >
-                      <span>{s.title}</span>
-                      <span className="text-muted text-sm">{s.status}</span>
-                    </button>
+                <>
+                  <div className="admin-session-toolbar" aria-label="Session controls">
+                    <div className="admin-session-search">
+                      <label className="form-label text-xs" htmlFor="admin-session-search">Search sessions</label>
+                      <input
+                        id="admin-session-search"
+                        className="form-input"
+                        type="search"
+                        value={sessionSearch}
+                        onChange={(e) => setSessionSearch(e.target.value)}
+                        placeholder="Estate name, status, or ID"
+                        data-testid="session-search-input"
+                      />
+                    </div>
+                    <div>
+                      <label className="form-label text-xs" htmlFor="admin-session-status-filter">Status</label>
+                      <select
+                        id="admin-session-status-filter"
+                        className="form-input"
+                        value={sessionStatusFilter}
+                        onChange={(e) => setSessionStatusFilter(e.target.value)}
+                        data-testid="session-status-filter"
+                      >
+                        {sessionStatusOptions.map((status) => (
+                          <option key={status} value={status}>
+                            {status === 'All' ? 'All statuses' : status}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="form-label text-xs" htmlFor="admin-session-sort">Sort</label>
+                      <select
+                        id="admin-session-sort"
+                        className="form-input"
+                        value={sessionSort}
+                        onChange={(e) => setSessionSort(e.target.value)}
+                        data-testid="session-sort-select"
+                      >
+                        <option value="created_desc">Newest first</option>
+                        <option value="created_asc">Oldest first</option>
+                        <option value="title_asc">Title A-Z</option>
+                        <option value="title_desc">Title Z-A</option>
+                        <option value="status_asc">Status</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="form-label text-xs">View</label>
+                      <div className="admin-session-view-toggle">
+                        <button
+                          type="button"
+                          className={sessionView === 'comfortable' ? 'active' : ''}
+                          onClick={() => setSessionView('comfortable')}
+                          data-testid="session-view-comfortable"
+                        >
+                          Cards
+                        </button>
+                        <button
+                          type="button"
+                          className={sessionView === 'compact' ? 'active' : ''}
+                          onClick={() => setSessionView('compact')}
+                          data-testid="session-view-compact"
+                        >
+                          List
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {filteredSessions.length === 0 ? (
+                    <div className="admin-session-empty">
+                      <strong>No matching sessions</strong>
+                      <span>Try a broader search or clear the status filter.</span>
+                    </div>
+                  ) : (
+                    <div className={`admin-session-collection admin-session-collection--${sessionView}`}>
+                  {visibleSessions.map((s) => (
+                    <div key={s.id} className={`admin-session-row admin-session-row--${sessionView}`}>
+                      {editingSessionId === s.id ? (
+                        <>
+                          <input
+                            className="form-input"
+                            value={editingSessionTitle}
+                            onChange={(e) => setEditingSessionTitle(e.target.value)}
+                            data-testid={`edit-session-title-input-${s.id}`}
+                            aria-label="Session title"
+                          />
+                          <button
+                            className="btn btn-primary btn-sm"
+                            type="button"
+                            onClick={() => handleRenameSession(s)}
+                            data-testid={`save-session-btn-${s.id}`}
+                          >
+                            Save
+                          </button>
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            type="button"
+                            onClick={cancelEditingSession}
+                            data-testid={`cancel-session-btn-${s.id}`}
+                          >
+                            Cancel
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            className="admin-session-open-btn"
+                            onClick={() => handleOpenSession(s)}
+                            data-testid={`session-open-${s.id}`}
+                          >
+                            <span className="admin-session-title">{s.title}</span>
+                            <span className={`admin-session-status admin-session-status--${(s.status || 'unknown').toLowerCase()}`}>
+                              {s.status || 'UNKNOWN'}
+                            </span>
+                            <span className="admin-session-date">{formatSessionDate(s.created_at)}</span>
+                          </button>
+                          <div className="admin-session-row-actions">
+                            <button
+                              className="btn btn-primary btn-sm"
+                              type="button"
+                              onClick={() => handleOpenSession(s)}
+                              data-testid={`open-session-btn-${s.id}`}
+                            >
+                              Open
+                            </button>
+                            <button
+                              className="btn btn-secondary btn-sm"
+                              type="button"
+                              onClick={() => startEditingSession(s)}
+                              data-testid={`edit-session-btn-${s.id}`}
+                            >
+                              Rename
+                            </button>
+                            <button
+                              className="btn btn-danger btn-sm"
+                              type="button"
+                              onClick={() => handleDeleteSession(s)}
+                              data-testid={`delete-session-${s.id}`}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
                   ))}
-                </div>
+                    </div>
+                  )}
+
+                  {filteredSessions.length > SESSION_PAGE_SIZE && (
+                    <div className="admin-session-pagination" aria-label="Session pagination">
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => setSessionPage((page) => Math.max(1, page - 1))}
+                        disabled={sessionPage === 1}
+                      >
+                        Previous
+                      </button>
+                      <span>
+                        Page {sessionPage} of {sessionPageCount}
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => setSessionPage((page) => Math.min(sessionPageCount, page + 1))}
+                        disabled={sessionPage === sessionPageCount}
+                      >
+                        Next
+                      </button>
+                    </div>
+                  )}
+                </>
               )}
             </div>
 
@@ -322,9 +695,9 @@ export default function AdminDashboard() {
     <DashboardGuard variant="admin">
       <div className="admin-dashboard-container" style={{ flex: 1, padding: 'var(--space-lg)', overflowY: 'auto' }}>
         <div style={{ maxWidth: 1200, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 'var(--space-lg)' }}>
-          <div className="flex justify-between items-center">
+          <div className="admin-console-header">
             <div>
-              <button className="btn btn-link" onClick={handleBackToSessions} data-testid="back-to-sessions-btn">
+              <button className="btn btn-secondary btn-sm admin-back-btn" onClick={handleBackToSessions} data-testid="back-to-sessions-btn">
                 ← All Sessions
               </button>
               <h2 style={{ fontFamily: 'var(--font-serif)' }}>Executor Console</h2>
@@ -332,7 +705,7 @@ export default function AdminDashboard() {
                 Status: <strong>{sessionStatus}</strong>
               </p>
             </div>
-            <div style={{ display: 'flex', gap: 'var(--space-sm)' }}>
+            <div className="admin-console-actions">
               <button
                 className="btn btn-secondary btn-sm"
                 onClick={() => setIsHelpOpen(true)}
@@ -341,7 +714,7 @@ export default function AdminDashboard() {
               </button>
               <button
                 className="btn btn-secondary btn-sm"
-                onClick={() => store.setSession({ isAuthenticated: false, userRole: null })}
+                onClick={handleLogout}
               >
                 Log Out
               </button>
@@ -369,6 +742,18 @@ export default function AdminDashboard() {
             <>
               {activeTab === 'inventory' && (
                 <>
+                  {sessionStatus === 'ACTIVE' || sessionStatus === 'LOCKED' ? (
+                    <AdminSessionLifecycleControls sessionId={sessionId} onSessionChanged={fetchSessions} />
+                  ) : null}
+
+                  {sessionStatus === 'FINALIZED' ? (
+                    <AdminFinalDocumentsPanel
+                      sessionId={sessionId}
+                      sessionTitle={selectedSession?.title}
+                      heirs={[]}
+                    />
+                  ) : null}
+
                   <AdminInventoryDashboard sessionId={sessionId} />
 
                   {isDeadlocked ? (
@@ -386,10 +771,31 @@ export default function AdminDashboard() {
               )}
 
               {activeTab === 'session' && (
-                <>
-                  <AdminSessionControl sessionId={sessionId} />
-                  {sessionId && <AdminAnnouncementConsole sessionId={sessionId} />}
-                </>
+                <div className="admin-session-workspace">
+                  <div className="admin-subtab-nav" aria-label="Session control sections">
+                    {sessionSubTabs.map((tab) => (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        className={`btn btn-tab${visibleSessionSubTab === tab.id ? ' active' : ''}`}
+                        onClick={() => setSessionSubTab(tab.id)}
+                        data-testid={`admin-session-subtab-${tab.id}`}
+                      >
+                        {tab.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {visibleSessionSubTab === 'register' && (
+                    <AdminSessionControl sessionId={sessionId} section="register" />
+                  )}
+                  {visibleSessionSubTab === 'monitor' && (
+                    <AdminSessionControl sessionId={sessionId} section="monitor" />
+                  )}
+                  {visibleSessionSubTab === 'announcement' && sessionId && (
+                    <AdminAnnouncementConsole sessionId={sessionId} />
+                  )}
+                </div>
               )}
 
               {activeTab === 'backup' && <BIP39RestorePanel />}

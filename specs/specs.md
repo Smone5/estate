@@ -34,6 +34,7 @@ To help human developers, AI code agents, and testing pipelines, the system spec
     *   Client-side routing table definitions (`/invite/:token`, `/dashboard`, `/admin`).
     *   Zustand store hook schemas (active valuations, unallocated points calculations, offline message buffer queues).
     *   TanStack query caching and WebSocket reconnect lifecycle loops.
+    *   Mobile Distribution Strategy: PWA install (Add to Home Screen) instead of Apple/Google marketplace submission, with native app wrapper noted as a future option.
 
 *   ### [UI/UX Component & Layout Specification](specs_ui.md)
     *   Grief-Informed design tokens (hex variables), typography (Playfair Display / Inter), and 300ms transitions.

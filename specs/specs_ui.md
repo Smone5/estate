@@ -159,6 +159,14 @@ We implement a **Mobile-First CSS Grid and Flexbox** layout system.
     *"Disclaimer: The Estate Steward is a collaborative mediation aid designed to assist executors and heirs in dividing personal property. It does not provide legal advice, estate planning, or tax counsel. Use of this tool does not guarantee probate court approval. Executors are advised to consult with a licensed probate attorney regarding their fiduciary obligations and court filings."*
 
 #### The Admin Dashboard
+*   **Scalable Session Index (Admin Landing)**: After login, the Admin may need to manage many estate sessions from a phone or desktop. The session landing view must use an operational index pattern rather than a plain stacked list:
+    *   **Search**: Free-text search across estate title, status, and session identifier.
+    *   **Filters**: Status/phase filter chips or select controls (`SETUP`, `ACTIVE`, `LOCKED`, `FINALIZED`, etc.).
+    *   **Sort**: Date created newest/oldest, title A-Z/Z-A, and status.
+    *   **Density**: Comfortable card view for review and compact list view for high-volume scanning.
+    *   **Pagination / Incremental Loading**: Default mobile window should be small enough to avoid one long page; eight sessions per page is the baseline unless replaced by an equivalent accessible load-more pattern.
+    *   **Action Hierarchy**: Opening the session is the primary row/card action. Edit and Delete are secondary actions; Delete must not be rendered as a repeated oversized full-width button on every mobile row.
+    *   **Mobile Command Bar**: Controls stack in a compact command area with no horizontal overflow. Summary chips show total sessions and status counts without becoming a dashboard-card mosaic.
 *   **Mobile View (Staging & Snapping)**: Streamlined photo capture view. Large "Capture Asset" button, camera staging uploader, and quick meta forms.
 *   **Desktop View (Management Console)**: Full management dashboard. Left side features asset grids; right side displays the Heir Registration Panel, the TanStack Session Monitor Table, and Deadlock Resolution overrides.
 *   **Heir Registration Panel**: An input form allowing the Executor to register heirs.
@@ -541,7 +549,6 @@ Refer to the [Compliance Specification](file:///Users/amelton/Library/Mobile%20D
     1.  **Approve Identity**: Styled in Sage-Green (`var(--color-primary)`). Calls `POST /api/heirs/{heir_id}/verify-identity` to mark the profile verified, delete the temporary ID image file from storage, and close the modal.
     2.  **Reject & Flag**: Styled in Amber-500 (`var(--color-alert)`). Triggers a dialog allowing the Executor to type a correction note (e.g., *"Name spelling on ID does not match profile"*). Calls `POST /api/heirs/{heir_id}/verify-identity` with `action: reject` and the rejection reason. This immediately purges the uploaded ID scan from disk storage, resets `id_scan_uri = NULL`, sends an alert to the Heir's dashboard via WebSocket, transitions the Heir to `'PROFILE_HOLD'` state, and prompts them to re-upload.
     3.  **Cancel**: Closes the modal without modifications.
-
 
 
 

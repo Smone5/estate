@@ -37,6 +37,7 @@ graph TD
 | ID | Category | Title | Primary Persona | Expected Outcome |
 | :--- | :--- | :--- | :--- | :--- |
 | **UAT-01** | Initialization | Session Setup & Invite Generation | Admin | UUID tokens generated, secure links created. |
+| **UAT-01b**| Initialization | Admin Refresh & Re-Entry | Admin | Hard refresh preserves valid Admin cookie session; logout clears it. |
 | **UAT-02** | Asset Loading | Vision OCR & Staging | Admin | WebP image uploaded, `llava` metadata approved. |
 | **UAT-03** | Onboarding | Consent, Age-Gate, & Auth | Heir | Secure entrance with JWT cookie; declines blocked. |
 | **UAT-04** | Discovery | Semantic Search & Fallback | Heir | Speech search filters items; empty state asks mediator. |
@@ -65,6 +66,21 @@ graph TD
 *   **Verification Checkpoints**:
     *   [ ] Verify the database table `users` contains Alice and Bob with distinct UUID token hashes.
     *   [ ] Verify that two secure token links are rendered: `/invite/token_alice` and `/invite/token_bob`.
+
+### UAT-01b: Admin Refresh & Re-Entry
+*   **Setup**: Stay logged into `/admin` after creating at least one session.
+*   **Execution**:
+    1. Hard-refresh the browser on `/admin`.
+    2. Observe the temporary restoring state.
+    3. Verify the Admin console returns without prompting for credentials.
+    4. Click "Log Out".
+    5. Hard-refresh `/admin` again.
+*   **Verification Checkpoints**:
+    *   [ ] Verify the frontend calls `GET /api/auth/me` during refresh restoration.
+    *   [ ] Verify a valid Admin cookie restores `isAuthenticated = true` and `userRole = ADMIN`.
+    *   [ ] Verify the Admin session list reloads after restoration.
+    *   [ ] Verify logout calls `POST /api/auth/logout`, clears the HTTP-only cookie, clears local Admin session state, and returns to the login/setup gate.
+    *   [ ] Verify a hard refresh after logout does not restore the Admin console.
 
 ### UAT-02: Vision OCR & Asset Staging
 *   **Setup**: Stay in the Admin Dashboard, navigate to the "Staging Area".
@@ -248,6 +264,22 @@ graph TD
     *   [ ] Verify that the database tables (users, valuations, audit logs) match their pre-backup states exactly.
     *   [ ] Verify that a fresh, uninitialized system permits restore operations without a JWT cookie (authentication bypass).
     *   [ ] Verify that a restore operation succeeds using the 24-word Paper Recovery Key if the system `ENCRYPTION_KEY` is missing or changed.
+
+### UAT-11: Mobile Admin Session Index Scalability
+*   **Setup**: Seed at least 100 estate sessions across multiple statuses (`SETUP`, `ACTIVE`, `LOCKED`, `FINALIZED`). Log into `/admin` on a 390-430px wide mobile viewport or physical phone.
+*   **Execution**:
+    1. Verify the session landing page renders a compact command area with search, status filter, sort, and card/list view controls.
+    2. Search for a known estate title and verify the list narrows without a full page reload.
+    3. Apply a status filter and sort by title. Verify the filtered/sorted result set remains understandable and resets to the first page/window.
+    4. Switch between comfortable card view and compact list view.
+    5. Navigate to a later result page/window using pagination or load-more controls.
+    6. Open a session, return to All Sessions, and confirm the Admin does not lose authentication or return to the top of an unbounded list unexpectedly.
+*   **Verification Checkpoints**:
+    *   [ ] Verify there is no horizontal scrolling at mobile width.
+    *   [ ] Verify the primary session-open action is obvious and touch-friendly.
+    *   [ ] Verify Edit/Delete remain available but visually secondary; Delete is not repeated as a large full-width button for every session.
+    *   [ ] Verify pagination or incremental loading prevents one long mobile page containing all 100 sessions.
+    *   [ ] Verify empty search/filter states are helpful and do not look like application failure.
 
 ---
 

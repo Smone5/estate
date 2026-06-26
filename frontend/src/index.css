@@ -500,6 +500,268 @@ p {
 }
 
 /* ── Responsive Admin Console & Layout System ────────────────────────────── */
+.admin-dashboard-container {
+  min-width: 0;
+  width: 100%;
+}
+
+.admin-dashboard-container .archival-card {
+  min-width: 0;
+}
+
+.admin-console-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-md);
+  align-items: start;
+}
+
+.admin-console-header h2,
+.admin-console-header p {
+  margin-bottom: 0;
+}
+
+.admin-console-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+}
+
+.admin-console-actions .btn {
+  min-width: 0;
+}
+
+.admin-back-btn {
+  margin-bottom: var(--space-sm);
+}
+
+.admin-session-index {
+  display: grid;
+  gap: var(--space-md);
+}
+
+.admin-session-index-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-md);
+  align-items: start;
+}
+
+.admin-session-index-header h3 {
+  margin: 0 0 4px;
+  font-family: var(--font-serif);
+}
+
+.admin-session-index-header p {
+  margin: 0;
+}
+
+.admin-session-summary {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-xs);
+  max-width: 320px;
+}
+
+.admin-session-summary span,
+.admin-session-status,
+.admin-session-date {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 3px 9px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.admin-session-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(140px, 0.36fr) minmax(150px, 0.4fr) auto;
+  gap: var(--space-sm);
+  align-items: end;
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+}
+
+.admin-session-search {
+  min-width: 0;
+}
+
+.admin-session-view-toggle {
+  display: inline-flex;
+  width: 100%;
+  min-height: 42px;
+  padding: 3px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-card-bg);
+}
+
+.admin-session-view-toggle button {
+  flex: 1;
+  min-width: 70px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.admin-session-view-toggle button.active {
+  border-color: rgba(74, 103, 65, 0.38);
+  background: var(--color-primary-light);
+  color: var(--color-primary-hover);
+}
+
+.admin-session-collection {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.admin-session-collection--comfortable {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+}
+
+.admin-session-collection--compact {
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+
+.admin-session-row {
+  display: grid;
+  gap: var(--space-sm);
+  min-width: 0;
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-card-bg);
+  box-shadow: 2px 2px 0 var(--color-border);
+}
+
+.admin-session-row--compact {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  box-shadow: none;
+  padding: 8px 10px;
+}
+
+.admin-session-open-btn {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.admin-session-row--comfortable .admin-session-open-btn {
+  grid-template-areas:
+    "title status"
+    "date date";
+}
+
+.admin-session-row--compact .admin-session-open-btn {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.admin-session-title {
+  grid-area: title;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 750;
+  font-size: 0.98rem;
+}
+
+.admin-session-status {
+  grid-area: status;
+  justify-self: end;
+  text-transform: uppercase;
+}
+
+.admin-session-date {
+  grid-area: date;
+  justify-self: start;
+  min-height: 24px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  font-weight: 600;
+}
+
+.admin-session-row--compact .admin-session-title,
+.admin-session-row--compact .admin-session-status,
+.admin-session-row--compact .admin-session-date {
+  grid-area: auto;
+}
+
+.admin-session-status--setup,
+.admin-session-status--active {
+  border-color: rgba(74, 103, 65, 0.38);
+  background: var(--color-primary-light);
+  color: var(--color-primary-hover);
+}
+
+.admin-session-status--finalized,
+.admin-session-status--completed {
+  border-color: #CBD5E1;
+  background: #F8FAFC;
+  color: #475569;
+}
+
+.admin-session-row-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-xs);
+}
+
+.admin-session-row-actions .btn {
+  min-height: 32px;
+}
+
+.admin-session-empty {
+  display: grid;
+  gap: 2px;
+  padding: var(--space-md);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+}
+
+.admin-session-empty strong {
+  color: var(--color-text);
+}
+
+.admin-session-pagination {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: var(--space-sm);
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
 .admin-tab-nav {
   display: flex;
   flex-wrap: wrap;
@@ -531,6 +793,64 @@ p {
 .admin-tab-nav .btn-tab:hover:not(.active) {
   color: var(--color-primary);
   border-bottom: 2px solid var(--color-border);
+}
+
+.admin-session-workspace {
+  display: grid;
+  gap: var(--space-md);
+  min-width: 0;
+}
+
+.admin-subtab-nav {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--space-xs);
+  padding: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+}
+
+.admin-subtab-nav .btn-tab {
+  min-width: 0;
+  min-height: 38px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.admin-subtab-nav .btn-tab.active {
+  color: var(--color-primary-hover);
+  border-color: rgba(74, 103, 65, 0.38);
+  background: var(--color-card-bg);
+}
+
+.admin-announcement-card {
+  padding: var(--space-lg);
+}
+
+.announcement-input-wrap {
+  position: relative;
+  margin-bottom: var(--space-md);
+  min-width: 0;
+}
+
+.announcement-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, max-content));
+  justify-content: end;
+  gap: var(--space-sm);
+}
+
+.announcement-actions .btn {
+  min-width: 0;
+  white-space: normal;
 }
 
 .admin-form-grid {
@@ -600,11 +920,735 @@ p {
   background-color: var(--color-primary-light);
 }
 
+.heir-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+  gap: var(--space-md);
+  margin-top: var(--space-md);
+  align-items: stretch;
+}
+
+.heir-card-grid--compact {
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+
+.heir-monitor-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-md);
+  align-items: flex-start;
+  margin-bottom: var(--space-md);
+}
+
+.heir-monitor-heading p {
+  margin: 0;
+}
+
+.heir-monitor-toolbar {
+  display: grid;
+  gap: var(--space-md);
+  margin-bottom: var(--space-md);
+}
+
+.heir-stat-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  gap: var(--space-xs);
+}
+
+.heir-stat-strip button,
+.heir-density-toggle button {
+  border: 1px solid var(--color-border);
+  background: var(--color-card-bg);
+  color: var(--color-text);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+
+.heir-stat-strip button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  min-height: 58px;
+  padding: 8px 10px;
+}
+
+.heir-stat-strip button span {
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.heir-stat-strip button small {
+  color: var(--color-text-muted);
+  font-size: 0.688rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.heir-stat-strip button:hover,
+.heir-stat-strip button.active,
+.heir-density-toggle button:hover,
+.heir-density-toggle button.active {
+  border-color: rgba(74, 103, 65, 0.55);
+  background: var(--color-primary-light);
+  color: var(--color-primary-hover);
+}
+
+.heir-filter-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(150px, 0.48fr) minmax(170px, 0.52fr);
+  gap: var(--space-sm);
+  align-items: end;
+}
+
+.heir-density-toggle {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  flex-shrink: 0;
+}
+
+.heir-density-toggle button {
+  min-height: 30px;
+  padding: 4px 10px;
+  border-color: transparent;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.heir-monitor-empty {
+  display: grid;
+  gap: 2px;
+  padding: var(--space-md);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+}
+
+.heir-monitor-empty strong {
+  color: var(--color-text);
+}
+
+.heir-card {
+  background-color: var(--color-card-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 18px;
+  box-shadow: 2px 2px 0 var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  min-width: 0;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.heir-card:hover {
+  border-color: rgba(74, 103, 65, 0.55);
+  box-shadow: 3px 3px 0 rgba(74, 103, 65, 0.14);
+  transform: translateY(-1px);
+}
+
+.heir-card--compact {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  box-shadow: none;
+}
+
+.heir-card--compact .heir-card-header {
+  min-width: 0;
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.heir-card--compact .heir-card-guidance {
+  font-size: 0.75rem;
+}
+
+.heir-compact-meta {
+  display: none;
+}
+
+.heir-card--compact .heir-compact-meta {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.heir-card--compact .heir-compact-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.heir-card--compact .heir-contact-stack {
+  display: none;
+}
+
+.heir-card--compact .heir-invite-panel,
+.heir-card--compact .heir-secondary-action {
+  display: none;
+}
+
+.heir-card--compact .heir-card-actions {
+  justify-content: flex-end;
+  align-items: center;
+  padding-top: 0;
+  border-top: 0;
+  margin-top: 0;
+  min-width: max-content;
+}
+
+.heir-card--compact .heir-card-actions .btn {
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 0.75rem;
+}
+
+.heir-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: var(--space-sm);
+}
+
+.heir-card-identity {
+  min-width: 0;
+}
+
+.heir-card-name {
+  font-weight: 600;
+  font-size: 1.05rem;
+  color: var(--color-text);
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.heir-card-guidance {
+  color: var(--color-text-muted);
+  font-size: 0.813rem;
+  line-height: 1.4;
+  margin: 3px 0 0;
+}
+
+.heir-status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+}
+
+.heir-status-icon {
+  display: inline-flex;
+  width: 16px;
+  justify-content: center;
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+.heir-status-pill--submitted {
+  color: var(--color-primary);
+  background: var(--color-primary-light);
+  border-color: rgba(74, 103, 65, 0.45);
+}
+
+.heir-status-pill--active {
+  color: #2563EB;
+  background: #EFF6FF;
+  border-color: #BFDBFE;
+}
+
+.heir-status-pill--review {
+  color: #92400E;
+  background: var(--color-alert-light);
+  border-color: rgba(245, 158, 11, 0.55);
+}
+
+.heir-status-pill--pending {
+  color: var(--color-text-muted);
+  background: var(--color-bg);
+  border-color: var(--color-border);
+}
+
+.heir-status-pill--quiet {
+  color: var(--color-text-muted);
+  background: #F8FAFC;
+  border-color: #E2E8F0;
+}
+
+.heir-contact-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.heir-contact-line {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: var(--space-sm);
+  align-items: baseline;
+  min-width: 0;
+}
+
+.heir-contact-line--address {
+  align-items: start;
+}
+
+.heir-card-label {
+  color: var(--color-text-muted);
+  font-weight: 650;
+  font-size: 0.688rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  line-height: 1.4;
+}
+
+.heir-card-value {
+  min-width: 0;
+  color: var(--color-text);
+  font-size: 0.875rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.heir-invite-panel {
+  display: grid;
+  gap: var(--space-sm);
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: #FFFEFB;
+}
+
+.heir-token-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.heir-token-value {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.heir-token-value code {
+  max-width: 100%;
+  padding: 3px 7px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.heir-token-copy {
+  padding: 4px 8px;
+  font-size: 0.75rem;
+  min-height: 28px;
+}
+
+.heir-date-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-sm);
+  border-top: 1px dashed var(--color-border);
+  padding-top: var(--space-sm);
+}
+
+.heir-date-grid > div {
+  min-width: 0;
+}
+
+.heir-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  margin-top: auto;
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--color-border);
+}
+
+.heir-card-actions .btn {
+  min-height: 34px;
+}
+
+.heir-delete-btn {
+  margin-left: auto;
+}
+
+.heir-load-more {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--space-md);
+}
+
+@media (max-width: 640px) {
+  .heir-monitor-heading {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .heir-density-toggle {
+    width: 100%;
+  }
+
+  .heir-density-toggle button {
+    flex: 1;
+  }
+
+  .heir-monitor-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    padding: var(--space-sm) 0;
+    background: var(--color-card-bg);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .heir-stat-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .heir-filter-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .heir-card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .heir-card-grid--compact {
+    gap: 6px;
+  }
+
+  .heir-card {
+    padding: var(--space-md);
+    border-radius: var(--radius-md);
+  }
+
+  .heir-card-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-sm);
+  }
+
+  .heir-card--compact {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .heir-card--compact .heir-card-header {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+
+  .heir-card--compact .heir-card-name {
+    font-size: 0.98rem;
+  }
+
+  .heir-card--compact .heir-compact-meta {
+    padding-top: 2px;
+  }
+
+  .heir-status-pill {
+    align-self: flex-start;
+  }
+
+  .heir-contact-line {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .heir-token-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .heir-date-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .heir-card-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-sm);
+  }
+
+  .heir-card--compact .heir-card-actions {
+    display: flex;
+    justify-content: flex-start;
+    gap: var(--space-xs);
+  }
+
+  .heir-card-actions .btn {
+    width: 100%;
+    white-space: normal;
+  }
+
+  .heir-card--compact .heir-card-actions .btn {
+    width: auto;
+    white-space: nowrap;
+  }
+
+  .heir-card-actions .btn-primary,
+  .heir-delete-btn {
+    grid-column: 1 / -1;
+  }
+
+  .heir-delete-btn {
+    margin-left: 0;
+  }
+
+  .heir-load-more .btn {
+    width: 100%;
+  }
+}
+
 .quick-capture-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: var(--space-sm);
   margin-bottom: var(--space-md);
+}
+
+.inventory-workbench {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1.55fr);
+  gap: var(--space-lg);
+  align-items: start;
+}
+
+.inventory-capture-pane,
+.inventory-management-pane {
+  min-width: 0;
+}
+
+.inventory-capture-pane {
+  position: sticky;
+  top: var(--space-md);
+  max-height: calc(100vh - 2 * var(--space-md));
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.inventory-management-pane {
+  min-height: 0;
+}
+
+.inventory-pane-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-md);
+  margin-bottom: var(--space-sm);
+}
+
+.inventory-pane-heading h3 {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: clamp(1.25rem, 1.8vw, 1.65rem);
+  line-height: 1.1;
+}
+
+.inventory-pane-heading .allocation-eyebrow {
+  margin-bottom: 2px;
+}
+
+.inventory-pane-count,
+.inventory-pane-stats span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-card-bg);
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.inventory-pane-stats {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-xs);
+}
+
+.inventory-room-card,
+.inventory-quick-capture-card,
+.inventory-recent-reel {
+  margin-bottom: var(--space-md) !important;
+}
+
+.inventory-quick-capture-card {
+  container-type: inline-size;
+}
+
+.inventory-quick-capture-card > h3,
+.inventory-recent-reel > h3 {
+  font-size: 1.15rem !important;
+}
+
+.inventory-quick-capture-card .quick-capture-grid {
+  grid-template-columns: repeat(auto-fill, minmax(142px, 1fr));
+}
+
+.inventory-management-pane > .archival-card {
+  margin-bottom: var(--space-md) !important;
+}
+
+@media (max-width: 1040px) {
+  .inventory-workbench {
+    grid-template-columns: 1fr;
+  }
+
+  .inventory-capture-pane {
+    position: static;
+    max-height: none;
+    overflow: visible;
+    padding-right: 0;
+  }
+}
+
+@media (max-width: 720px) {
+  .inventory-workbench {
+    gap: var(--space-md);
+  }
+
+  .inventory-pane-heading {
+    align-items: flex-start;
+    margin-bottom: var(--space-xs);
+  }
+
+  .inventory-pane-heading--catalog {
+    flex-direction: column;
+  }
+
+  .inventory-pane-heading h3 {
+    font-size: 1.35rem;
+  }
+
+  .inventory-pane-stats {
+    justify-content: flex-start;
+  }
+
+  .inventory-room-card,
+  .inventory-quick-capture-card,
+  .inventory-recent-reel {
+    padding: var(--space-sm) !important;
+  }
+
+  .inventory-room-card {
+    background: var(--color-card-bg) !important;
+  }
+
+  .inventory-room-card > div {
+    display: grid !important;
+    grid-template-columns: 1fr;
+    gap: var(--space-xs) !important;
+  }
+
+  .inventory-room-card select,
+  .inventory-room-card input {
+    max-width: none !important;
+    width: 100%;
+  }
+
+  .inventory-quick-capture-card > h3 {
+    margin-bottom: 2px !important;
+  }
+
+  .inventory-quick-capture-card > p {
+    margin-bottom: var(--space-sm) !important;
+  }
+
+  .inventory-quick-capture-card .quick-capture-grid {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(168px, 74vw);
+    grid-template-columns: none;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scroll-snap-type: x proximity;
+    padding-bottom: var(--space-xs);
+    margin-left: calc(-1 * var(--space-sm));
+    margin-right: calc(-1 * var(--space-sm));
+    padding-left: var(--space-sm);
+    padding-right: var(--space-sm);
+  }
+
+  .inventory-quick-capture-card .quick-capture-grid > * {
+    scroll-snap-align: start;
+  }
+
+  .photo-label-help__panel {
+    max-height: 280px;
+    overflow: auto;
+  }
+
+  .category-manager-trigger {
+    padding: var(--space-sm);
+    font-size: 1rem;
+  }
+
+  .category-manager-content {
+    padding: var(--space-sm);
+  }
+
+  .category-manager-content form {
+    display: grid !important;
+    grid-template-columns: 1fr;
+  }
+
+  .category-manager-content input {
+    max-width: none !important;
+  }
+
+  .view-toggle-container {
+    width: 100%;
+  }
+
+  .view-toggle-btn {
+    flex: 1;
+    justify-content: center;
+    padding-left: 8px;
+    padding-right: 8px;
+  }
 }
 
 .photo-label-help {
@@ -691,12 +1735,155 @@ p {
     font-size: 15px;
   }
 
+  .admin-dashboard-container {
+    padding: var(--space-md) !important;
+    overflow-x: hidden;
+  }
+
   .archival-card {
     padding: var(--space-md);
   }
 
   h1 { font-size: 1.5rem; }
   h2 { font-size: 1.25rem; }
+
+  .admin-console-header {
+    grid-template-columns: 1fr;
+    gap: var(--space-sm);
+  }
+
+  .admin-console-actions {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: var(--space-sm);
+  }
+
+  .admin-console-actions .btn {
+    width: 100%;
+    padding-inline: 10px;
+    white-space: normal;
+  }
+
+  .admin-tab-nav {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0;
+  }
+
+  .admin-tab-nav .btn-tab {
+    min-width: 0;
+    padding: 8px 4px;
+    font-size: 0.813rem;
+    line-height: 1.2;
+    white-space: normal;
+    text-align: center;
+  }
+
+  .admin-session-row {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-session-open-btn {
+    width: 100%;
+  }
+
+  .admin-session-index-header {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-session-summary {
+    justify-content: flex-start;
+    max-width: none;
+  }
+
+  .admin-session-toolbar {
+    grid-template-columns: 1fr;
+    padding: var(--space-xs);
+  }
+
+  .admin-session-view-toggle {
+    min-height: 38px;
+  }
+
+  .admin-session-collection--comfortable {
+    grid-template-columns: 1fr;
+  }
+
+
+
+  .admin-session-row--compact {
+    grid-template-columns: 1fr;
+    border: none;
+    border-bottom: 1px solid var(--color-border);
+    border-radius: 0;
+    padding: 12px 4px;
+    background: transparent;
+  }
+  
+  .admin-session-row--compact:last-child {
+    border-bottom: none;
+  }
+
+  .admin-session-row--compact .admin-session-open-btn {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas: "title status date";
+    column-gap: 6px;
+  }
+
+  .admin-session-row--compact .admin-session-title {
+    grid-area: title;
+    font-size: 0.9rem;
+  }
+
+  .admin-session-row--compact .admin-session-status {
+    grid-area: status;
+    font-size: 0.7rem;
+  }
+
+  .admin-session-row--compact .admin-session-date {
+    grid-area: date;
+    justify-self: end;
+    min-height: 0;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .admin-session-row-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: var(--space-xs);
+  }
+
+  .admin-session-pagination {
+    justify-content: space-between;
+  }
+
+  .admin-subtab-nav {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .admin-subtab-nav .btn-tab {
+    min-height: 34px;
+    padding: 6px 5px;
+    font-size: 0.75rem;
+    line-height: 1.15;
+  }
+
+  .admin-announcement-card {
+    padding: var(--space-md);
+  }
+
+  .announcement-actions {
+    grid-template-columns: 1fr;
+    justify-content: stretch;
+  }
+
+  .announcement-actions .btn {
+    width: 100%;
+  }
 
   .photo-label-help__panel dl {
     grid-template-columns: 1fr;
@@ -1008,7 +2195,7 @@ p {
 
 /* ── Category Manager Accordion ────────────────────────────────────────── */
 .category-manager-accordion {
-  margin-bottom: var(--space-lg);
+  margin-bottom: var(--space-md);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background-color: var(--color-card-bg);
@@ -1063,6 +2250,53 @@ p {
 @keyframes cmFadeIn {
   from { opacity: 0; transform: translateY(-4px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+.collapsible-section {
+  margin-bottom: var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-card-bg);
+  box-shadow: var(--shadow-card);
+  transition: var(--transition-base);
+}
+
+.collapsible-section:hover {
+  border-color: var(--color-primary);
+  box-shadow: var(--shadow-card-hover);
+}
+
+.collapsible-trigger {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-md);
+  background: none;
+  border: none;
+  font-family: var(--font-serif);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-text);
+  cursor: pointer;
+  text-align: left;
+  outline: none;
+}
+
+.collapsible-trigger span:last-child {
+  font-size: 0.8rem;
+  transition: transform 0.2s ease-in-out;
+}
+
+.collapsible-trigger[aria-expanded="true"] span:last-child {
+  transform: rotate(180deg);
+}
+
+.collapsible-content {
+  padding: 0 var(--space-md) var(--space-md) var(--space-md);
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-md);
+  animation: cmFadeIn 0.2s ease-out;
 }
 
 /* ── View Toggle / Segmented Control ───────────────────────────────────── */
@@ -1207,5 +2441,3 @@ p {
   color: white;
   border-color: var(--color-primary);
 }
-
-

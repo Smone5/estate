@@ -76,6 +76,44 @@ Acceptance:
 * Heir logs in, hard-refreshes `/dashboard`, and remains on the dashboard if the cookie is valid.
 * With an expired/missing cookie, heir sees a clear password sign-in path.
 
+### UAT-04a Admin Browser Refresh & Session Restoration
+
+Hard refresh must not log out an authenticated Admin.
+
+* The frontend must rehydrate Admin state from the HTTP-only cookie using `/api/auth/me` before showing first-boot setup or the Admin login form.
+* `/admin` must show a restoring state while cookie rehydration is in progress.
+* The restore path must only accept `role == 'ADMIN'`; a valid Heir cookie must not open the Admin console.
+* If the cookie is expired/missing, `/admin` may show the Admin login form or first-boot setup wizard according to `/api/setup/status`.
+* Admin logout must call `POST /api/auth/logout`, clear the server cookie, clear local Admin session state, and remove any saved active Admin console session selection.
+
+Acceptance:
+
+* Admin logs in, hard-refreshes `/admin`, and remains in the Admin console if the cookie is valid.
+* Hard-refreshing while viewing an estate session preserves the Admin authentication state and reloads the session list without forcing login.
+* With an expired/missing cookie, Admin sees the normal login/setup gate.
+* Clicking Admin logout clears the cookie and the saved active Admin console session.
+
+### UAT-04b Optional Federated Login Journey
+
+Federated login must be optional, standards-based, and compatible with open-source self-hosting.
+
+* The first Admin account must always be creatable with a local password before SSO is enabled.
+* Admin may configure a generic OIDC provider after local setup.
+* Recommended self-hosted brokers are Keycloak or Authentik; Google, Apple, Facebook, Microsoft, and other providers should be connected through the broker or generic OIDC configuration.
+* Admin SSO linking must require an already-authenticated Admin session.
+* Heir SSO linking must be unavailable during invite acceptance and `PROFILE_HOLD`.
+* Heir SSO linking must become available only after Executor identity approval (`identity_verified = true`, status `'ACTIVE'` or later).
+* Matching provider email alone is not enough to claim an estate invite or existing account.
+* Identity links must use stable `issuer + subject` identifiers, not email as the primary key.
+* The system must retain at least one usable Admin login method before local password login can be disabled.
+
+Acceptance:
+
+* Admin configures OIDC, links their own external identity, logs out, and logs back in with SSO.
+* Heir opens an invite, completes privacy/age/legal profile gates, and lands in `PROFILE_HOLD` without any external identity link.
+* After Executor approval, the Heir links SSO from the authenticated dashboard/settings flow, logs out, and logs back in with SSO.
+* A different Google/Apple/Facebook account with the same email display but different `issuer + subject` cannot claim an invite.
+
 ### UAT-05 Government ID Upload State
 
 After an heir uploads an ID, the heir page must no longer ask for another ID unless the Executor rejects it.
@@ -154,9 +192,10 @@ The script must cover:
 10. inspect/approve ID as Admin
 11. verify heir dashboard unlocks
 12. hard-refresh heir dashboard
-13. expire/ignore invite and log in via `/login`
-14. create at least one asset and publish it
-15. verify backup download/restore messaging
+13. hard-refresh Admin dashboard
+14. expire/ignore invite and log in via `/login`
+15. create at least one asset and publish it
+16. verify backup download/restore messaging
 
 Acceptance:
 
@@ -178,6 +217,8 @@ Frontend tests must cover:
 * heir password login page
 * invite onboarding password fields
 * dashboard cookie rehydration
+* Admin dashboard cookie rehydration after hard refresh
+* Admin logout clears the HTTP-only cookie and local Admin console selection
 * ID submitted/waiting state after upload and after hard refresh
 * Admin ID review visibility
 * manual invite copy flow

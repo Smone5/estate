@@ -208,6 +208,20 @@ Stores login credentials, session associations, and single-use invitation tokens
 *   `draft_version`: `INTEGER` (Not Null, Default: `0`). Incremental client-side version number checked upon saving draft points to prevent out-of-order race condition updates.
 *   `status`: `VARCHAR(30)` (Not Null, Default: `'PENDING'`, Checked Constraint: `status IN ('PENDING', 'PROFILE_HOLD', 'ACTIVE', 'SUBMITTED', 'ABSTAINED', 'EXPIRED_NON_PARTICIPATING')`). Indicates the participation lifecycle state of the user. PROFILE_HOLD blocks submissions while legal details are under Executor review.
 *   `created_at`: `TIMESTAMP` (Not Null, Default: `timezone('utc'::text, now())`). Records the exact UTC timestamp when the user profile was created.
+
+### 2.2a `external_identities` Table (Future OIDC/SSO)
+Stores optional federated identity links for Admins and Heirs.
+*   `id`: `UUID4` (Primary Key, default: `gen_random_uuid()`).
+*   `user_id`: `UUID4` (Foreign Key $\rightarrow$ `users.id`, ON DELETE CASCADE, Not Null).
+*   `issuer`: `VARCHAR(255)` (Not Null). OIDC issuer URL.
+*   `subject`: `VARCHAR(255)` (Not Null). Stable provider subject identifier from the ID token.
+*   `provider_label`: `VARCHAR(100)` (Nullable). Human-readable label such as `Keycloak`, `Authentik`, `Google`, or `Apple`.
+*   `email`: `VARCHAR(255)` (Nullable). Provider email for display/audit only.
+*   `email_verified`: `BOOLEAN` (Not Null, Default: `false`).
+*   `linked_at`: `TIMESTAMP` (Not Null, Default: `timezone('utc'::text, now())`).
+*   `last_login_at`: `TIMESTAMP` (Nullable).
+*   **Uniqueness**: `UNIQUE(issuer, subject)` prevents one external identity from being linked to multiple local users.
+*   **Security Rule**: Email must never be used as the primary federated identity key; it is mutable and provider-specific.
 *   `invitation_dispatched_at`: `TIMESTAMP` (Nullable). Records the exact UTC timestamp when the invitation email was successfully dispatched.
 *   `waiver_email_failed`: `BOOLEAN` (Not Null, Default: `false`). Set to `true` if the E-SIGN/UETA waiver confirmation email fails to deliver, triggering a warning in the Admin console. Retained as-is (non-PII boolean flag) during soft anonymization.
 
@@ -326,6 +340,7 @@ Stores administrative application-wide variables (LLM configurations, email serv
 1.  **B-Tree Indexes**:
     *   Unique Index on `users(session_id, username)`.
     *   Unique Index on `users(invite_token)` where token is not null.
+    *   Unique Index on `external_identities(issuer, subject)`.
     *   Unique Index on `categories(session_id, name)`.
     *   Foreign Key Indexes: `users(session_id)`, `assets(session_id)`, `assets(allocated_to_id)`, `valuations(asset_id)`, `valuations(heir_id)`, `support_requests(session_id)`, `support_requests(heir_id)`, `support_requests(responded_by_id)`, `audit_logs(session_id)`, `chat_messages(session_id)`, `chat_messages(heir_id)`, `asset_images(asset_id)`, `categories(session_id)`.
 2.  **pgvector Vector Similarity Index**:

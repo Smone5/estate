@@ -10,11 +10,22 @@ This specification defines the test suites, verification assertions, and mock bo
 *   **Test Admin Hashing & Login**:
     *   Verify that seeding the admin account hashes passwords using Argon2 (`argon2-cffi`).
     *   Verify `POST /api/auth/login` returns a secure, HTTP-only JWT cookie on success and throws `401 Unauthorized` on incorrect credentials.
+    *   Verify `GET /api/auth/me` restores a valid Admin cookie with `role = 'ADMIN'`, returns `session_id = null` or the encoded Admin session scope, and refreshes the cookie according to the configured session lifetime.
+    *   Verify `GET /api/auth/me` restores a valid Heir cookie with `role = 'HEIR'` and the correct `session_id`, and rejects expired, malformed, or revoked cookies with `401 Unauthorized`.
+    *   Verify role boundaries during restoration: a Heir cookie must not satisfy Admin-only authorization, and an Admin cookie must not satisfy Heir-only profile/session endpoints.
+    *   Verify `POST /api/auth/logout` clears the HTTP-only cookie idempotently and prevents subsequent `GET /api/auth/me` restoration.
 *   **Test Invite Consent & Onboarding Bootstrapping (BUG-61)**:
-    *   Verify `POST /api/invite/verify` fails with `400 Bad Request` if `consent_accepted` or `age_verified` is `false`.
+    *   Verify `POST /api/invite/verify` fails with `400 Bad Request` if `consent_accepted`, `privacy_notice_acknowledged`, or `age_verified` is `false`.
     *   Verify `POST /api/invite/verify` fails with `400 Bad Request` if the invitation token's `invite_token_expires_at` is in the past, preventing expired link logins.
     *   Verify that if flags are `true` and the token is not expired, database updates `invite_token_used = True`, sets consent fields, records `consent_timestamp`, updates profile details from the request payload (`legal_first_name`, `legal_middle_name`, `legal_last_name`, `relationship_to_decedent`, `date_of_birth`), transitions the Heir's status to `'PROFILE_HOLD'`, and issues the HTTP-only JWT cookie.
     *   Verify that unauthenticated requests to `PUT /api/heirs/me/profile` and `POST /api/heirs/me/upload-id` fail with `401 Unauthorized`.
+*   **Future Test OIDC / Federated Identity Security**:
+    *   Verify OIDC login uses Authorization Code Flow with PKCE, validates `state`, `nonce`, issuer, audience, expiry, and signature, and rejects invalid callback parameters.
+    *   Verify external identities are linked and resolved by `issuer + subject`, not email alone.
+    *   Verify Admin SSO linking requires an already-authenticated Admin session and cannot remove the last usable Admin login method.
+    *   Verify Heir SSO linking is unavailable during invite acceptance and `PROFILE_HOLD`.
+    *   Verify Heir SSO linking succeeds only after Executor identity approval (`identity_verified = true`, status `'ACTIVE'` or later).
+    *   Verify a provider account with a matching email but different `issuer + subject` cannot claim an invite or existing account.
 *   **Test GDPR Erasure (Soft Anonymization & Checkpointer Cleanup)**:
     *   Verify `DELETE /api/heirs/me` performs soft anonymization for both submitted and unsubmitted heirs (preserving the user row with display name anonymized to `"Anonymized Beneficiary [UUID]"`, other PII columns set to `NULL`, and deleting all private chat messages).
     *   If the Heir is unsubmitted (`is_submitted = False`), verify the system deletes their default valuations and sets their status to `'ABSTAINED'`.
@@ -180,6 +191,21 @@ These tests verify the state transition path of the compiled state machine:
 *   **Verify Session Resumption Actions**:
     *   Assert that `checkInviteStatus` calls `GET /api/invite/status/{token}` and returns the usage status and username.
     *   Assert that `resumeSession` calls `POST /api/invite/login`, sets `isAuthenticated = true`, triggers `loadProfile`, and redirects to `/dashboard`.
+*   **Verify Browser Refresh Restoration Actions**:
+    *   Assert that loading `/admin` with empty Zustand state first renders a restoring state, calls `GET /api/auth/me`, restores `isAuthenticated = true` and `userRole = 'ADMIN'` for a valid Admin cookie, reloads the Admin session list, and does not show the login form.
+    *   Assert that loading `/admin` with a valid Heir cookie does not render Admin controls and falls through to the Admin login/setup gate.
+    *   Assert that loading `/dashboard` with empty Zustand state restores a valid Heir cookie by calling `GET /api/auth/me` followed by `GET /api/heirs/me`, then renders the dashboard.
+    *   Assert that Admin logout calls `POST /api/auth/logout`, clears local auth/session state, and removes the saved active Admin console session selection.
+*   **Verify Scalable Admin Session Index**:
+    *   Seed at least 25 sessions in frontend tests and at least 100 sessions in an E2E/mobile visual test fixture.
+    *   Assert that `/admin` renders search, status filter, sort, card/list density controls, and pagination or incremental loading.
+    *   Assert that search narrows by estate title/status/id without requiring a full page reload.
+    *   Assert that status filtering and sort controls can be combined, and that changing either resets the current page/window to the first result set.
+    *   Assert that mobile-width rendering avoids horizontal scrolling, keeps the primary open-session action obvious, and does not repeat oversized full-width destructive buttons for every session row.
+*   **Future Verify Federated Login Actions**:
+    *   Assert that Admin login renders "Continue with SSO" only when OIDC is enabled.
+    *   Assert that invite onboarding does not render durable SSO-linking controls before Executor identity approval.
+    *   Assert that the authenticated post-approval Heir settings/dashboard flow can start OIDC linking and returns to the same verified Heir account after callback.
 
 ### 3.2 UI Rendering Guards
 *   **Test Component Disabling**:

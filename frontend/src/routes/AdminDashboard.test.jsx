@@ -326,6 +326,62 @@ describe('AdminDashboard', () => {
     expect(screen.getByText('Margaret Johnson Keepsakes')).toBeInTheDocument();
   });
 
+  it('supports searching, filtering, and paginating the session index', async () => {
+    mockStoreState.isAuthenticated = true;
+    mockStoreState.userRole = 'ADMIN';
+    mockStoreState.session_id = null;
+
+    const sessionRows = Array.from({ length: 9 }, (_, index) => ({
+      id: `session-${index + 1}`,
+      title: index === 0 ? 'Alpha Estate' : `Estate ${index + 1}`,
+      status: index % 2 === 0 ? 'SETUP' : 'FINALIZED',
+      is_deadlocked: false,
+      is_paused: false,
+      created_at: `2026-06-${String(index + 1).padStart(2, '0')}T12:00:00Z`,
+    }));
+
+    globalThis.fetch = vi.fn((url) => {
+      if (url === '/api/sessions') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => sessionRows,
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+
+    render(<AdminDashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Estate 9')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Alpha Estate')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Next'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Alpha Estate')).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByTestId('session-search-input'), {
+      target: { value: 'Estate 8' },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Estate 8')).toBeInTheDocument();
+      expect(screen.queryByText('Alpha Estate')).not.toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByTestId('session-status-filter'), {
+      target: { value: 'SETUP' },
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText('Estate 8')).not.toBeInTheDocument();
+      expect(screen.getByText('No matching sessions')).toBeInTheDocument();
+    });
+  });
+
   it('calls POST /api/auth/logout and clears session state on logout', async () => {
     mockStoreState.isAuthenticated = true;
     mockStoreState.userRole = 'ADMIN';
