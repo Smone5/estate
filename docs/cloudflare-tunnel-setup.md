@@ -26,11 +26,15 @@ It's free for this use case (Cloudflare's tunnel product has a generous free tie
 3. Click **Create a tunnel**.
 4. Choose connector type **Cloudflared**.
 5. Give it a name, e.g. `estate-steward-dev`.
-6. On the "Install and run a connector" step, Cloudflare shows you a command containing a long token, e.g.:
+6. On the **"Install and run a connector"** step, Cloudflare shows a "Setup Environment" picker labeled **"Choose your operating system to get installation instructions"** with an **Operating System** dropdown (macOS, Windows, Linux, Docker).
+
+   **Select `Docker`** — regardless of what OS your machine actually runs. This repo already runs `cloudflared` for you inside the `cloudflared` service in [docker-compose.yml](../docker-compose.yml); picking macOS/Windows/Linux here would show you a native-binary install command you don't need and shouldn't run. The Docker option is the only one that produces a `docker run cloudflare/cloudflared:latest tunnel --no-autoupdate run --token ...` command — you only need the token out of it, not the command itself.
+
+7. Cloudflare shows a command containing a long token, e.g.:
    ```
-   cloudflared tunnel --no-autoupdate run --token eyJhIjoiMD...
+   docker run cloudflare/cloudflared:latest tunnel --no-autoupdate run --token eyJhIjoiMD...
    ```
-   You don't need to run this command yourself — `docker-compose.yml` already runs it inside the `cloudflared` service. **Copy just the token value** (the long string after `--token`).
+   Don't run this — **copy just the token value** (the long string after `--token`). The repo's own `docker-compose.yml` already has a `cloudflared` service configured to use this token from `.env`.
 
 ### 2. Add a public hostname
 
