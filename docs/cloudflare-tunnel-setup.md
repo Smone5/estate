@@ -13,9 +13,40 @@ It's free for this use case (Cloudflare's tunnel product has a generous free tie
 ## Prerequisites
 
 - A free [Cloudflare account](https://dash.cloudflare.com/sign-up).
-- **A domain added to that Cloudflare account**, with Cloudflare set as its DNS provider. If you don't already own a domain:
-  - Cloudflare Registrar, Namecheap, Porkbun, etc. all sell domains cheaply (often under $10/yr) — any of these work as long as you add the domain to Cloudflare afterward and update its nameservers.
-  - You do **not** need a domain dedicated to this project — a subdomain like `estate-dev.your-existing-domain.com` is fine and won't affect anything else on that domain.
+- A domain added to that Cloudflare account, with Cloudflare set as its DNS provider — **or** the no-domain alternative in Option C below.
+
+You have three options here, depending on what you already have:
+
+### Option A — You already own a domain
+
+You can use a domain you already own, even if it's currently managed elsewhere (GoDaddy, Namecheap, Google Domains, etc.). You do **not** need a domain dedicated to this project — a subdomain like `estate-dev.your-existing-domain.com` is fine and won't affect anything else on that domain.
+
+1. Go to the main Cloudflare dashboard: https://dash.cloudflare.com (this is different from the Zero Trust dashboard at `one.dash.cloudflare.com` used later for the tunnel itself).
+2. Click **Add a domain** and enter your domain.
+3. Cloudflare gives you two nameservers. Log into your current registrar (wherever you bought the domain) and update its nameserver records to point to those two.
+4. Wait for the zone to show **Active** in Cloudflare — typically a few minutes, occasionally a few hours depending on DNS propagation.
+5. Continue to [Step 1](#1-create-the-tunnel) below. The domain will now appear in the dropdown when you add a route.
+
+### Option B — You don't have a domain yet
+
+Any cheap registrar works — you don't need anything fancy:
+
+- [Cloudflare Registrar](https://www.cloudflare.com/products/registrar/) — domains are sold at cost (no markup), and since you're buying through Cloudflare, the domain is automatically added to your account with no nameserver step needed.
+- Namecheap, Porkbun, Google Domains, etc. — buy a domain there (often under $10/yr for a `.com`, less for other TLDs), then follow Option A above to add it to Cloudflare and update nameservers.
+
+Either way, once the domain shows **Active** in Cloudflare, continue to [Step 1](#1-create-the-tunnel) below.
+
+### Option C — Skip the domain entirely (Quick Tunnels)
+
+If you just want to try mobile testing once without any domain setup, Cloudflare's **Quick Tunnels** give you a free, temporary `https://<random-name>.trycloudflare.com` URL with zero account configuration:
+
+```bash
+docker run --rm cloudflare/cloudflared:latest tunnel --url http://host.docker.internal:80
+```
+
+(On Linux, replace `host.docker.internal` with your host's LAN IP, since that Docker networking alias is a Mac/Windows convenience.)
+
+This prints a random `trycloudflare.com` URL in the logs — use that as `PUBLIC_BASE_URL` in `.env` for that session. The tradeoffs: the URL changes every time you restart the container, there's no named tunnel or token, and it doesn't use the `cloudflared` service already wired up in [docker-compose.yml](../docker-compose.yml) — so you'll need to manage it manually rather than through `install_on_phone.sh`. Fine for a one-off test; switch to Option A/B for anything ongoing.
 
 ## Step-by-step
 
@@ -56,18 +87,25 @@ Go back to the Cloudflare Zero Trust dashboard (**Networks → Tunnels**) and re
 
 **Don't move on to the next step until it shows Connected** — Cloudflare's UI hides or rejects the "Add a public hostname" step for a tunnel it can't see online.
 
-### 4. Add a public hostname
+### 4. Add a public hostname (Cloudflare may call this a "Route")
 
-Now that the tunnel shows Connected, go to its **Public Hostname** tab:
+Now that the tunnel shows **Healthy/Connected** in the Tunnels list, **click the tunnel's name** (e.g. `estate-steward-dev`) to open its configuration page — the Tunnels list itself doesn't have this option, only the individual tunnel's page does.
 
-1. Click **Add a public hostname**.
+> Cloudflare's dashboard has changed this UI more than once. Depending on when you're reading this, you may see either:
+> - Tabs **Overview / Public Hostname / Private Networks / Access / Edit** — use the **Public Hostname** tab, or
+> - Just **Overview / Routes** — use the **Routes** tab (or the **"+ Add route"** button shown directly in the Routes panel on the Overview page).
+>
+> Either path leads to the same form, asking for the same fields below — Cloudflare just renamed "public hostname" to "route" in newer versions.
+
+1. Click **Public Hostname** (or **Routes** → **Add route**).
+   - If a dialog titled **"Add a route"** appears asking you to pick a route type (Published application / Private hostname / Private CIDR / Workers VPC), choose **Published application**. The other three are for Zero Trust private-network access and won't expose the app to your phone over the internet.
 2. **Subdomain:** pick something like `estate-dev`.
 3. **Domain:** select the domain you added to your Cloudflare account.
-4. **Service type:** `HTTP`.
-5. **URL:** `localhost:80`
+4. **Path:** leave blank (matches all paths).
+5. **Service URL** (older UI may split this into separate "Service type" + "URL" fields — same idea either way): `http://localhost:80`
 
-   This is `localhost`, not `nginx`, because the `cloudflared` container in this repo runs with `network_mode: host` ([docker-compose.yml](../docker-compose.yml)) — it shares your machine's network namespace directly rather than Docker's internal bridge network, so it reaches the `nginx` container the same way your browser does: via `localhost:80`, which Docker has published to your host machine.
-6. Save.
+   Use `http://`, not `https://` — the form's placeholder text (`https://localhost:8080`) is just an example, not a requirement. Use `localhost`, not `nginx`, because the `cloudflared` container in this repo runs with `network_mode: host` ([docker-compose.yml](../docker-compose.yml)) — it shares your machine's network namespace directly rather than Docker's internal bridge network, so it reaches the `nginx` container the same way your browser does: via `localhost:80`, which Docker has published to your host machine. Cloudflare's edge handles the HTTPS encryption on the public side; the local target stays plain HTTP.
+6. Click **Add route** (or **Save**, depending on the UI version).
 
 Your full hostname is now something like `https://estate-dev.yourdomain.com`, already routed to your local stack.
 
@@ -110,6 +148,9 @@ docker compose --profile tunnel stop cloudflared
 The tunnel only runs when explicitly started via the `tunnel` profile — `docker compose up` without `--profile tunnel` (or without going through `install_on_phone.sh`, which adds the flag automatically when a token is present) will not start it.
 
 ## Troubleshooting
+
+**The Domain dropdown is empty when adding a route**
+Your Cloudflare account has no domain (zone) added yet. The "Add published application" form can't offer a domain you haven't added. See [Prerequisites](#prerequisites) above — Option A if you own a domain, Option B if you need to buy one, or Option C to skip domains entirely with a Quick Tunnel. Once a domain shows **Active** under the main Cloudflare dashboard's domain list, it'll appear in this dropdown.
 
 **"CLOUDFLARE_TUNNEL_TOKEN is set but PUBLIC_BASE_URL is blank in .env"**
 The install script requires both values together — it can start the tunnel but can't print a useful link without knowing the hostname you configured in step 2. Add `PUBLIC_BASE_URL` and re-run.
