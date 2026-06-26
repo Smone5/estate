@@ -36,9 +36,29 @@ It's free for this use case (Cloudflare's tunnel product has a generous free tie
    ```
    Don't run this — **copy just the token value** (the long string after `--token`). The repo's own `docker-compose.yml` already has a `cloudflared` service configured to use this token from `.env`.
 
-### 2. Add a public hostname
+### 2. Put the token in `.env` and start the connector
 
-Still in the tunnel's configuration (Public Hostname tab):
+The Cloudflare dashboard won't let you add a public hostname until it sees your connector actually online, so the token has to go into `.env` and the `cloudflared` container has to be running *before* you go back to the dashboard.
+
+1. Copy `.env.example` to `.env` if you haven't already: `cp .env.example .env`.
+2. Add **only** the token for now (leave `PUBLIC_BASE_URL` blank — you don't have a hostname yet):
+   ```bash
+   CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoiMD...
+   ```
+3. Start just the tunnel connector (not the full app stack yet):
+   ```bash
+   docker compose --profile tunnel up -d cloudflared
+   ```
+
+### 3. Confirm the tunnel is connected
+
+Go back to the Cloudflare Zero Trust dashboard (**Networks → Tunnels**) and refresh. Your tunnel should now show status **Connected / Healthy** (it can take 10–30 seconds). If it still shows "Inactive" after a minute, check `docker compose logs cloudflared` — see [Troubleshooting](#troubleshooting) below.
+
+**Don't move on to the next step until it shows Connected** — Cloudflare's UI hides or rejects the "Add a public hostname" step for a tunnel it can't see online.
+
+### 4. Add a public hostname
+
+Now that the tunnel shows Connected, go to its **Public Hostname** tab:
 
 1. Click **Add a public hostname**.
 2. **Subdomain:** pick something like `estate-dev`.
@@ -51,31 +71,31 @@ Still in the tunnel's configuration (Public Hostname tab):
 
 Your full hostname is now something like `https://estate-dev.yourdomain.com`, already routed to your local stack.
 
-### 3. Configure `.env`
+### 5. Add `PUBLIC_BASE_URL` to `.env`
 
-Open your `.env` (copy from `.env.example` first if you haven't already: `cp .env.example .env`) and set:
+Now that you have the hostname, go back to `.env` and add the second value:
 
 ```bash
-CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoiMD...    # the token from step 1
-PUBLIC_BASE_URL=https://estate-dev.yourdomain.com   # the hostname from step 2
+CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoiMD...               # already set in step 2
+PUBLIC_BASE_URL=https://estate-dev.yourdomain.com   # the hostname from step 4
 ```
 
 `PUBLIC_BASE_URL` matters beyond just the tunnel — it's used by the backend to build absolute links (e.g. in invite emails), so it should always match whatever URL people actually use to reach the app.
 
-### 4. Launch
+### 6. Launch the full stack
 
 ```bash
 ./scripts/install_on_phone.sh
 ```
 
-With `CLOUDFLARE_TUNNEL_TOKEN` set, the script:
-- Starts the stack as usual.
-- Runs `docker compose --profile tunnel up -d cloudflared`, which brings up the tunnel container using your token.
+With both values set, the script:
+- Builds the frontend and starts the rest of the stack as usual.
+- Runs `docker compose --profile tunnel up -d cloudflared` again (a no-op if it's already running from step 2 — safe either way).
 - Prints `PUBLIC_BASE_URL` as the install link, with a QR code, instead of falling back to a LAN IP.
 
 Your phone can now be on **any** network (cellular data included) — the tunnel handles the connection.
 
-### 5. Verify
+### 7. Verify
 
 - Open the printed `https://` URL in a desktop browser first. You should see the app load normally.
 - Open it on your phone and confirm the address bar shows a padlock / `https://`.
