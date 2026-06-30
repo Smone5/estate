@@ -39,9 +39,17 @@ from .models import User, Session as SessionModel, Asset, Valuation, AuditLog, S
 from .websocket_manager import manager
 from .kokoro_tts import get_kokoro_tts, _KOKORO_AVAILABLE as TTS_AVAILABLE
 from .services.storage import get_storage_driver, preprocess_image
-from .services.llm_provider import get_provider, reset_provider
+from .services.llm_provider import (
+    get_provider,
+    reset_provider,
+    LLMProvider,
+    MODEL_KEY_FAST,
+    MODEL_KEY_VISION,
+    MODEL_KEY_EMBEDDING,
+    MODEL_KEY_PRICING,
+)
 from .services.smtp_service import send_email, send_email_background, Attachment
-from .services.settings_service import get_settings_for_admin, update_settings, load_settings_into_env
+from .services.settings_service import get_settings_for_admin, update_settings, load_settings_into_env, SETTINGS_REGISTRY
 from .notice_log import build_notice_log
 
 logging.basicConfig(
@@ -824,6 +832,11 @@ class AdminSettingsUpdateRequest(BaseModel):
     updates: dict[str, str]
 
 
+class AdminSettingsTestConnectionRequest(BaseModel):
+    purpose: str  # "llm" | "vision" | "embedding"
+    overrides: dict[str, str] = {}
+
+
 @app.get("/api/admin/settings")
 @limiter.limit("30/minute")
 async def admin_get_settings(
@@ -851,6 +864,91 @@ async def admin_update_settings(
     return JSONResponse(content=result)
 
 
+@app.post("/api/admin/settings/test-connection")
+@limiter.limit("10/minute")
+async def admin_test_connection(
+    request: Request,
+    body: AdminSettingsTestConnectionRequest,
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Fire a minimal real call through the LLM provider abstraction to verify
+    a provider/model/credential combination actually works, without requiring
+    the admin to save first. Overrides are applied to os.environ only for the
+    duration of this request, then restored — never persisted.
+
+    Access: Admin only.
+    """
+    import os as _os
+    import io as _io
+    import time as _time
+
+    if body.purpose not in (MODEL_KEY_FAST, MODEL_KEY_VISION, MODEL_KEY_EMBEDDING, MODEL_KEY_PRICING):
+        raise HTTPException(status_code=400, detail="purpose must be 'fast', 'vision', 'embedding', or 'pricing'")
+
+    unknown = [k for k in body.overrides if k not in SETTINGS_REGISTRY or SETTINGS_REGISTRY[k]["section"] != "llm"]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unsupported override key(s): {', '.join(unknown)}")
+
+    saved_env: dict[str, str | None] = {}
+    try:
+        for key, value in body.overrides.items():
+            saved_env[key] = _os.environ.get(key)
+            if value:
+                _os.environ[key] = value
+
+        provider = LLMProvider()
+        start = _time.monotonic()
+        if body.purpose == MODEL_KEY_FAST:
+            result = provider.generate_text(
+                model_key=MODEL_KEY_FAST,
+                system_prompt="You are a connection test. Reply with exactly one word.",
+                user_input="Reply with exactly: OK",
+                temperature=0.0,
+                max_tokens=10,
+                timeout=20,
+            )
+            detail = result.strip()[:200]
+        elif body.purpose == MODEL_KEY_VISION:
+            from PIL import Image
+            buf = _io.BytesIO()
+            Image.new("RGB", (4, 4), color="white").save(buf, format="JPEG")
+            result = provider.generate_vision(
+                model_key=MODEL_KEY_VISION,
+                image_bytes=buf.getvalue(),
+                prompt="Describe this image in a few words.",
+                max_tokens=30,
+                timeout=30,
+            )
+            detail = result.strip()[:200]
+        elif body.purpose == MODEL_KEY_PRICING:
+            from PIL import Image
+            buf = _io.BytesIO()
+            Image.new("RGB", (4, 4), color="white").save(buf, format="JPEG")
+            result = provider.generate_vision(
+                model_key=MODEL_KEY_PRICING,
+                image_bytes=buf.getvalue(),
+                prompt="Describe this image in a few words.",
+                max_tokens=30,
+                timeout=30,
+                provider_override=provider.pricing_provider,
+            )
+            detail = result.strip()[:200]
+        else:
+            vector = provider.get_embeddings(MODEL_KEY_EMBEDDING, "connection test", timeout=20)
+            detail = f"Returned a {len(vector)}-dimension embedding vector."
+        elapsed_ms = int((_time.monotonic() - start) * 1000)
+        return JSONResponse(content={"success": True, "detail": detail, "elapsed_ms": elapsed_ms})
+    except Exception as exc:
+        logger.warning("[AdminSettings] test-connection (%s) failed: %s", body.purpose, exc)
+        return JSONResponse(content={"success": False, "error": str(exc)[:500]})
+    finally:
+        for key, prior_value in saved_env.items():
+            if prior_value is None:
+                _os.environ.pop(key, None)
+            else:
+                _os.environ[key] = prior_value
+
+
 # ---------------------------------------------------------------------------
 # T11 — Schema
 # ---------------------------------------------------------------------------
@@ -863,6 +961,13 @@ class AssetPublishRequest(BaseModel):
     valuation_min: float | None = None
     valuation_max: float | None = None
     valuation_source: str | None = None
+    length_in: float | None = None
+    width_in: float | None = None
+    height_in: float | None = None
+    weight_lb: float | None = None
+    dimension_source: str | None = Field(None, max_length=30)
+    dimension_confidence: str | None = Field(None, max_length=20)
+    dimension_notes: str | None = None
     sentiment_tag: str | None = None
     item_overview: str | None = None
     specifications: str | None = None
@@ -878,12 +983,102 @@ class AssetSaveRequest(BaseModel):
     valuation_min: float | None = None
     valuation_max: float | None = None
     valuation_source: str | None = None
+    length_in: float | None = None
+    width_in: float | None = None
+    height_in: float | None = None
+    weight_lb: float | None = None
+    dimension_source: str | None = Field(None, max_length=30)
+    dimension_confidence: str | None = Field(None, max_length=20)
+    dimension_notes: str | None = None
     sentiment_tag: str | None = None
     item_overview: str | None = None
     specifications: str | None = None
     condition_report: str | None = None
     keywords: str | None = None
     reason: str | None = None
+
+
+def _coerce_optional_float(value) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if numeric >= 0 else None
+
+
+def _normalize_dimension_confidence(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = str(value).strip().title()
+    return normalized if normalized in {"Low", "Medium", "High"} else None
+
+
+def _asset_dimensions_dict(asset: Asset) -> dict:
+    return {
+        "length_in": asset.length_in,
+        "width_in": asset.width_in,
+        "height_in": asset.height_in,
+        "weight_lb": asset.weight_lb,
+        "dimension_source": asset.dimension_source,
+        "dimension_confidence": asset.dimension_confidence,
+        "dimension_notes": asset.dimension_notes,
+    }
+
+
+def _asset_keyword_search_filter(q: str):
+    search_term = f"%{q}%"
+    return or_(
+        Asset.title.ilike(search_term),
+        Asset.description.ilike(search_term),
+        Asset.category.ilike(search_term),
+        Asset.sentiment_tag.ilike(search_term),
+        Asset.description_json.ilike(search_term),
+        Asset.dimension_notes.ilike(search_term),
+    )
+
+
+def _apply_asset_dimensions(asset: Asset, data) -> None:
+    asset.length_in = _coerce_optional_float(getattr(data, "length_in", None))
+    asset.width_in = _coerce_optional_float(getattr(data, "width_in", None))
+    asset.height_in = _coerce_optional_float(getattr(data, "height_in", None))
+    asset.weight_lb = _coerce_optional_float(getattr(data, "weight_lb", None))
+    asset.dimension_source = (getattr(data, "dimension_source", None) or None)
+    asset.dimension_confidence = _normalize_dimension_confidence(getattr(data, "dimension_confidence", None))
+    asset.dimension_notes = (getattr(data, "dimension_notes", None) or None)
+
+
+def _request_field_was_set(data, field_name: str) -> bool:
+    fields_set = getattr(data, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(data, "__fields_set__", set())
+    return field_name in fields_set
+
+
+def _parse_ai_dimensions(payload: dict) -> dict:
+    dimensions = payload.get("dimensions")
+    if not isinstance(dimensions, dict):
+        dimensions = {}
+    source = dimensions.get("source") or payload.get("dimension_source") or "AI Estimate"
+    confidence = (
+        dimensions.get("confidence")
+        or dimensions.get("dimension_confidence")
+        or payload.get("dimension_confidence")
+    )
+    notes = dimensions.get("notes") or dimensions.get("dimension_notes") or payload.get("dimension_notes")
+    return {
+        "length_in": _coerce_optional_float(dimensions.get("length_in") or payload.get("length_in")),
+        "width_in": _coerce_optional_float(dimensions.get("width_in") or payload.get("width_in")),
+        "height_in": _coerce_optional_float(dimensions.get("height_in") or payload.get("height_in")),
+        "weight_lb": _coerce_optional_float(dimensions.get("weight_lb") or payload.get("weight_lb")),
+        "dimension_source": source if any(
+            _coerce_optional_float(dimensions.get(key) or payload.get(key)) is not None
+            for key in ("length_in", "width_in", "height_in", "weight_lb")
+        ) else None,
+        "dimension_confidence": _normalize_dimension_confidence(confidence),
+        "dimension_notes": str(notes).strip() if notes else None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1246,6 +1441,7 @@ async def analyze_staged_asset_background(
                 "  title: Catchy, searchable keyword title (include Brand/Maker, Material, Era if identifiable).\n"
                 "  item_overview: A 2-3 sentence accurate description of what the item is and its aesthetic style.\n"
                 "  specifications: Bullet points detailing estimated materials, color, dimensions (if scale cues exist), and noticeable hardware. Use '- ' prefix per line.\n"
+                "  dimensions: Object for logistics estimates. Include length_in, width_in, height_in, weight_lb as numbers in inches/pounds, plus confidence (Low/Medium/High) and notes. Use null for unknown values; do not invent dimensions without scale cues.\n"
                 "  condition_report: Explicitly state any visible wear, scratches, fading, blemishes, or damage. Be brutally honest for buyers.\n"
                 "  keywords: 5-8 relevant tags for search optimization, comma-separated (e.g. Mid-Century Modern, Vintage, Solid Oak).\n"
                 "  valuation_min: Estimated minimum secondary market value as a float/number (e.g. 50.0). Estimate realistically based on the item.\n"
@@ -1307,6 +1503,7 @@ async def analyze_staged_asset_background(
                 valuation_max = float(valuation_max)
             sentiment_tags = parsed.get("sentiment_tags", "")
             valuation_confidence = parsed.get("valuation_confidence", "Medium")
+            parsed_dimensions = _parse_ai_dimensions(parsed)
         except Exception:
             # Fallback parsing
             import re
@@ -1332,6 +1529,7 @@ async def analyze_staged_asset_background(
             valuation_max = _extract_float("valuation_max", res)
             sentiment_tags = _extract("sentiment_tags", res)
             valuation_confidence = _extract("valuation_confidence", res) or "Medium"
+            parsed_dimensions = _parse_ai_dimensions({})
 
         # 5. Apply to asset fields
         asset.title = title or asset.title or "Staged Item"
@@ -1340,6 +1538,9 @@ async def analyze_staged_asset_background(
         asset.valuation_max = valuation_max if valuation_max is not None else asset.valuation_max
         asset.valuation_source = "AI Valuation Range (Estimate)"
         asset.sentiment_tag = sentiment_tags or asset.sentiment_tag
+        for field_name, value in parsed_dimensions.items():
+            if value is not None:
+                setattr(asset, field_name, value)
 
         # Set review required flag if confidence is low, value is high (>500), or valuation_max is missing
         review_required = False
@@ -1351,6 +1552,7 @@ async def analyze_staged_asset_background(
             "specifications": specifications,
             "condition_report": condition_report,
             "keywords": keywords,
+            "dimensions": parsed_dimensions,
             "review_required": review_required,
             "valuation_confidence": valuation_confidence,
         }
@@ -1383,7 +1585,9 @@ async def analyze_staged_asset_background(
             "valuation_min": asset.valuation_min,
             "valuation_max": asset.valuation_max,
             "valuation_source": asset.valuation_source,
+            **_asset_dimensions_dict(asset),
             "sentiment_tag": asset.sentiment_tag,
+            "ai_feedback": asset.ai_feedback,
             "image_uri": asset.image_uri,
             "audio_uri": asset.audio_uri,
             "status": asset.status,
@@ -1704,6 +1908,19 @@ def _build_asset_embedding_text(asset: Asset) -> str:
         parts.append(f"Valuation: ${asset.valuation_min} to ${asset.valuation_max}")
     if asset.valuation_source:
         parts.append(f"Valuation Source: {asset.valuation_source}")
+    dimension_bits = []
+    if asset.length_in is not None:
+        dimension_bits.append(f"length {asset.length_in} in")
+    if asset.width_in is not None:
+        dimension_bits.append(f"width {asset.width_in} in")
+    if asset.height_in is not None:
+        dimension_bits.append(f"height {asset.height_in} in")
+    if asset.weight_lb is not None:
+        dimension_bits.append(f"weight {asset.weight_lb} lb")
+    if dimension_bits:
+        parts.append(f"Logistics Dimensions: {', '.join(dimension_bits)}")
+    if asset.dimension_notes:
+        parts.append(f"Dimension Notes: {asset.dimension_notes}")
     if asset.sentiment_tag:
         parts.append(f"Tags: {asset.sentiment_tag}")
 
@@ -1721,6 +1938,8 @@ def _build_asset_embedding_text(asset: Asset) -> str:
                     parts.append(f"Condition: {djson['condition_report']}")
                 if djson.get("keywords"):
                     parts.append(f"Keywords: {djson['keywords']}")
+                if djson.get("dimensions"):
+                    parts.append(f"Dimensions: {djson['dimensions']}")
         except Exception:
             pass
 
@@ -1816,6 +2035,7 @@ async def asset_publish(
     asset.valuation_min = body.valuation_min
     asset.valuation_max = body.valuation_max
     asset.valuation_source = body.valuation_source
+    _apply_asset_dimensions(asset, body)
     asset.sentiment_tag = body.sentiment_tag
 
     # Keep description_json fields synchronized and save edits
@@ -1830,6 +2050,7 @@ async def asset_publish(
 
     djson["item_overview"] = body.description
     djson["specifications"] = body.specifications if body.specifications is not None else djson.get("specifications", "")
+    djson["dimensions"] = _asset_dimensions_dict(asset)
     djson["condition_report"] = body.condition_report if body.condition_report is not None else djson.get("condition_report", "")
     djson["keywords"] = body.keywords if body.keywords is not None else djson.get("keywords", "")
 
@@ -1956,6 +2177,26 @@ async def save_asset(
     check_diff("valuation_min", body.valuation_min, asset.valuation_min, is_major_field=True)
     check_diff("valuation_max", body.valuation_max, asset.valuation_max, is_major_field=True)
     check_diff("valuation_source", body.valuation_source, asset.valuation_source, is_major_field=False)
+    for field_name in (
+        "length_in",
+        "width_in",
+        "height_in",
+        "weight_lb",
+        "dimension_source",
+        "dimension_confidence",
+        "dimension_notes",
+    ):
+        if _request_field_was_set(body, field_name):
+            new_value = getattr(body, field_name)
+            if field_name in {"length_in", "width_in", "height_in", "weight_lb"}:
+                new_value = _coerce_optional_float(new_value)
+            elif field_name == "dimension_confidence":
+                new_value = _normalize_dimension_confidence(new_value)
+            else:
+                new_value = new_value or None
+            old_value = getattr(asset, field_name)
+            if new_value != old_value:
+                changes[field_name] = {"old": old_value, "new": new_value}
     check_diff("sentiment_tag", body.sentiment_tag, asset.sentiment_tag, is_major_field=False)
 
     import json as json_mod
@@ -1992,12 +2233,29 @@ async def save_asset(
             asset.valuation_max = body.valuation_max
         if body.valuation_source is not None:
             asset.valuation_source = body.valuation_source
+        for field_name in (
+            "length_in",
+            "width_in",
+            "height_in",
+            "weight_lb",
+            "dimension_source",
+            "dimension_confidence",
+            "dimension_notes",
+        ):
+            if _request_field_was_set(body, field_name):
+                if field_name in {"length_in", "width_in", "height_in", "weight_lb"}:
+                    setattr(asset, field_name, _coerce_optional_float(getattr(body, field_name)))
+                elif field_name == "dimension_confidence":
+                    setattr(asset, field_name, _normalize_dimension_confidence(getattr(body, field_name)))
+                else:
+                    setattr(asset, field_name, getattr(body, field_name) or None)
         if body.sentiment_tag is not None:
             asset.sentiment_tag = body.sentiment_tag
 
         djson["item_overview"] = asset.description
         if body.specifications is not None:
             djson["specifications"] = body.specifications
+        djson["dimensions"] = _asset_dimensions_dict(asset)
         if body.condition_report is not None:
             djson["condition_report"] = body.condition_report
         if body.keywords is not None:
@@ -2363,13 +2621,27 @@ from pydantic import BaseModel as PydanticBaseModel_
 
 class AssetListingResponse(PydanticBaseModel_):
     title: str = ""
+    category: str = ""
     item_overview: str = ""
     specifications: str = ""
     condition_report: str = ""
     keywords: str = ""
     valuation_min: float | None = None
     valuation_max: float | None = None
+    length_in: float | None = None
+    width_in: float | None = None
+    height_in: float | None = None
+    weight_lb: float | None = None
+    dimension_source: str | None = None
+    dimension_confidence: str | None = None
+    dimension_notes: str | None = None
     sentiment_tags: str = ""
+
+
+class ValuationEstimate(PydanticBaseModel_):
+    valuation_min: float = 0.0
+    valuation_max: float = 0.0
+    valuation_basis: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -2434,6 +2706,7 @@ async def generate_asset_details(
                     "title": fa.title,
                     "item_overview": fa.description,
                     "specifications": desc_data.get("specifications", ""),
+                    "dimensions": _asset_dimensions_dict(fa),
                     "condition_report": desc_data.get("condition_report", ""),
                     "keywords": desc_data.get("keywords", ""),
                     "valuation_min": fa.valuation_min,
@@ -2454,6 +2727,7 @@ async def generate_asset_details(
                 f"  title: {ex['title']}\n"
                 f"  item_overview: {ex['item_overview']}\n"
                 f"  specifications:\n{ex['specifications']}\n"
+                f"  dimensions: {ex['dimensions']}\n"
                 f"  condition_report: {ex['condition_report']}\n"
                 f"  keywords: {ex['keywords']}\n"
                 f"  valuation_min: {ex['valuation_min']}\n"
@@ -2461,101 +2735,156 @@ async def generate_asset_details(
                 f"  sentiment_tags: {ex['sentiment_tags']}\n\n"
             )
 
-    prompt = (
-        "You are an expert appraiser and estate sale liquidator. Analyze the provided image(s) of this item "
-        "and generate a clean, highly accurate marketplace listing.\n\n"
-        "Respond with a valid JSON object containing these fields:\n"
-        "  title: Catchy, searchable keyword title (include Brand/Maker, Material, Era if identifiable).\n"
-        "  item_overview: A 2-3 sentence accurate description of what the item is and its aesthetic style.\n"
-        "  specifications: Bullet points detailing estimated materials, color, dimensions (if scale cues exist), and noticeable hardware. Use '- ' prefix per line.\n"
-        "  condition_report: Explicitly state any visible wear, scratches, fading, blemishes, or damage. Be brutally honest for buyers.\n"
-        "  keywords: 5-8 relevant tags for search optimization, comma-separated (e.g. Mid-Century Modern, Vintage, Solid Oak).\n"
-        "  valuation_min: Estimated minimum secondary market value as a float/number (e.g. 50.0). Estimate realistically based on the item.\n"
-        "  valuation_max: Estimated maximum secondary market value as a float/number (e.g. 150.0). Estimate realistically based on the item.\n"
-        "  sentiment_tags: Comma-separated sentiment labels. Select 1-3 relevant tags from: Heirloom, Memento, Practical, Antique, Handmade, Documents.\n\n"
-        "Do not use overly flowery language. Stick to descriptive facts that help a buyer buy."
-        f"{few_shot_text}\n"
-        "JSON:"
+    import json as json_mod
+
+    # Single vision call: model sees the image and outputs the structured JSON directly.
+    # This works because the vision model CAN produce content; the text-only path fails
+    # with qwen3-style thinking models that return empty message.content.
+    vision_prompt = (
+        "You are an expert estate sale appraiser. Analyze this item carefully and output ONLY a JSON object.\n"
+        "Do not include any prose, explanation, or markdown fences — just the raw JSON.\n\n"
+        "Fill in every field with real values based on what you see in the image:\n\n"
+        '{\n'
+        '  "title": "concise searchable title with brand/material/era if visible",\n'
+        '  "category": "one of: Jewelry, Furniture, Art, Clothing, Electronics, Collectibles, Books, Kitchen, Tools, Other",\n'
+        '  "item_overview": "2-3 factual sentences describing what the item is and its style",\n'
+        '  "specifications": "- bullet points covering material, color, hardware (one per line)",\n'
+        '  "condition_report": "honest description of visible wear, scratches, damage",\n'
+        '  "keywords": "5-8 comma-separated search tags",\n'
+        '  "length_in": null,\n'
+        '  "width_in": null,\n'
+        '  "height_in": null,\n'
+        '  "weight_lb": null,\n'
+        '  "dimension_source": "AI Estimate",\n'
+        '  "dimension_confidence": "Low",\n'
+        '  "dimension_notes": "any caveats about size estimates",\n'
+        '  "sentiment_tags": "1-3 from: Heirloom, Memento, Practical, Antique, Handmade, Documents"\n'
+        '}\n\n'
+        "Replace all placeholder text with real values. "
+        "For dimensions: use your knowledge of typical item sizes — a baseball cap is ~8x7x5in, a dining chair is ~18x18x36in, etc. "
+        "Only use null if the item type is truly ambiguous. Set dimension_confidence to Low/Medium/High based on how certain you are."
+        f"{few_shot_text}"
     )
 
-    # Use LLM Provider's vision capability with multi-image support
     try:
         provider = get_provider()
-        res = provider.generate_vision(
+        print(f"[generate-details] vision_model={provider._resolve_model('vision')} vision_provider={provider.vision_provider}", flush=True)
+        raw_response = provider.generate_vision(
             model_key="vision",
             image_bytes=image_bytes,
-            prompt=prompt,
+            prompt=vision_prompt,
             images=secondary_images if secondary_images else None,
-            max_tokens=2048,
+            max_tokens=4096,
+            timeout=240,
+            response_format=AssetListingResponse,
         )
+        print(f"[generate-details] raw_response len={len(raw_response)} first500={raw_response[:500]!r}", flush=True)
     except Exception as exc:
-        logger.exception("LLM vision generation failed for asset %s", asset_id)
-        raise HTTPException(
-            status_code=500,
-            detail=f"LLM vision generation failed: {exc}",
-        )
+        import traceback
+        print(f"[generate-details] VISION FAILED: {exc}", flush=True)
+        print(traceback.format_exc(), flush=True)
+        raise HTTPException(status_code=500, detail=f"LLM vision failed: {exc}")
 
-    # Parse JSON from response
-    import json as json_mod
+    # Parse the JSON from the vision model's response
     try:
-        # Strip any markdown code fences
-        cleaned = res.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[-1] if "\n" in cleaned else cleaned
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3]
-            cleaned = cleaned.strip()
-            if cleaned.lower().startswith("json"):
-                cleaned = cleaned[4:].strip()
-
+        from .services.llm_provider import _extract_json, _strip_thinking_tokens
+        cleaned = _extract_json(_strip_thinking_tokens(raw_response))
+        print(f"[generate-details] cleaned len={len(cleaned)} first300={cleaned[:300]!r}", flush=True)
         parsed = json_mod.loads(cleaned)
-
-        # Coerce list fields to string to prevent Pydantic ValidationError
-        if "specifications" in parsed and isinstance(parsed["specifications"], list):
-            parsed["specifications"] = "\n".join(parsed["specifications"])
-        if "keywords" in parsed and isinstance(parsed["keywords"], list):
-            parsed["keywords"] = ", ".join(parsed["keywords"])
-        if "sentiment_tags" in parsed and isinstance(parsed["sentiment_tags"], list):
-            parsed["sentiment_tags"] = ", ".join(parsed["sentiment_tags"])
-
+        # Some models wrap output in {"properties": {...}} echoing the schema — unwrap it
+        if "properties" in parsed and "title" not in parsed:
+            inner = parsed["properties"]
+            # Each value may be the field value directly, or a schema sub-object — take the value
+            parsed = {k: (v if not isinstance(v, dict) else v.get("default", "")) for k, v in inner.items()}
+        # Coerce list fields to strings
+        for field in ("specifications", "keywords", "sentiment_tags"):
+            if field in parsed and isinstance(parsed[field], list):
+                parsed[field] = (", " if field != "specifications" else "\n").join(parsed[field])
         listing = AssetListingResponse(**parsed)
-    except Exception:
-        # Fallback: try regex extraction of fields
-        import re
-        def _extract(label, text):
-            # Try bracketed list first
-            m = re.search(rf'"{label}"\s*:\s*\[(.*?)\]', text, re.DOTALL)
-            if m:
-                items = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
-                if items:
-                    joiner = "\n" if label == "specifications" else ", "
-                    return joiner.join(items)
-            m = re.search(rf'"{label}"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
-            return m.group(1) if m else ""
-        def _extract_float(label, text):
-            m = re.search(rf'"{label}"\s*:\s*(\d+(?:\.\d+)?)', text)
-            return float(m.group(1)) if m else None
-        listing = AssetListingResponse(
-            title=_extract("title", res),
-            item_overview=_extract("item_overview", res),
-            specifications=_extract("specifications", res),
-            condition_report=_extract("condition_report", res),
-            keywords=_extract("keywords", res),
-            valuation_min=_extract_float("valuation_min", res),
-            valuation_max=_extract_float("valuation_max", res),
-            sentiment_tags=_extract("sentiment_tags", res),
+        print(f"[generate-details] listing title={listing.title!r} category={listing.category!r}", flush=True)
+    except Exception as exc:
+        import traceback
+        print(f"[generate-details] PARSE FAILED raw={raw_response[:300]!r} err={exc}", flush=True)
+        print(traceback.format_exc(), flush=True)
+        raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {exc}")
+
+    # Step 2: dedicated valuation pass. Pricing is the highest-stakes, highest-error field,
+    # so it gets its own focused call grounded in the listing details already generated
+    # (rather than competing for budget/attention inside the single big prompt above), and
+    # its own independently configurable provider/model (PRICING_PROVIDER / PRICING_MODEL
+    # in Admin Settings) — by default it falls back to whatever the vision model is, but an
+    # admin can point pricing at a completely different LLM (e.g. a pricier, more accurate
+    # one) without touching listing generation. This is also the seam where a future
+    # pricing API / web-search tool can be swapped in for this call.
+    valuation_prompt = (
+        "You are an expert estate sale appraiser. Based on this item's photo and the "
+        "description below, estimate a realistic resale price range in USD for an estate sale.\n\n"
+        f"Title: {listing.title}\n"
+        f"Category: {listing.category}\n"
+        f"Condition: {listing.condition_report}\n"
+        f"Specifications: {listing.specifications}\n\n"
+        "Output ONLY a JSON object, no prose or markdown fences:\n"
+        '{\n'
+        '  "valuation_min": 0.0,\n'
+        '  "valuation_max": 0.0,\n'
+        '  "valuation_basis": "1-2 sentences explaining the range — comparable items, materials, condition"\n'
+        '}\n\n'
+        "Numbers must be realistic for a used/estate-sale item and never 0."
+    )
+    try:
+        valuation_raw = provider.generate_vision(
+            model_key=MODEL_KEY_PRICING,
+            image_bytes=image_bytes,
+            prompt=valuation_prompt,
+            images=secondary_images if secondary_images else None,
+            max_tokens=1024,
+            timeout=120,
+            response_format=ValuationEstimate,
+            provider_override=provider.pricing_provider,
         )
+        cleaned_val = _extract_json(_strip_thinking_tokens(valuation_raw))
+        val_parsed = json_mod.loads(cleaned_val)
+        valuation = ValuationEstimate(**val_parsed)
+        listing.valuation_min = valuation.valuation_min
+        listing.valuation_max = valuation.valuation_max
+        print(f"[generate-details] pricing_provider={provider.pricing_provider} pricing_model={provider._resolve_model(MODEL_KEY_PRICING)} min={valuation.valuation_min} max={valuation.valuation_max} basis={valuation.valuation_basis!r}", flush=True)
+    except Exception as exc:
+        # Non-fatal: keep the rest of the listing even if pricing fails.
+        print(f"[generate-details] VALUATION FAILED (non-fatal, pricing_provider={provider.pricing_provider}): {exc}", flush=True)
 
     # Save to asset fields
     asset.title = listing.title or asset.title
+    if listing.category:
+        asset.category = listing.category
     asset.description = listing.item_overview or asset.description
     asset.valuation_min = listing.valuation_min if listing.valuation_min is not None else asset.valuation_min
     asset.valuation_max = listing.valuation_max if listing.valuation_max is not None else asset.valuation_max
     asset.valuation_source = "AI Appraisal"
     asset.sentiment_tag = listing.sentiment_tags or asset.sentiment_tag
+    for field_name in (
+        "length_in",
+        "width_in",
+        "height_in",
+        "weight_lb",
+        "dimension_source",
+        "dimension_confidence",
+        "dimension_notes",
+    ):
+        value = getattr(listing, field_name)
+        if value is not None:
+            setattr(asset, field_name, value)
     asset.description_json = json_mod.dumps({
         "item_overview": listing.item_overview,
         "specifications": listing.specifications,
+        "dimensions": {
+            "length_in": listing.length_in,
+            "width_in": listing.width_in,
+            "height_in": listing.height_in,
+            "weight_lb": listing.weight_lb,
+            "source": listing.dimension_source,
+            "confidence": listing.dimension_confidence,
+            "notes": listing.dimension_notes,
+        },
         "condition_report": listing.condition_report,
         "keywords": listing.keywords,
     })
@@ -2575,6 +2904,7 @@ async def generate_asset_details(
     return JSONResponse(
         content={
             "title": listing.title or "Suggested Keepsake",
+            "category": listing.category or "",
             "item_overview": listing.item_overview or "",
             "specifications": listing.specifications or "",
             "condition_report": listing.condition_report or "",
@@ -2582,6 +2912,13 @@ async def generate_asset_details(
             "valuation_min": listing.valuation_min,
             "valuation_max": listing.valuation_max,
             "valuation_source": "AI Appraisal",
+            "length_in": listing.length_in,
+            "width_in": listing.width_in,
+            "height_in": listing.height_in,
+            "weight_lb": listing.weight_lb,
+            "dimension_source": listing.dimension_source,
+            "dimension_confidence": listing.dimension_confidence,
+            "dimension_notes": listing.dimension_notes,
             "sentiment_tags": listing.sentiment_tags or "",
         }
     )
@@ -2620,6 +2957,7 @@ async def save_ai_feedback(
             "valuation_min": asset.valuation_min,
             "valuation_max": asset.valuation_max,
             "sentiment_tag": asset.sentiment_tag,
+            "ai_feedback": asset.ai_feedback,
             "description_json": asset.description_json,
         }
     }
@@ -2714,17 +3052,13 @@ async def session_assets(
             # cosine distance is 0 to 2. Similarity = 1.0 - distance
             similarity_expr = 1.0 - Asset.embedding.cosine_distance(query_vector)
 
-            # Run similarity on a clean Asset-only query (never on a pre-joined
-            # query) to avoid SQLAlchemy compound Row objects that break
-            # attribute access.  Collect id → similarity, then fetch full
-            # assets through the existing filtered query.
+            # Collect semantic matches from the filtered query and merge them
+            # with exact keyword hits. Exact text matches are important for
+            # short object-name searches ("boat", "mug", "jacket") and for
+            # assets that have not been embedded yet.
             sim_query = (
-                db.query(Asset.id, similarity_expr.label("similarity"))
-                .filter(
-                    Asset.session_id == session_id,
-                    Asset.status.in_(allowed_statuses),
-                    Asset.embedding.isnot(None),
-                )
+                query.with_entities(Asset.id, similarity_expr.label("similarity"))
+                .filter(Asset.embedding.isnot(None))
             )
             sim_results = sim_query.all()
             id_to_sim: dict[str, float] = {}
@@ -2733,11 +3067,16 @@ async def session_assets(
                 sim_val = float(row[1]) if row[1] is not None else 0.0
                 id_to_sim[asset_uuid] = max(0.0, min(1.0, sim_val))
 
+            keyword_assets = query.filter(_asset_keyword_search_filter(q)).all()
+            for a in keyword_assets:
+                asset_uuid = str(a.id)
+                id_to_sim[asset_uuid] = max(id_to_sim.get(asset_uuid, 0.0), 1.0)
+
             if id_to_sim:
                 # Fetch full Asset objects via the existing query, but without
                 # add_columns so `.images` relationships are intact.
                 matched_ids = list(id_to_sim.keys())
-                base = db.query(Asset).filter(Asset.id.in_(matched_ids))
+                base = query.filter(Asset.id.in_(matched_ids))
                 if sort_by == "title":
                     base = base.order_by(
                         Asset.title.asc() if sort_order != "desc" else Asset.title.desc()
@@ -2761,7 +3100,9 @@ async def session_assets(
                         "valuation_min": a.valuation_min,
                         "valuation_max": a.valuation_max,
                         "valuation_source": a.valuation_source,
+                        **_asset_dimensions_dict(a),
                         "sentiment_tag": a.sentiment_tag,
+                        "ai_feedback": a.ai_feedback,
                         "image_uri": a.image_uri,
                         "audio_uri": a.audio_uri,
                         "status": a.status,
@@ -2818,10 +3159,7 @@ async def session_assets(
                     elif allocation_status == "pre_allocated":
                         fallback = fallback.filter(Asset.status == "PRE_ALLOCATED")
 
-            search_term = f"%{q}%"
-            fallback = fallback.filter(
-                (Asset.title.ilike(search_term)) | (Asset.description.ilike(search_term))
-            )
+            fallback = fallback.filter(_asset_keyword_search_filter(q))
             if sort_by == "title":
                 fallback = fallback.order_by(
                     Asset.title.asc() if sort_order != "desc" else Asset.title.desc()
@@ -2845,7 +3183,9 @@ async def session_assets(
                     "valuation_min": a.valuation_min,
                     "valuation_max": a.valuation_max,
                     "valuation_source": a.valuation_source,
+                    **_asset_dimensions_dict(a),
                     "sentiment_tag": a.sentiment_tag,
+                        "ai_feedback": a.ai_feedback,
                     "image_uri": a.image_uri,
                     "audio_uri": a.audio_uri,
                     "status": a.status,
@@ -2885,7 +3225,9 @@ async def session_assets(
                 "valuation_min": a.valuation_min,
                 "valuation_max": a.valuation_max,
                 "valuation_source": a.valuation_source,
+                **_asset_dimensions_dict(a),
                 "sentiment_tag": a.sentiment_tag,
+                        "ai_feedback": a.ai_feedback,
                 "image_uri": a.image_uri,
                 "audio_uri": a.audio_uri,
                 "status": a.status,
@@ -7059,16 +7401,60 @@ async def system_models():
     """
     import os as _os
 
-    fast = _os.environ.get("FAST_THINKER_MODEL", "qwen2.5:8b-instruct")
-    slow = _os.environ.get("SLOW_THINKER_MODEL", "qwen2.5:14b-instruct")
-    vision = _os.environ.get("VISION_MODEL", "llava:7b")
+    fast = _os.environ.get("FAST_THINKER_MODEL", "qwen3:8b")
+    slow = _os.environ.get("SLOW_THINKER_MODEL", "qwen3:14b")
+    vision = _os.environ.get("VISION_MODEL", "qwen3-vl:8b")
     embed = _os.environ.get("EMBEDDING_MODEL", "nomic-embed-text")
 
     # Map Ollama model identifiers to human-readable display metadata.
     # When an env var maps to a known model, use the canonical display info;
     # otherwise fall back to a generic entry using the raw env var value.
     _MODEL_DISPLAY = {
-        # Fast thinker variants
+        # Fast thinker variants (Qwen3)
+        "qwen3:8b": {
+            "display_name": "Qwen3-8B",
+            "parameters": "8.2B",
+            "license": "Apache-2.0",
+            "provenance": "Pretrained by Alibaba Cloud on Qwen3 open training data; unified dense/thinking-mode architecture, fine-tuned for instruction-following.",
+        },
+        "qwen3:1.7b": {
+            "display_name": "Qwen3-1.7B (Pi 5 profile)",
+            "parameters": "1.7B",
+            "license": "Apache-2.0",
+            "provenance": "Compact instruction-tuned Qwen3 variant optimized for low-resource devices.",
+        },
+        "qwen3:0.6b": {
+            "display_name": "Qwen3-0.6B (Pi 5 alt profile)",
+            "parameters": "0.6B",
+            "license": "Apache-2.0",
+            "provenance": "Smallest instruction-tuned Qwen3 variant for constrained hardware.",
+        },
+        "qwen3:14b": {
+            "display_name": "Qwen3-14B",
+            "parameters": "14.8B",
+            "license": "Apache-2.0",
+            "provenance": "Pretrained and post-trained by Alibaba Cloud; optimized for reasoning and logical validation.",
+        },
+        # Vision variants (Qwen3-VL)
+        "qwen3-vl:8b": {
+            "display_name": "Qwen3-VL-8B",
+            "parameters": "8.0B",
+            "license": "Apache-2.0",
+            "provenance": "Alibaba Cloud's Qwen3-VL multimodal line; OCR, spatial reasoning, and visual-agent capabilities, 256K context.",
+        },
+        "qwen3-vl:4b": {
+            "display_name": "Qwen3-VL-4B (Pi 5 alt vision profile)",
+            "parameters": "4.0B",
+            "license": "Apache-2.0",
+            "provenance": "Compact Qwen3-VL multimodal variant for constrained hardware.",
+        },
+        "qwen3-vl:2b": {
+            "display_name": "Qwen3-VL-2B (Pi 5 vision profile)",
+            "parameters": "2.0B",
+            "license": "Apache-2.0",
+            "provenance": "Smallest Qwen3-VL multimodal variant, optimized for edge devices.",
+        },
+        # Legacy Qwen2.5 variants (still resolvable if an older env var value is set)
         "qwen2.5:8b-instruct": {
             "display_name": "Qwen-2.5-8B-Instruct",
             "parameters": "8.0B",

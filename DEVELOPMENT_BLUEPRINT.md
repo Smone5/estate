@@ -108,9 +108,9 @@ EMBEDDING_PROVIDER=ollama
 VISION_PROVIDER=ollama
 
 # Model Configurations (Depends on selected provider)
-FAST_THINKER_MODEL=qwen2.5:8b-instruct
-SLOW_THINKER_MODEL=qwen2.5:14b-instruct
-VISION_MODEL=llava:7b
+FAST_THINKER_MODEL=qwen3:8b
+SLOW_THINKER_MODEL=qwen3:14b
+VISION_MODEL=qwen3-vl:8b
 EMBEDDING_MODEL=nomic-embed-text
 
 # Ollama Base Configuration
@@ -167,9 +167,9 @@ DB_ECHO=false       # Toggles database query prints (True | False)
 2.  **Verify Ollama Models**:
     Ensure the following models are pulled and ready on the local host:
     ```bash
-    ollama pull qwen2.5:8b-instruct
-    ollama pull qwen2.5:14b-instruct
-    ollama pull llava:7b
+    ollama pull qwen3:8b
+    ollama pull qwen3:14b
+    ollama pull qwen3-vl:8b
     ollama pull nomic-embed-text
     ```
 3.  **Launch Local Infrastructure & DB Bootstrap**:
@@ -324,9 +324,9 @@ sequenceDiagram
     Graph->>Graph: ROUTER_NODE → Intent: CHAT_MEDIATION
     Graph->>DB: RETRIEVE_RAG: vector search assets table
     DB-->>Graph: Retrieved Asset Context (top-2 live assets)
-    Graph->>Ollama: FAST_MEDIATE_NODE (qwen2.5:8b, temp=0.5)
+    Graph->>Ollama: FAST_MEDIATE_NODE (qwen3:8b, temp=0.5)
     Ollama-->>Graph: Mediator reply text (<4 sentences)
-    Graph->>Ollama: SLOW_CRITIQUE_NODE (qwen2.5:14b, temp=0.0)
+    Graph->>Ollama: SLOW_CRITIQUE_NODE (qwen3:14b, temp=0.0)
     Ollama-->>Graph: { "violation": false, "reason": "" }
     Graph->>Kokoro: Synthesize reply text (voice: af_bella, speed: 0.95)
     Kokoro-->>Graph: Base64-encoded WAV bytes

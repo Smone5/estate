@@ -20,6 +20,7 @@ import io as _io
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional, Type
 
@@ -96,6 +97,7 @@ MODEL_KEY_FAST = "fast"
 MODEL_KEY_SLOW = "slow"
 MODEL_KEY_VISION = "vision"
 MODEL_KEY_EMBEDDING = "embedding"
+MODEL_KEY_PRICING = "pricing"
 
 # ---------------------------------------------------------------------------
 # Environment-driven configuration
@@ -107,11 +109,17 @@ _VISION_PROVIDER = os.environ.get("VISION_PROVIDER", PROVIDER_OLLAMA).strip().lo
 _OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
 # Model profiles (T63 & T07b)
+#
+# Upgraded from Qwen2.5 to Qwen3 (dense, unified thinking-mode family) for text
+# models, and to the dedicated qwen3-vl vision-language line (replacing
+# llava/moondream) for vision — both pulled via scripts/download_models.py.
+# Qwen3's "<think>...</think>" reasoning output is stripped by
+# _strip_thinking_tokens() in generate_text/generate_structured/generate_vision.
 _MODEL_PROFILES = {
     "default": {
-        "fast": "qwen2.5:latest",
-        "slow": "qwen2.5:14b",
-        "vision": "llava:latest",
+        "fast": "qwen3:8b",
+        "slow": "qwen3:14b",
+        "vision": "qwen3-vl:8b",
         "embedding": "nomic-embed-text",
         "fast_token_limit": 150,
         "slow_token_limit": 256,
@@ -120,9 +128,9 @@ _MODEL_PROFILES = {
         "concurrency_ceiling": 4,
     },
     "pi5": {
-        "fast": "qwen2.5:3b-instruct",
-        "slow": "qwen2.5:8b-instruct",
-        "vision": "moondream:latest",
+        "fast": "qwen3:1.7b",
+        "slow": "qwen3:8b",
+        "vision": "qwen3-vl:2b",
         "embedding": "nomic-embed-text",
         "fast_token_limit": 100,
         "slow_token_limit": 150,
@@ -131,9 +139,9 @@ _MODEL_PROFILES = {
         "concurrency_ceiling": 1,
     },
     "pi5_alternative": {
-        "fast": "qwen2.5:1.5b-instruct",
-        "slow": "qwen2.5:8b-instruct",
-        "vision": "llava:7b",
+        "fast": "qwen3:0.6b",
+        "slow": "qwen3:8b",
+        "vision": "qwen3-vl:4b",
         "embedding": "nomic-embed-text",
         "fast_token_limit": 100,
         "slow_token_limit": 150,
@@ -165,6 +173,48 @@ try:
     _LANGTRACE_AVAILABLE = True
 except ImportError:
     _LANGTRACE_AVAILABLE = False
+
+# ---------------------------------------------------------------------------
+# Thinking-token stripping
+#
+# Some models (Gemma's "<|channel>thought...<channel|>" wrapper, and Qwen3's
+# native "<think>...</think>" reasoning mode) prepend a reasoning block before
+# the actual answer. Downstream callers (JSON parsing in generate_structured,
+# plain-text consumers of generate_text/generate_vision) don't expect this —
+# strip it everywhere a model might emit it, not just in generate_vision.
+# ---------------------------------------------------------------------------
+_THINKING_TOKEN_PATTERNS = [
+    re.compile(r"<\|channel>thought.*?(?:<channel\|>|$)", re.DOTALL),
+    re.compile(r"<think>.*?(?:</think>|$)", re.DOTALL),
+]
+
+
+def _strip_thinking_tokens(text: str) -> str:
+    for pattern in _THINKING_TOKEN_PATTERNS:
+        text = pattern.sub("", text)
+    return text.strip()
+
+
+def _extract_json(text: str) -> str:
+    """Extract a JSON object from text that may contain markdown fences or prose."""
+    text = text.strip()
+    # Strip ```json ... ``` or ``` ... ``` fences
+    if text.startswith("```"):
+        lines = text.split("\n")
+        # drop first line (```json or ```) and last ``` line
+        inner = "\n".join(lines[1:])
+        fence_end = inner.rfind("```")
+        if fence_end != -1:
+            inner = inner[:fence_end]
+        text = inner.strip()
+    # If still not starting with {, find the first { ... }
+    if not text.startswith("{"):
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1:
+            text = text[start:end + 1]
+    return text
+
 
 # ---------------------------------------------------------------------------
 # Observability initialisation helpers
@@ -291,10 +341,34 @@ class LLMProvider:
     """
 
     def __init__(self):
-        # Read env vars at construction time so monkeypatch.setenv works in tests
+        # Read env vars at construction time so monkeypatch.setenv works in tests.
+        # Every purpose has its own independent provider so admins can freely mix
+        # e.g. local Ollama for fast, Anthropic for slow, Google for vision, OpenAI
+        # for pricing — all at the same time.
+        #
+        # LLM_PROVIDER is the legacy/fallback used when FAST_PROVIDER or SLOW_PROVIDER
+        # are not explicitly set, so existing deployments keep working without change.
         self.llm_provider = os.environ.get("LLM_PROVIDER", PROVIDER_OLLAMA).strip().lower()
+        self.fast_provider = os.environ.get("FAST_PROVIDER", "").strip().lower() or self.llm_provider
+        self.slow_provider = os.environ.get("SLOW_PROVIDER", "").strip().lower() or self.llm_provider
         self.embedding_provider = os.environ.get("EMBEDDING_PROVIDER", PROVIDER_OLLAMA).strip().lower()
         self.vision_provider = os.environ.get("VISION_PROVIDER", PROVIDER_OLLAMA).strip().lower()
+        # Pricing falls back to vision provider when not explicitly configured.
+        self.pricing_provider = os.environ.get("PRICING_PROVIDER", "").strip().lower() or self.vision_provider
+
+        # Per-purpose API keys and base URLs. When set, these are passed directly to
+        # litellm and override the shared per-company credentials, so each purpose can
+        # point to a completely different account, proxy, or OpenAI-compatible endpoint.
+        self._purpose_api_key: Dict[str, str] = {}
+        self._purpose_base_url: Dict[str, str] = {}
+        for purpose in ("FAST", "SLOW", "VISION", "EMBEDDING", "PRICING"):
+            key = os.environ.get(f"{purpose}_API_KEY", "").strip()
+            url = os.environ.get(f"{purpose}_BASE_URL", "").strip()
+            mk = purpose.lower()
+            if key:
+                self._purpose_api_key[mk] = key
+            if url:
+                self._purpose_base_url[mk] = url
 
         self._ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
@@ -320,10 +394,12 @@ class LLMProvider:
         self._cached_slow = None
         self._cached_vision = None
         self._cached_embedding = None
+        self._cached_pricing = None
 
         logger.info(
-            "LLMProvider initialised: text=%s embedding=%s vision=%s profile=%s concurrency=%d timeout=%d",
-            self.llm_provider, self.embedding_provider, self.vision_provider,
+            "LLMProvider initialised: fast=%s slow=%s vision=%s embedding=%s pricing=%s profile=%s concurrency=%d timeout=%d",
+            self.fast_provider, self.slow_provider, self.vision_provider,
+            self.embedding_provider, self.pricing_provider,
             self.profile_name, self.concurrency_ceiling, self.timeout_seconds,
         )
 
@@ -381,6 +457,17 @@ class LLMProvider:
             prefix = cfg.get("prefix", "")
         return f"{prefix}{model_name}"
 
+    def _credentials_for_key(self, model_key: str) -> Dict[str, str]:
+        """Return explicit api_key / api_base overrides for a purpose, if configured."""
+        out: Dict[str, str] = {}
+        key = self._purpose_api_key.get(model_key)
+        url = self._purpose_base_url.get(model_key)
+        if key:
+            out["api_key"] = key
+        if url:
+            out["api_base"] = url
+        return out
+
     def _completion(
         self,
         model: str,
@@ -389,13 +476,21 @@ class LLMProvider:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
-        response_format: Optional[Dict[str, str]] = None,
+        response_format: Optional[Any] = None,
+        num_ctx: Optional[int] = None,
+        api_key: Optional[str] = None,
+        api_base: Optional[str] = None,
     ):
         kwargs: Dict[str, Any] = {
             "model": model,
             "messages": messages,
             **self._provider_kwargs(provider),
         }
+        # Per-purpose credentials override the shared provider credentials when set.
+        if api_key:
+            kwargs["api_key"] = api_key
+        if api_base:
+            kwargs["api_base"] = api_base
         if temperature is not None:
             kwargs["temperature"] = temperature
         if max_tokens is not None:
@@ -404,6 +499,8 @@ class LLMProvider:
             kwargs["timeout"] = timeout
         if response_format is not None:
             kwargs["response_format"] = response_format
+        if provider == PROVIDER_OLLAMA and num_ctx is not None:
+            kwargs["extra_body"] = {"options": {"num_ctx": num_ctx}}
         try:
             return litellm.completion(**kwargs)
         except Exception as exc:
@@ -416,12 +513,18 @@ class LLMProvider:
         text: str,
         provider: str,
         timeout: Optional[float] = None,
+        api_key: Optional[str] = None,
+        api_base: Optional[str] = None,
     ) -> List[float]:
         kwargs: Dict[str, Any] = {
             "model": model,
             "input": [text],
             **self._provider_kwargs(provider),
         }
+        if api_key:
+            kwargs["api_key"] = api_key
+        if api_base:
+            kwargs["api_base"] = api_base
         if timeout is not None:
             kwargs["timeout"] = timeout
         try:
@@ -439,6 +542,16 @@ class LLMProvider:
     # public API
     # ------------------------------------------------------------------
 
+    def _provider_for_key(self, model_key: str) -> str:
+        """Return the configured provider for a given model key."""
+        return {
+            MODEL_KEY_FAST: self.fast_provider,
+            MODEL_KEY_SLOW: self.slow_provider,
+            MODEL_KEY_VISION: self.vision_provider,
+            MODEL_KEY_PRICING: self.pricing_provider,
+            MODEL_KEY_EMBEDDING: self.embedding_provider,
+        }.get(model_key, self.llm_provider)
+
     def generate_text(
         self,
         model_key: str,
@@ -450,8 +563,9 @@ class LLMProvider:
         timeout: Optional[float] = None,
     ) -> str:
         """Generate a plain-text completion."""
-        if self.llm_provider not in _VALID_TEXT_PROVIDERS:
-            raise ValueError(f"Unsupported text provider: {self.llm_provider}")
+        provider = self._provider_for_key(model_key)
+        if provider not in _VALID_TEXT_PROVIDERS:
+            raise ValueError(f"Unsupported text provider for {model_key}: {provider}")
 
         if max_tokens is None:
             if model_key == MODEL_KEY_FAST:
@@ -463,22 +577,24 @@ class LLMProvider:
         if timeout is None:
             timeout = self.timeout_seconds
 
-        model = self._to_litellm_model(self._resolve_model(model_key), self.llm_provider)
+        model = self._to_litellm_model(self._resolve_model(model_key), provider)
         messages = [{"role": "system", "content": system_prompt}]
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": user_input})
 
         logger.debug(
-            "[LLMProvider] generate_text model_key=%s model=%s temperature=%.2f prompt_len=%d max_tokens=%s timeout=%s",
-            model_key, model, temperature, len(user_input), max_tokens, timeout,
+            "[LLMProvider] generate_text model_key=%s provider=%s model=%s temperature=%.2f prompt_len=%d max_tokens=%s timeout=%s",
+            model_key, provider, model, temperature, len(user_input), max_tokens, timeout,
         )
+        creds = self._credentials_for_key(model_key)
         with self._semaphore:
             resp = self._completion(
-                model, messages, self.llm_provider,
+                model, messages, provider,
                 temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+                **creds,
             )
-        result = resp.choices[0].message.content.strip()
+        result = _strip_thinking_tokens(resp.choices[0].message.content)
         logger.debug("[LLMProvider] generate_text result_len=%d", len(result))
         return result
 
@@ -493,8 +609,9 @@ class LLMProvider:
         timeout: Optional[float] = None,
     ) -> BaseModel:
         """Generate a structured (JSON) output validated against a Pydantic model."""
-        if self.llm_provider not in _VALID_TEXT_PROVIDERS:
-            raise ValueError(f"Unsupported text provider: {self.llm_provider}")
+        provider = self._provider_for_key(model_key)
+        if provider not in _VALID_TEXT_PROVIDERS:
+            raise ValueError(f"Unsupported text provider for {model_key}: {provider}")
 
         if max_tokens is None:
             if model_key == MODEL_KEY_FAST:
@@ -506,11 +623,12 @@ class LLMProvider:
         if timeout is None:
             timeout = self.timeout_seconds
 
-        model = self._to_litellm_model(self._resolve_model(model_key), self.llm_provider)
+        model = self._to_litellm_model(self._resolve_model(model_key), provider)
         schema_str = str(response_model.model_json_schema())
         full_system = (
             f"{system_prompt}\n\n"
-            f"Respond ONLY with a valid JSON object matching this schema:\n{schema_str}"
+            f"You MUST respond with a valid JSON object matching this schema. "
+            f"After any reasoning, output the JSON object and nothing else:\n{schema_str}"
         )
         messages = [
             {"role": "system", "content": full_system},
@@ -518,16 +636,28 @@ class LLMProvider:
         ]
 
         logger.debug(
-            "[LLMProvider] generate_structured model_key=%s model=%s response_model=%s max_tokens=%s timeout=%s",
-            model_key, model, response_model.__name__, max_tokens, timeout,
+            "[LLMProvider] generate_structured model_key=%s provider=%s model=%s response_model=%s max_tokens=%s timeout=%s",
+            model_key, provider, model, response_model.__name__, max_tokens, timeout,
         )
+        # Ollama thinking models output empty content when response_format=json_object
+        # is set — skip it for Ollama and rely on the schema in the system prompt.
+        rf = None if provider == PROVIDER_OLLAMA else {"type": "json_object"}
+        creds = self._credentials_for_key(model_key)
         with self._semaphore:
             resp = self._completion(
-                model, messages, self.llm_provider,
+                model, messages, provider,
                 temperature=temperature, max_tokens=max_tokens, timeout=timeout,
-                response_format={"type": "json_object"},
+                response_format=rf, **creds,
             )
-        content = resp.choices[0].message.content.strip()
+        raw = resp.choices[0].message.content or ""
+        print(f"[generate_structured] raw len={len(raw)} raw[:500]={raw[:500]!r}", flush=True)
+        content = _strip_thinking_tokens(raw)
+        # If stripping thinking tokens left nothing, extract JSON from the raw response
+        # (some models embed the answer inside the thinking block)
+        if not content:
+            content = raw
+        content = _extract_json(content)
+        print(f"[generate_structured] content after extract len={len(content)} content[:300]={content[:300]!r}", flush=True)
         parsed = json.loads(content)
         result = response_model(**parsed)
         logger.debug("[LLMProvider] generate_structured OK")
@@ -541,22 +671,27 @@ class LLMProvider:
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
         images: Optional[List[bytes]] = None,
+        response_format: Optional[Any] = None,
+        provider_override: Optional[str] = None,
     ) -> str:
         """Vision / OCR extraction from image bytes.
 
         Args:
             image_bytes: Primary image bytes (required).
             images: Optional list of additional image bytes for multi-image models.
+            provider_override: Route to a different provider than self.vision_provider —
+                used for e.g. a dedicated pricing model that lives on its own provider.
         """
-        if self.vision_provider not in _VALID_VISION_PROVIDERS:
-            raise ValueError(f"Unsupported vision provider: {self.vision_provider}")
+        provider = provider_override or self.vision_provider
+        if provider not in _VALID_VISION_PROVIDERS:
+            raise ValueError(f"Unsupported vision provider: {provider}")
 
         if max_tokens is None:
             max_tokens = self.vision_token_limit
         if timeout is None:
             timeout = self.timeout_seconds
 
-        model = self._to_litellm_model(self._resolve_model(model_key), self.vision_provider)
+        model = self._to_litellm_model(self._resolve_model(model_key), provider)
 
         import base64
         all_images = [self._ensure_image_jpeg(image_bytes)] + [
@@ -568,7 +703,7 @@ class LLMProvider:
             # litellm's ollama_chat transformation forwards image_url.url verbatim
             # into Ollama's native `images` field, which expects bare base64 (no
             # data-URI prefix) — other providers expect the full data: URI.
-            url = b64 if self.vision_provider == PROVIDER_OLLAMA else f"data:image/jpeg;base64,{b64}"
+            url = b64 if provider == PROVIDER_OLLAMA else f"data:image/jpeg;base64,{b64}"
             content_list.append({"type": "image_url", "image_url": {"url": url}})
         messages = [{"role": "user", "content": content_list}]
 
@@ -577,19 +712,77 @@ class LLMProvider:
             "[LLMProvider] generate_vision model_key=%s model=%s imgs=%d prompt_len=%d max_tokens=%s timeout=%s",
             model_key, model, total_imgs, len(prompt), max_tokens, timeout,
         )
+        creds = self._credentials_for_key(model_key)
+        with self._semaphore:
+            resp = self._completion(
+                model, messages, provider,
+                temperature=0.0, max_tokens=max_tokens, timeout=timeout,
+                num_ctx=16384, response_format=response_format, **creds,
+            )
+        raw = resp.choices[0].message.content or ""
+        result = _strip_thinking_tokens(raw)
+        if not result:
+            result = raw
+        logger.debug("[LLMProvider] generate_vision result_len=%d", len(result))
+        return result
+
+    def generate_structured_vision(
+        self,
+        model_key: str,
+        system_prompt: str,
+        image_bytes: bytes,
+        response_model: Type[BaseModel],
+        images: Optional[List[bytes]] = None,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> BaseModel:
+        """Structured vision: schema enforced via system prompt, images in user message."""
+        if self.vision_provider not in _VALID_VISION_PROVIDERS:
+            raise ValueError(f"Unsupported vision provider: {self.vision_provider}")
+
+        if max_tokens is None:
+            max_tokens = self.vision_token_limit
+        if timeout is None:
+            timeout = self.timeout_seconds
+
+        model = self._to_litellm_model(self._resolve_model(model_key), self.vision_provider)
+        schema_str = str(response_model.model_json_schema())
+        full_system = (
+            f"{system_prompt}\n\n"
+            f"Respond ONLY with a valid JSON object matching this schema:\n{schema_str}"
+        )
+
+        import base64
+        all_images = [self._ensure_image_jpeg(image_bytes)] + [
+            self._ensure_image_jpeg(img) for img in (images or [])
+        ]
+        content_list: List[Dict[str, Any]] = [{"type": "text", "text": "Analyze the provided image(s) and generate the listing JSON."}]
+        for img in all_images:
+            b64 = base64.b64encode(img).decode("utf-8")
+            url = b64 if self.vision_provider == PROVIDER_OLLAMA else f"data:image/jpeg;base64,{b64}"
+            content_list.append({"type": "image_url", "image_url": {"url": url}})
+
+        messages = [
+            {"role": "system", "content": full_system},
+            {"role": "user", "content": content_list},
+        ]
+
+        logger.debug(
+            "[LLMProvider] generate_structured_vision model_key=%s model=%s response_model=%s imgs=%d",
+            model_key, model, response_model.__name__, len(all_images),
+        )
         with self._semaphore:
             resp = self._completion(
                 model, messages, self.vision_provider,
                 temperature=0.0, max_tokens=max_tokens, timeout=timeout,
+                response_format={"type": "json_object"},
+                num_ctx=16384,
             )
-        result = resp.choices[0].message.content.strip()
-
-        # Strip Gemma-style thinking tokens if present:
-        #   <|channel>thought\n...<channel|>
-        import re
-        result = re.sub(r"<\|channel>thought.*?(?:<channel\|>|$)", "", result, flags=re.DOTALL).strip()
-
-        logger.debug("[LLMProvider] generate_vision result_len=%d", len(result))
+        content = _strip_thinking_tokens(resp.choices[0].message.content)
+        logger.warning("[LLMProvider] generate_structured_vision raw response (first 500): %s", content[:500])
+        parsed = json.loads(content)
+        result = response_model(**parsed)
+        logger.warning("[LLMProvider] generate_structured_vision parsed keys: %s", list(parsed.keys()))
         return result
 
     def get_embeddings(
@@ -613,8 +806,9 @@ class LLMProvider:
             "[LLMProvider] get_embeddings model_key=%s model=%s text_len=%d timeout=%s",
             model_key, model, len(text), timeout,
         )
+        creds = self._credentials_for_key(model_key)
         with self._semaphore:
-            result = self._embed(model, text, self.embedding_provider, timeout=timeout)
+            result = self._embed(model, text, self.embedding_provider, timeout=timeout, **creds)
         logger.debug("[LLMProvider] get_embeddings dim=%d", len(result))
         return result
 
@@ -639,6 +833,11 @@ class LLMProvider:
             if self._cached_embedding is None:
                 self._cached_embedding = os.environ.get("EMBEDDING_MODEL", _EMBEDDING_MODEL)
             return self._cached_embedding
+        elif model_key == MODEL_KEY_PRICING:
+            if self._cached_pricing is None:
+                # Falls back to the vision model when PRICING_MODEL isn't set explicitly.
+                self._cached_pricing = os.environ.get("PRICING_MODEL", "") or self._resolve_model(MODEL_KEY_VISION)
+            return self._cached_pricing
         return model_key
 
     # ------------------------------------------------------------------

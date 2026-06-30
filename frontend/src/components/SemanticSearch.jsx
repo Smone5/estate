@@ -1,5 +1,7 @@
 import React, { useState, useCallback, useMemo } from 'react';
 import { useMediationStore } from '../store/useMediationStore';
+import AssetGallery from './AssetGallery';
+import { getDisplayDescription, getStructuredAssetDetails } from '../utils/assetDetails';
 
 const API_BASE = '';
 
@@ -42,6 +44,8 @@ export default function SemanticSearch() {
   const [results, setResults] = useState(null); // null = use store assets; array = search results
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState(null);
+  const [selectedAsset, setSelectedAsset] = useState(null);
+  const [activeDetailTab, setActiveDetailTab] = useState('overview');
 
   // ── Derived state ────────────────────────────────────────────────────
   const displayAssets = results || assets;
@@ -398,7 +402,21 @@ export default function SemanticSearch() {
             <div
               key={asset.id}
               className="archival-card"
-              style={{ padding: 0, overflow: 'hidden', position: 'relative' }}
+              role="button"
+              tabIndex={0}
+              onClick={() => {
+                setSelectedAsset(asset);
+                setActiveDetailTab('overview');
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setSelectedAsset(asset);
+                  setActiveDetailTab('overview');
+                }
+              }}
+              data-testid={`asset-card-${asset.id}`}
+              style={{ padding: 0, overflow: 'hidden', position: 'relative', cursor: 'pointer' }}
             >
               {/* Image thumbnail */}
               {asset.image_uri && (
@@ -506,6 +524,228 @@ export default function SemanticSearch() {
           </div>
         )}
       </div>
+
+      {selectedAsset && (() => {
+        const displayDescription = getDisplayDescription(selectedAsset);
+        const structuredDetails = getStructuredAssetDetails(selectedAsset);
+        const galleryImages = selectedAsset.images?.length
+          ? selectedAsset.images
+          : selectedAsset.image_uri
+            ? [{ id: 'primary', image_uri: selectedAsset.image_uri, is_primary: true, angle_label: 'Primary' }]
+            : [];
+        const categoryColor = CATEGORIES.find((c) => c.key === selectedAsset.category)?.border || 'var(--color-border)';
+        const val = valuations[selectedAsset.id];
+
+        const tabs = [{ key: 'overview', label: 'Overview' }];
+        if (structuredDetails.specifications) tabs.push({ key: 'specifications', label: 'Specifications' });
+        if (structuredDetails.conditionReport) tabs.push({ key: 'condition', label: 'Condition Report' });
+        if (structuredDetails.keywords) tabs.push({ key: 'keywords', label: 'Search Keywords' });
+        if (selectedAsset.audio_uri) tabs.push({ key: 'story', label: '🎙 Spoken Story' });
+
+        const currentTab = tabs.some((t) => t.key === activeDetailTab) ? activeDetailTab : 'overview';
+
+        return (
+          <div
+            className="drawer-overlay"
+            onClick={() => setSelectedAsset(null)}
+            data-testid="asset-detail-modal"
+            style={{ alignItems: 'center', justifyContent: 'center', padding: '24px' }}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="asset-detail-title"
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                width: 'min(760px, calc(100vw - 32px))',
+                maxHeight: 'calc(100vh - 48px)',
+                overflowY: 'auto',
+                background: 'var(--color-card-bg)',
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--radius-md)',
+                boxShadow: '0 20px 50px rgba(15, 23, 42, 0.22)',
+              }}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 'var(--space-sm)',
+                  padding: 'var(--space-md)',
+                  borderBottom: '1px solid var(--color-border)',
+                }}
+              >
+                <h3 id="asset-detail-title" style={{ fontFamily: 'var(--font-serif)', margin: 0 }}>
+                  {selectedAsset.title || 'Untitled Asset'}
+                </h3>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setSelectedAsset(null)}
+                  aria-label="Close asset details"
+                >
+                  Close
+                </button>
+              </div>
+
+              {galleryImages.length > 0 && (
+                <div style={{ aspectRatio: '4/3', background: 'var(--color-bg)', borderBottom: '1px solid var(--color-border)' }}>
+                  <AssetGallery images={galleryImages} title={selectedAsset.title} />
+                </div>
+              )}
+
+              {/* Persistent summary strip — always visible regardless of active tab */}
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: 'var(--space-sm)',
+                  flexWrap: 'wrap',
+                  padding: 'var(--space-md) var(--space-lg)',
+                  borderBottom: '1px solid var(--color-border)',
+                }}
+              >
+                <span
+                  style={{
+                    display: 'inline-block',
+                    border: `1px solid ${categoryColor}`,
+                    color: categoryColor,
+                    padding: '2px 8px',
+                    borderRadius: '4px',
+                    fontSize: '0.75rem',
+                    fontWeight: 600,
+                  }}
+                >
+                  {selectedAsset.category || 'Other'}
+                </span>
+                {selectedAsset.status === 'PRE_ALLOCATED' && (
+                  <span className="badge" style={{ color: 'var(--color-alert)' }}>Pre-Allocated</span>
+                )}
+                {selectedAsset.valuation_min != null && selectedAsset.valuation_max != null && (
+                  <span className="text-sm" style={{ color: 'var(--color-text)', fontWeight: 600 }}>
+                    ${selectedAsset.valuation_min.toLocaleString()} – ${selectedAsset.valuation_max.toLocaleString()}
+                    {selectedAsset.valuation_source && (
+                      <span className="text-muted" style={{ fontWeight: 400 }}> · {selectedAsset.valuation_source}</span>
+                    )}
+                  </span>
+                )}
+                {val && (
+                  <span className="text-sm tabular-value" style={{ fontWeight: 600, marginLeft: 'auto' }}>
+                    {val.points || 0} pts
+                  </span>
+                )}
+              </div>
+
+              {/* Tab bar */}
+              <div
+                role="tablist"
+                aria-label="Asset detail sections"
+                style={{
+                  display: 'flex',
+                  gap: 'var(--space-xs)',
+                  padding: '0 var(--space-lg)',
+                  borderBottom: '1px solid var(--color-border)',
+                  overflowX: 'auto',
+                  flexWrap: 'nowrap',
+                }}
+              >
+                {tabs.map((tab) => (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    role="tab"
+                    aria-selected={currentTab === tab.key}
+                    onClick={() => setActiveDetailTab(tab.key)}
+                    data-testid={`asset-detail-tab-${tab.key}`}
+                    style={{
+                      whiteSpace: 'nowrap',
+                      padding: 'var(--space-sm) var(--space-md)',
+                      background: 'none',
+                      border: 'none',
+                      borderBottom: currentTab === tab.key ? '2px solid var(--color-primary)' : '2px solid transparent',
+                      color: currentTab === tab.key ? 'var(--color-primary)' : 'var(--color-text-muted)',
+                      fontWeight: currentTab === tab.key ? 600 : 500,
+                      fontSize: '0.875rem',
+                      cursor: 'pointer',
+                      marginBottom: '-1px',
+                    }}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Tab panel */}
+              <div style={{ padding: 'var(--space-lg)', display: 'flex', flexDirection: 'column', gap: 'var(--space-md)', minHeight: '120px' }}>
+                {currentTab === 'overview' && (
+                  <>
+                    {displayDescription ? (
+                      <p className="text-sm" style={{ color: 'var(--color-text-muted)', lineHeight: 1.55, margin: 0 }}>
+                        {displayDescription}
+                      </p>
+                    ) : (
+                      <p className="text-sm text-muted" style={{ margin: 0 }}>No description provided.</p>
+                    )}
+
+                    {selectedAsset.sentiment_tag && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                        {selectedAsset.sentiment_tag.split(',')
+                          .map((t) => t.trim())
+                          .filter(Boolean)
+                          .map((tag, idx) => (
+                            <span
+                              key={idx}
+                              style={{
+                                display: 'inline-block',
+                                padding: '1px 6px',
+                                borderRadius: '12px',
+                                background: 'var(--color-primary-light)',
+                                color: 'var(--color-primary)',
+                                fontSize: '0.65rem',
+                                fontWeight: 500,
+                              }}
+                            >
+                              #{tag}
+                            </span>
+                          ))}
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {currentTab === 'specifications' && (
+                  <p className="text-sm text-muted" style={{ margin: 0, lineHeight: 1.45, whiteSpace: 'pre-line' }}>
+                    {structuredDetails.specifications}
+                  </p>
+                )}
+
+                {currentTab === 'condition' && (
+                  <p className="text-sm text-muted" style={{ margin: 0, lineHeight: 1.45, whiteSpace: 'pre-line' }}>
+                    {structuredDetails.conditionReport}
+                  </p>
+                )}
+
+                {currentTab === 'keywords' && (
+                  <p className="text-sm text-muted" style={{ margin: 0, lineHeight: 1.45, whiteSpace: 'pre-line' }}>
+                    {structuredDetails.keywords}
+                  </p>
+                )}
+
+                {currentTab === 'story' && selectedAsset.audio_uri && (
+                  <audio
+                    src={selectedAsset.audio_uri.startsWith('/') ? selectedAsset.audio_uri : `/${selectedAsset.audio_uri}`}
+                    controls
+                    preload="none"
+                    style={{ width: '100%', height: '32px', borderRadius: '4px' }}
+                  />
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

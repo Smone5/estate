@@ -9,10 +9,10 @@ This document contains the backend-specific engineering specifications, database
 We employ a Kahneman-inspired System 1 / System 2 architecture to balance responsiveness with rigor:
 
 *   **System 1 (Fast Thinker)**: Handles real-time, low-latency mediation chat. Empathic, conversational, and lightweight.
-    *   **Model**: Qwen-2.5-8B-Instruct (Quantized GGUF hosted on Ollama).
+    *   **Model**: Qwen3-8B (Quantized GGUF hosted on Ollama).
     *   **Focus**: Latency, Sentiment Analysis, Active Listening.
 *   **System 2 (Slow Thinker)**: Handles complex logic, math validation, audit generation, and RAG retrieval.
-    *   **Model**: Qwen-2.5-14B-Instruct (`qwen2.5:14b-instruct` hosted on Ollama).
+    *   **Model**: Qwen3-14B (`qwen3:14b` hosted on Ollama).
     *   **Focus**: Fairness constraints, Hash-chaining, PII scrubbing verification, Conflict resolution.
 
 ---
@@ -35,11 +35,11 @@ The `uv sync` command reads `backend/pyproject.toml` and installs all declared d
 | :--- | :--- | :--- |
 | **Logic Orchestration** | LangGraph | Orchestrates the state machine between Fast/Slow thinkers. |
 | **LLM Abstraction Layer** | Custom Factory (`app/services/llm_provider.py`) | Decouples prompts and logic from LLM backends to support Ollama, OpenAI, Anthropic, or Google. |
-| **Fast Thinker** | Ollama/Qwen-2.5-8B (Local fallback) | Real-time chat (Sub-500ms token generation). |
-| **Slow Thinker** | Ollama/Qwen-2.5-14B (Local fallback) | Complex reasoning, Math, and Audit verification. |
+| **Fast Thinker** | Ollama/Qwen3-8B (Local fallback) | Real-time chat (Sub-500ms token generation). |
+| **Slow Thinker** | Ollama/Qwen3-14B (Local fallback) | Complex reasoning, Math, and Audit verification. |
 | **Backend API Gateway** | FastAPI | Async Python orchestrator and WebSocket router. |
 | **Database** | Postgres + pgvector | Primary database supporting vector search; sensitive fields encrypted via SQLAlchemy field encryption. |
-| **Vision & RAG** | Ollama (llava, nomic-embed-text) (Local fallback) | Vision OCR for asset uploads (`llava`) and embedding for RAG search (`nomic-embed-text`). |
+| **Vision & RAG** | Ollama (qwen3-vl, nomic-embed-text) (Local fallback) | Vision OCR for asset uploads (`qwen3-vl`) and embedding for RAG search (`nomic-embed-text`). |
 | **Observability** | Langfuse / Langtrace | Self-hosted tracing (Langfuse) and OpenTelemetry SDK (Langtrace) to monitor LangGraph. |
 | **Privacy / PII** | Microsoft Presidio | Context-aware PII scrubbing middleware. |
 | **Fair Division Math** | Fairpyx | Fair division logic utilizing Maximum Nash Welfare (MNW) scoring. |
@@ -50,23 +50,56 @@ The `uv sync` command reads `backend/pyproject.toml` and installs all declared d
 
 To enable seamless switching between open-source local-first compute and cloud LLM APIs, all node prompts, vision extractions, and embedding computations are routed through a unified LLM service factory (`app/services/llm_provider.py`) built on top of **LiteLLM**. Every generation call is mapped to `litellm.completion()` or `litellm.embedding()`, allowing support for any provider simply by setting environment variables—no codebase changes required.
 
-1.  **Supported Providers**:
-    *   `LLM_PROVIDER`: `'ollama'` (default) | `'openai'` | `'anthropic'` | `'google'` (Google AI Studio / Vertex AI) | `'openrouter'` | `'nvidia'` (NVIDIA NIM).
-    *   `EMBEDDING_PROVIDER`: `'ollama'` (default) | `'openai'` | `'google'` | `'openrouter'` | `'nvidia'`.
-    *   `VISION_PROVIDER`: `'ollama'` (default) | `'openai'` | `'google'` | `'anthropic'` | `'openrouter'` | `'nvidia'`.
-2.  **Configured Models**:
-    *   `FAST_THINKER_MODEL`: e.g. `qwen2.5:8b-instruct` (Ollama), `gpt-4o-mini` (OpenAI), `claude-3-5-haiku` (Anthropic), `gemini-2.5-flash` (Google).
-    *   `SLOW_THINKER_MODEL`: e.g. `qwen2.5:14b-instruct` (Ollama), `gpt-4o` (OpenAI), `claude-3-5-sonnet` (Anthropic), `gemini-2.5-pro` (Google).
-    *   `VISION_MODEL`: e.g. `llava:7b` (Ollama), `gpt-4o-mini` (OpenAI), `claude-3-5-sonnet` (Anthropic), `gemini-2.5-flash` (Google).
-    *   `EMBEDDING_MODEL`: e.g. `nomic-embed-text` (Ollama), `text-embedding-3-small` (OpenAI), `text-embedding-004` (Google).
-3.  **Unified API Interface**:
-    *   `generate_text(model_key, system_prompt, user_input, temperature, history=None) -> str`
-    *   `generate_structured(model_key, system_prompt, user_input, response_model, temperature) -> BaseModel` (forces JSON schemas via provider-agnostic fallback rules).
-    *   `generate_vision(model_key, image_bytes, prompt) -> str` (OCR extractions).
-    *   `get_embeddings(model_key, text) -> List[float]` (returns dense vector matching the active model's dimension size).
+#### 2.1.1 Per-Purpose Independent Provider/Model/Credentials
 
-4.  **Local-First / Cost-Saving Fallback**:
-    If external API credentials are omitted or `LLM_PROVIDER=ollama`, the backend defaults to local Ollama endpoints (`OLLAMA_BASE_URL`).
+Every LLM purpose has its own fully independent provider, model, API key, and base URL. This replaces the earlier single-provider design. The complete set of environment variables:
+
+| Purpose | Provider env var | Model env var | API Key env var | Base URL env var |
+| :--- | :--- | :--- | :--- | :--- |
+| Fast LLM (System 1 chat) | `FAST_PROVIDER` | `FAST_THINKER_MODEL` | `FAST_API_KEY` | `FAST_BASE_URL` |
+| Slow LLM (System 2 critique) | `SLOW_PROVIDER` | `SLOW_THINKER_MODEL` | `SLOW_API_KEY` | `SLOW_BASE_URL` |
+| Vision (image analysis) | `VISION_PROVIDER` | `VISION_MODEL` | `VISION_API_KEY` | `VISION_BASE_URL` |
+| Embedding (RAG) | `EMBEDDING_PROVIDER` | `EMBEDDING_MODEL` | `EMBEDDING_API_KEY` | `EMBEDDING_BASE_URL` |
+| Pricing (asset valuation) | `PRICING_PROVIDER` | `PRICING_MODEL` | `PRICING_API_KEY` | `PRICING_BASE_URL` |
+
+**Fallback rules** (existing deployments require no changes):
+*   If `FAST_PROVIDER` or `SLOW_PROVIDER` is not set, they fall back to the legacy `LLM_PROVIDER` value.
+*   If `PRICING_PROVIDER` is not set, it falls back to `VISION_PROVIDER`.
+*   Per-purpose `_API_KEY` and `_BASE_URL` override the shared company credentials (e.g. `OPENAI_API_KEY`) for that purpose only. This enables different OpenAI organization accounts per purpose, custom proxies, or any OpenAI-compatible endpoint (vLLM, Together.ai, Groq, LM Studio, etc.).
+
+**Supported providers** (same for every purpose slot): `'ollama'` (default) | `'openai'` | `'anthropic'` | `'google'` (Google AI Studio / Vertex AI) | `'openrouter'` | `'nvidia'` (NVIDIA NIM).
+
+#### 2.1.2 Internal Dispatch Helpers
+
+`LLMProvider` exposes two internal helpers that all generation methods use:
+
+*   `_provider_for_key(model_key) -> str`: given a model key constant (`MODEL_KEY_FAST`, `MODEL_KEY_SLOW`, `MODEL_KEY_VISION`, `MODEL_KEY_EMBEDDING`, `MODEL_KEY_PRICING`), returns the resolved provider string for that purpose.
+*   `_credentials_for_key(model_key) -> dict`: returns `{api_key, api_base}` overrides for that purpose. When set, these are passed directly to `litellm.completion()` / `litellm.embedding()` as `api_key` and `api_base` parameters (standard LiteLLM kwargs). If per-purpose keys are unset, the dict is empty and LiteLLM uses the shared environment-level credentials.
+
+#### 2.1.3 Unified API Interface
+
+*   `generate_text(model_key, system_prompt, user_input, temperature, history=None) -> str`
+*   `generate_structured(model_key, system_prompt, user_input, response_model, temperature) -> BaseModel` (forces JSON schemas via provider-agnostic fallback rules; passes `response_format=response_model` to LiteLLM, which converts it to Ollama's native `format` grammar-constrained decoding when the provider is Ollama).
+*   `generate_vision(model_key, image_bytes, prompt, response_format=None) -> str | BaseModel` — the optional `response_format` parameter accepts a Pydantic model class; when provided, structured JSON output is requested via the same `response_format` passthrough. Ollama vision calls include `extra_body={"num_ctx": 16384}` to increase context window for image + thinking tokens. Ollama thinking models (detected by provider) skip `response_format=json_object` (which causes empty content on these models) and instead embed the JSON schema in the system prompt.
+*   `get_embeddings(model_key, text) -> List[float]` (returns dense vector matching the active model's dimension size).
+
+#### 2.1.4 Local-First / Cost-Saving Fallback
+
+If external API credentials are omitted or `LLM_PROVIDER=ollama`, the backend defaults to local Ollama endpoints (`OLLAMA_BASE_URL`).
+
+#### 2.1.5 Multimodal Model Handling
+
+The LLM and Vision purposes are decoupled settings even when a single multimodal model could serve both roles. An Executor who wants to use one multimodal model for everything simply sets `VISION_MODEL` to the same model string as `FAST_THINKER_MODEL`/`SLOW_THINKER_MODEL` — the architecture does not require a dedicated vision-only model.
+
+#### 2.1.6 Thinking-Token Stripping & JSON Robustness
+
+Reasoning-capable model families (e.g. Qwen3, which emits `<think>...</think>` blocks, and Gemma-style models emitting `<|channel>thought...<channel|>` blocks) may prepend internal chain-of-thought text to their response before the final answer. `llm_provider.py` applies these helpers to the raw output of **every** generation path before returning to the caller:
+
+*   `_strip_thinking_tokens(text)`: removes thinking blocks; if stripping leaves an empty string, falls back to the original raw content.
+*   `_extract_json(text)`: strips markdown fences (` ```json ``` `) and finds the first `{...}` boundary in the text.
+*   `{"properties": {...}}` schema-echo unwrap: some models echo the Pydantic JSON schema structure instead of an instance; this is automatically detected and unwrapped.
+
+These guards ensure JSON parsing and downstream prompts never see leaked reasoning tokens or malformed JSON regardless of which model family is configured.
 
 ### 2.2 Dynamic Settings Service (`settings_service.py`)
 
@@ -74,6 +107,21 @@ To allow non-technical Executors to switch AI models or configure email servers 
 *   **Security Allowlist**: A strict registry (`SETTINGS_REGISTRY`) controls which configurations can be altered via the admin API. High-level infrastructure keys (such as `JWT_SECRET` or database passwords) are excluded from the registry.
 *   **Encrypted Storage**: Allowed settings are saved in the `app_settings` table, encrypted at rest via symmetric Fernet keys.
 *   **Dynamic Mirroring**: Values are loaded into `os.environ` on startup, and any runtime updates via the admin API immediately reload the LLM Provider singleton, applying the changes instantly without requiring a server reboot.
+
+#### 2.2.1 LLM Connection Test Endpoint
+
+To let an Executor verify a provider/model/credential combination actually works before committing to it, the Settings Service exposes a dedicated test endpoint:
+
+*   **Route**: `POST /api/admin/settings/test-connection` (Admin-only, rate-limited to 10/minute).
+*   **Request body**: `{ "purpose": "fast" | "slow" | "vision" | "embedding" | "pricing", "overrides": { <SETTINGS_REGISTRY key>: value, ... } }`.
+*   **Behavior**: Applies `overrides` to `os.environ` for the duration of the request only (never persisted to the `app_settings` table), then fires one minimal real call through the `LLMProvider` abstraction appropriate to the purpose:
+    *   `fast` or `slow` → `generate_text()` with a short fixed prompt ("Reply with exactly: OK").
+    *   `vision` or `pricing` → `generate_vision()` against a tiny generated 4×4 placeholder JPEG.
+    *   `embedding` → `get_embeddings()` on a short fixed string, reporting the returned vector's dimensionality.
+*   **Response**: `{ "success": bool, "detail"?: str, "elapsed_ms"?: int, "error"?: str }` — always returns HTTP 200 even on failure (provider/auth/timeout errors are caught and reported in the body, not surfaced as a 500), so the UI can render a pass/fail result inline.
+*   **Validation**: `purpose` must be one of the five valid values above; any override key not present in `SETTINGS_REGISTRY` under the `llm` section is rejected with HTTP 400 (e.g. an override cannot be used to probe `JWT_SECRET` or database credentials). The `SETTINGS_REGISTRY` includes all per-purpose keys including all `PRICING_*` keys; `PRICING_*` is listed in `_LLM_RELOAD_PREFIXES` so provider singleton reloads on settings change.
+*   **Env restoration**: Overridden `os.environ` keys are restored to their prior value (or removed, if previously unset) in a `finally` block, guaranteeing the test never leaks into subsequent requests.
+*   **Frontend**: `AdminSettingsPanel.jsx` renders a "Test Connection" button inside each purpose card, sending the *current unsaved draft* provider/model/credential values as `overrides` — letting an Executor validate a new configuration before clicking Save.
 
 ---
 
@@ -610,7 +658,7 @@ All administrative, session management, and verification actions are executed vi
     *   **Logic**: 
         1. Preprocesses the image (HEIC conversion, WebP scaling) and saves the WebP image in `/app/static/uploads/`.
         2. Creates an asset row in the database, setting `ocr_status = 'PROCESSING'` and `status = 'STAGED'`.
-        3. Fires the `llava` visual OCR model asynchronously as a background worker thread.
+        3. Fires the `qwen3-vl` visual OCR model asynchronously as a background worker thread.
         4. Once the background worker completes extraction, it updates the asset row with the extracted metadata (title, category, tags, description) and updates `ocr_status = 'COMPLETED'` (or `'FAILED'` on error).
         5. The backend immediately dispatches a WebSocket frame of type `"asset_ocr_completed"` to the Admin broadcast channel containing the pre-filled asset payload and its UUID, notifying the UI that the metadata is ready for edit.
     *   **Constraint (Inventory Lock)**: Disables and returns `400 Bad Request` if the session status is `'ACTIVE'`, `'LOCKED'`, or `'FINALIZED'`.
@@ -644,6 +692,36 @@ All administrative, session management, and verification actions are executed vi
     *   **Description**: Deletes the Admin's recorded voice story for the asset. Removes the file from the local storage volume and resets the asset's `audio_uri` to `NULL`.
     *   **Constraint (Inventory Lock)**: Disables and returns `400 Bad Request` if the session status is `'ACTIVE'`, `'LOCKED'`, or `'FINALIZED'`.
     *   **Response**: `{"status": "success", "message": "Asset voice recording deleted"}`
+*   **`POST /api/assets/{asset_id}/generate-details`**
+    *   **Access**: Admin credentials required.
+    *   **Request Body**: None (uses the asset's existing `image_uri` and any secondary images stored on the record).
+    *   **Description**: Two-step AI generation pipeline that analyzes the asset's photo(s) and returns structured listing details plus a pricing estimate. Designed to pre-fill the Edit Keepsake Details drawer in the Admin UI.
+    *   **Step 1 — Listing Generation**:
+        1.  Loads the asset's primary image bytes (and secondary images if present).
+        2.  Calls `generate_vision(MODEL_KEY_VISION, image_bytes, prompt, response_format=AssetListingResponse)` with `max_tokens=4096` to accommodate thinking-model reasoning token budgets.
+        3.  `AssetListingResponse` is a Pydantic model with fields: `title` (str), `category` (str), `item_overview` (str), `specifications` (str), `condition_report` (str), `keywords` (List[str]), `sentiment_tags` (List[str]), `dimensions` (nested object: `length_in`, `width_in`, `height_in`, `weight_lb`, `dimension_source`, `dimension_confidence`, `dimension_notes`).
+        4.  LiteLLM passes `response_format=AssetListingResponse` to Ollama's native `format` parameter for grammar-constrained decoding.
+    *   **Step 2 — Pricing Generation** (non-fatal; runs after Step 1 regardless of Step 1 result):
+        1.  Calls `generate_vision(MODEL_KEY_PRICING, image_bytes, pricing_prompt, response_format=ValuationEstimate)` using the `PRICING_PROVIDER`/`PRICING_MODEL` (falls back to `VISION_PROVIDER` if unset).
+        2.  The pricing prompt grounds the estimate in the already-generated `title`, `category`, `condition_report`, and `specifications` from Step 1, plus the photo.
+        3.  `ValuationEstimate` is a Pydantic model with fields: `valuation_min` (float), `valuation_max` (float), `valuation_basis` (str — a brief explanation of the estimate).
+        4.  If the pricing call fails, the error is logged as a warning and the endpoint still returns the Step 1 listing data. The pricing fields in the response are `null`.
+        5.  The Pricing purpose is explicitly the seam where a future live pricing API or web-search tool plugs in — swap `MODEL_KEY_PRICING` to point at a tool-calling model with web access and the rest of the pipeline does not change.
+    *   **Response**: Combined JSON containing all `AssetListingResponse` fields plus `valuation_min`, `valuation_max`, `valuation_basis` (nullable).
+    *   **Note**: This endpoint does NOT write to the database. The Admin reviews/edits the returned values in the drawer and saves via the existing publish/update endpoint.
+
+*   **`POST /api/assets/{asset_id}/ai-feedback`**
+    *   **Access**: Admin credentials required.
+    *   **Request Body**: `{ "rating": "thumbs_up" | "thumbs_down", "comment": str }`.
+    *   **Description**: Records human verification or rejection of AI-generated asset listing details. Called from the "✓ Mark as Verified" button in the Edit Keepsake Details drawer after the Admin has reviewed and optionally edited AI-generated fields.
+    *   **Logic**:
+        1.  Reads the asset's current `title`, `description`, `valuation_min`, `valuation_max`, and `category` from the database.
+        2.  Builds a `snapshot` dict capturing those values at the time of verification.
+        3.  Stores `{ "rating": ..., "comment": ..., "submitted_at": ISO-8601, "snapshot": {...} }` as JSON in the `assets.ai_feedback` column.
+        4.  The snapshot is intended for future RLHF / fine-tuning pipelines — it records the human-approved state of the listing immediately after review.
+    *   **Response**: `{ "status": "success" }`.
+    *   **Serialization**: The `ai_feedback` field is included in ALL asset serialization dicts returned by the API (asset list, single asset, OCR completion WebSocket frame) so the frontend can show the correct verification badge.
+
 *   **`POST /api/assets/{asset_id}/pre-allocate`**
     *   **Access**: Admin credentials required.
     *   **Request Body**: `{"allocated_to_id": "UUID"}`
@@ -1079,13 +1157,32 @@ services:
       - STORAGE_DRIVER=${STORAGE_DRIVER:-LOCAL}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - DB_ECHO=${DB_ECHO:-False}
+      # Legacy shared provider (fallback if per-purpose FAST_PROVIDER/SLOW_PROVIDER not set)
       - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
-      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-ollama}
+      # Per-purpose providers (override LLM_PROVIDER for each purpose individually)
+      - FAST_PROVIDER=${FAST_PROVIDER}
+      - SLOW_PROVIDER=${SLOW_PROVIDER}
       - VISION_PROVIDER=${VISION_PROVIDER:-ollama}
-      - FAST_THINKER_MODEL=${FAST_THINKER_MODEL:-qwen2.5:8b-instruct}
-      - SLOW_THINKER_MODEL=${SLOW_THINKER_MODEL:-qwen2.5:14b-instruct}
-      - VISION_MODEL=${VISION_MODEL:-llava:7b}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-ollama}
+      - PRICING_PROVIDER=${PRICING_PROVIDER}
+      # Per-purpose models
+      - FAST_THINKER_MODEL=${FAST_THINKER_MODEL:-qwen3:8b}
+      - SLOW_THINKER_MODEL=${SLOW_THINKER_MODEL:-qwen3:14b}
+      - VISION_MODEL=${VISION_MODEL:-qwen3-vl:8b}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
+      - PRICING_MODEL=${PRICING_MODEL}
+      # Per-purpose API keys and base URLs (override shared keys for that purpose only)
+      - FAST_API_KEY=${FAST_API_KEY}
+      - FAST_BASE_URL=${FAST_BASE_URL}
+      - SLOW_API_KEY=${SLOW_API_KEY}
+      - SLOW_BASE_URL=${SLOW_BASE_URL}
+      - VISION_API_KEY=${VISION_API_KEY}
+      - VISION_BASE_URL=${VISION_BASE_URL}
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL}
+      - PRICING_API_KEY=${PRICING_API_KEY}
+      - PRICING_BASE_URL=${PRICING_BASE_URL}
+      # Shared/company-level fallback credentials
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://localhost:11434}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
@@ -1129,6 +1226,15 @@ volumes:
   uploads_data:
 ```
 
+### 12.0 Frontend vs. Backend Deployment — CRITICAL Distinction
+
+The React/Vite frontend is **NOT** part of the `app` Docker service. Nginx serves the pre-built static files from `./frontend/dist` as a read-only volume mount. These are two completely independent build steps:
+
+*   **Frontend change** (any file under `frontend/src/**`): requires `cd frontend && npm run build`. Rebuilding or restarting the backend Docker service does NOT update the frontend JavaScript files served by Nginx.
+*   **Backend change** (`backend/**`): requires `docker compose build app && docker compose up -d app`. Rebuilding the frontend does not require restarting the backend.
+
+Both steps are independent. If you change a component in `frontend/src/`, run the frontend build. If you change a FastAPI route, rebuild the app container. Running only one step when both changed will result in mismatched behavior.
+
 ### 12.1 Network Exposure & Security Safeguards (Exposing Local Server)
 When running the application on a local computer or Raspberry Pi 5 where heirs are located on separate, external networks, the local server must be exposed to the public internet securely:
 *   **Outbound-Only Tunneling (Recommended)**: To prevent exposing the local network, the server should be exposed using a secure, outbound-only tunnel provider (such as **Cloudflare Tunnels** or **Localtunnel**). These tunnels establish an outbound link to the tunnel provider's proxy servers, generating a public HTTPS URL (e.g., `https://estate.yourdomain.com`). This ensures that no ports are opened on the router, keeping the home network's firewall completely intact and safe from external port scanners.
@@ -1138,9 +1244,9 @@ When running the application on a local computer or Raspberry Pi 5 where heirs a
 
 ### 12.2 Raspberry Pi 5 LLM Memory Optimization & Scaling
 When deploying this System 1 / System 2 double-brain architecture on a hardware-constrained device like a Raspberry Pi 5 (which is limited to 8GB of RAM), the following model size constraints must be applied to prevent Out-of-Memory (OOM) crashes and high latency swapping:
-*   **Fast Mediator Model (System 1)**: Scale down to **`qwen2.5:1.5b-instruct`** or **`qwen2.5:3b-instruct`** (quantized to Q4_K_M). These require less than 2.5GB of RAM, enabling fast, real-time streaming chat generation (30+ tokens/sec).
-*   **Slow Critic Model (System 2)**: Scale down to **`qwen2.5:7b-instruct`** or **`qwen2.5:8b-instruct`** (quantized to Q4_K_M). Since System 2 processes validations and mathematical proofs sequentially, memory allocation can be managed dynamically by Ollama, staying within the 8GB RAM boundary.
-*   **Vision Model**: Use **`moondream:latest`** or **`llava:7b`** (Q4) for image uploads.
+*   **Fast Mediator Model (System 1)**: Scale down to **`qwen3:0.6b`** or **`qwen3:1.7b`** (quantized to Q4_K_M). These require less than 2.5GB of RAM, enabling fast, real-time streaming chat generation (30+ tokens/sec).
+*   **Slow Critic Model (System 2)**: Scale down to **`qwen3:8b`** (quantized to Q4_K_M). Since System 2 processes validations and mathematical proofs sequentially, memory allocation can be managed dynamically by Ollama, staying within the 8GB RAM boundary.
+*   **Vision Model**: Use **`qwen3-vl:2b`** or **`qwen3-vl:8b`** (Q4) for image uploads.
 *   **Embeddings**: Use **`nomic-embed-text`** for lightweight, localized RAG retrieval.
 
 ---

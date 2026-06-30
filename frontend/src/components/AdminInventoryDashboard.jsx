@@ -5,6 +5,12 @@ import AssetGallery from './AssetGallery';
 import AdminVoiceRecorder from './AdminVoiceRecorder';
 import ImageEditModal from './ImageEditModal';
 import {
+  getDisplayDescription,
+  getStructuredAssetDetails,
+  hasStructuredAssetDetails,
+  StructuredAssetDetails,
+} from '../utils/assetDetails';
+import {
   saveStagingItem,
   loadStagingItems,
   loadPendingStagingItems,
@@ -24,6 +30,18 @@ const VALUATION_SOURCES = [
   'Estate Sale Estimator',
   'Personal Estimate',
   'AI Appraisal',
+];
+
+const DIMENSION_CONFIDENCE_OPTIONS = ['', 'Low', 'Medium', 'High'];
+
+const EDIT_DETAIL_TABS = [
+  { id: 'basics', label: 'Title' },
+  { id: 'specifications', label: 'Specifications' },
+  { id: 'condition', label: 'Condition' },
+  { id: 'dimensions', label: 'Dimensions' },
+  { id: 'estimate', label: 'Estimate' },
+  { id: 'search', label: 'Search' },
+  { id: 'images', label: 'Images' },
 ];
 
 // Default room/location options
@@ -70,97 +88,6 @@ const PHOTO_LABEL_SUGGESTIONS = [
   'Close-up detail',
 ];
 
-function getDisplayDescription(asset) {
-  const description = asset?.description?.trim();
-  if (!description) return '';
-
-  const normalized = description.toLowerCase();
-  if (
-    normalized === 'ocr extracting details...' ||
-    normalized === 'ai appraising...' ||
-    normalized.startsWith('ocr extracting details')
-  ) {
-    return '';
-  }
-
-  return description;
-}
-
-function parseDescriptionJson(asset) {
-  try {
-    if (!asset?.description_json) return {};
-    return typeof asset.description_json === 'string'
-      ? JSON.parse(asset.description_json)
-      : asset.description_json;
-  } catch {
-    return {};
-  }
-}
-
-function normalizeDetailValue(value) {
-  if (Array.isArray(value)) {
-    return value.filter(Boolean).join('\n');
-  }
-  if (value && typeof value === 'object') {
-    return Object.entries(value)
-      .filter(([, detail]) => detail != null && `${detail}`.trim())
-      .map(([key, detail]) => `${key}: ${detail}`)
-      .join('\n');
-  }
-  return typeof value === 'string' ? value.trim() : '';
-}
-
-function getStructuredAssetDetails(asset) {
-  const djson = parseDescriptionJson(asset);
-  return {
-    specifications: normalizeDetailValue(asset?.specifications || djson.specifications),
-    conditionReport: normalizeDetailValue(asset?.condition_report || djson.condition_report),
-    keywords: normalizeDetailValue(asset?.keywords || djson.keywords),
-  };
-}
-
-function hasStructuredAssetDetails(details) {
-  return Boolean(details.specifications || details.conditionReport || details.keywords);
-}
-
-function StructuredAssetDetails({ details, compact = false }) {
-  const rows = [
-    ['Specifications', details.specifications],
-    ['Condition Report', details.conditionReport],
-    ['Search Keywords', details.keywords],
-  ].filter(([, value]) => value);
-
-  if (rows.length === 0) return null;
-
-  return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      gap: compact ? '6px' : 'var(--space-sm)',
-      marginTop: compact ? 'var(--space-xs)' : 0,
-    }}>
-      {rows.map(([label, value]) => (
-        <div key={label}>
-          <p className="text-xs" style={{
-            marginBottom: '2px',
-            color: 'var(--color-text)',
-            fontWeight: 700,
-          }}>
-            {label}
-          </p>
-          <p className="text-sm text-muted" style={{
-            margin: 0,
-            lineHeight: 1.45,
-            whiteSpace: 'pre-line',
-          }}>
-            {value}
-          </p>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 /**
  * Retrieve the persisted room selection from localStorage, or default to 'Living Room'.
  */
@@ -186,6 +113,12 @@ function normalizeMediaSrc(src) {
   if (!src) return '';
   if (/^(https?:|data:|blob:)/i.test(src)) return src;
   return src.startsWith('/') ? src : `/${src}`;
+}
+
+function normalizeOptionalNumberInput(value) {
+  if (value === '' || value == null) return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
 }
 
 async function fetchWithTimeout(url, options, timeoutMs = STAGING_UPLOAD_TIMEOUT_MS) {
@@ -219,6 +152,7 @@ export default function AdminInventoryDashboard({
   const [loading, setLoading] = useState(propAssets === undefined);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState(null);
+  const [aiGenerationError, setAiGenerationError] = useState(null);
   const [editingAssetId, setEditingAssetId] = useState(null);
 
   // Redesign states
@@ -254,6 +188,7 @@ export default function AdminInventoryDashboard({
   const [showPhotoLabelHelp, setShowPhotoLabelHelp] = useState(false);
 
   // Edit form state
+  const [activeEditTab, setActiveEditTab] = useState('basics');
   const [editForm, setEditForm] = useState({
     title: '',
     description: '',
@@ -261,6 +196,13 @@ export default function AdminInventoryDashboard({
     valuation_min: 0,
     valuation_max: 0,
     valuation_source: 'Personal Estimate',
+    length_in: '',
+    width_in: '',
+    height_in: '',
+    weight_lb: '',
+    dimension_source: '',
+    dimension_confidence: '',
+    dimension_notes: '',
     sentiment_tag: '',
   });
 
@@ -296,6 +238,8 @@ export default function AdminInventoryDashboard({
 
   // AI Details generation state
   const [generatingDetails, setGeneratingDetails] = useState({});
+  const [aiGeneratedAssets, setAiGeneratedAssets] = useState({});
+  const [verifyingAssets, setVerifyingAssets] = useState({});
   const [loaderMessage, setLoaderMessage] = useState('');
   
   // AI Feedback states
@@ -405,9 +349,12 @@ export default function AdminInventoryDashboard({
         throw new Error(errData.detail || `AI Generation failed: ${res.status}`);
       }
       const data = await res.json();
+      setAiGeneratedAssets((prev) => ({ ...prev, [assetId]: true }));
+      setAiGenerationError(null);
       setEditForm((prev) => ({
         ...prev,
         title: data.title || prev.title,
+        category: data.category || prev.category,
         description: data.item_overview || data.description || prev.description,
         item_overview: data.item_overview || prev.item_overview || '',
         specifications: data.specifications || prev.specifications || '',
@@ -416,12 +363,42 @@ export default function AdminInventoryDashboard({
         valuation_min: data.valuation_min ?? prev.valuation_min,
         valuation_max: data.valuation_max ?? prev.valuation_max,
         valuation_source: data.valuation_source || 'AI Appraisal',
+        length_in: data.length_in ?? prev.length_in ?? '',
+        width_in: data.width_in ?? prev.width_in ?? '',
+        height_in: data.height_in ?? prev.height_in ?? '',
+        weight_lb: data.weight_lb ?? prev.weight_lb ?? '',
+        dimension_source: data.dimension_source || prev.dimension_source || '',
+        dimension_confidence: data.dimension_confidence || prev.dimension_confidence || '',
+        dimension_notes: data.dimension_notes || prev.dimension_notes || '',
         sentiment_tag: data.sentiment_tags || prev.sentiment_tag,
       }));
     } catch (err) {
-      setError(err.message);
+      setAiGenerationError(err.message);
     } finally {
       setGeneratingDetails((prev) => ({ ...prev, [assetId]: false }));
+    }
+  }
+
+  async function handleVerifyAsset(assetId) {
+    setVerifyingAssets((prev) => ({ ...prev, [assetId]: true }));
+    try {
+      const res = await fetch(`/api/assets/${assetId}/ai-feedback`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rating: 'thumbs_up', comment: 'Human verified after AI generation' }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Failed to save verification: ${res.status}`);
+      }
+      // Mark as verified in local state and clear the "just generated" banner
+      setAiGeneratedAssets((prev) => ({ ...prev, [assetId]: false }));
+      setAssets((prev) => prev.map((a) => a.id === assetId ? { ...a, ai_feedback: JSON.stringify({ rating: 'thumbs_up' }) } : a));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setVerifyingAssets((prev) => ({ ...prev, [assetId]: false }));
     }
   }
 
@@ -1118,6 +1095,7 @@ export default function AdminInventoryDashboard({
     } catch (e) { /* ignore */ }
 
     setEditingAssetId(asset.id);
+    setActiveEditTab('basics');
     setEditForm({
       title: asset.title || '',
       description: asset.description || '',
@@ -1125,6 +1103,13 @@ export default function AdminInventoryDashboard({
       valuation_min: asset.valuation_min ?? 0,
       valuation_max: asset.valuation_max ?? 0,
       valuation_source: asset.valuation_source || 'Personal Estimate',
+      length_in: asset.length_in ?? djson.dimensions?.length_in ?? '',
+      width_in: asset.width_in ?? djson.dimensions?.width_in ?? '',
+      height_in: asset.height_in ?? djson.dimensions?.height_in ?? '',
+      weight_lb: asset.weight_lb ?? djson.dimensions?.weight_lb ?? '',
+      dimension_source: asset.dimension_source || djson.dimensions?.source || djson.dimensions?.dimension_source || '',
+      dimension_confidence: asset.dimension_confidence || djson.dimensions?.confidence || djson.dimensions?.dimension_confidence || '',
+      dimension_notes: asset.dimension_notes || djson.dimensions?.notes || djson.dimensions?.dimension_notes || '',
       sentiment_tag: asset.sentiment_tag || '',
       item_overview: djson.item_overview || '',
       specifications: djson.specifications || '',
@@ -1164,7 +1149,17 @@ export default function AdminInventoryDashboard({
 
       const assetData =
         editingAssetId === assetId
-          ? { ...editForm, reason: reason || undefined }
+          ? {
+              ...editForm,
+              length_in: normalizeOptionalNumberInput(editForm.length_in),
+              width_in: normalizeOptionalNumberInput(editForm.width_in),
+              height_in: normalizeOptionalNumberInput(editForm.height_in),
+              weight_lb: normalizeOptionalNumberInput(editForm.weight_lb),
+              dimension_source: editForm.dimension_source || undefined,
+              dimension_confidence: editForm.dimension_confidence || undefined,
+              dimension_notes: editForm.dimension_notes || undefined,
+              reason: reason || undefined,
+            }
           : (() => {
               return {
                 title: asset?.title || '',
@@ -1173,6 +1168,13 @@ export default function AdminInventoryDashboard({
                 valuation_min: asset?.valuation_min ?? 0,
                 valuation_max: asset?.valuation_max ?? 0,
                 valuation_source: asset?.valuation_source || 'Personal Estimate',
+                length_in: asset?.length_in ?? null,
+                width_in: asset?.width_in ?? null,
+                height_in: asset?.height_in ?? null,
+                weight_lb: asset?.weight_lb ?? null,
+                dimension_source: asset?.dimension_source || undefined,
+                dimension_confidence: asset?.dimension_confidence || undefined,
+                dimension_notes: asset?.dimension_notes || undefined,
                 sentiment_tag: asset?.sentiment_tag || '',
                 reason: reason || undefined,
               };
@@ -1229,7 +1231,17 @@ export default function AdminInventoryDashboard({
         }
       }
 
-      const payload = { ...editForm, reason: reason || undefined };
+      const payload = {
+        ...editForm,
+        length_in: normalizeOptionalNumberInput(editForm.length_in),
+        width_in: normalizeOptionalNumberInput(editForm.width_in),
+        height_in: normalizeOptionalNumberInput(editForm.height_in),
+        weight_lb: normalizeOptionalNumberInput(editForm.weight_lb),
+        dimension_source: editForm.dimension_source || null,
+        dimension_confidence: editForm.dimension_confidence || null,
+        dimension_notes: editForm.dimension_notes || null,
+        reason: reason || undefined,
+      };
 
       const res = await fetch(`/api/assets/${assetId}/save`, {
         method: 'POST',
@@ -2460,6 +2472,11 @@ export default function AdminInventoryDashboard({
                           )}
                         </p>
                       )}
+                      {structuredDetails.dimensions && (
+                        <p className="text-sm text-muted" style={{ margin: '4px 0 0', whiteSpace: 'pre-line' }}>
+                          {structuredDetails.dimensions.split('\n')[0]}
+                        </p>
+                      )}
                       {asset.sentiment_tag && (
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '6px' }}>
                           {asset.sentiment_tag.split(',')
@@ -2485,6 +2502,19 @@ export default function AdminInventoryDashboard({
                         </div>
                       )}
                     </div>
+
+                    {/* AI verification badge */}
+                    {asset.ai_feedback && (() => {
+                      try { return JSON.parse(asset.ai_feedback)?.rating === 'thumbs_up'; } catch { return false; }
+                    })() ? (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', fontSize: '0.65rem', fontWeight: 600, color: '#22c55e', background: '#dcfce7', borderRadius: '4px', padding: '2px 6px', marginTop: '4px' }}>
+                        ✓ Human Verified
+                      </span>
+                    ) : asset.valuation_source === 'AI Appraisal' ? (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', fontSize: '0.65rem', fontWeight: 500, color: '#92400e', background: '#fef3c7', borderRadius: '4px', padding: '2px 6px', marginTop: '4px' }}>
+                        ✨ AI Generated
+                      </span>
+                    ) : null}
 
                     {/* Pre-allocated indicator */}
                     {asset.status === 'PRE_ALLOCATED' && asset.pre_allocated_to_heir_name && (
@@ -2598,6 +2628,7 @@ export default function AdminInventoryDashboard({
             <div className="list-layout">
               {processedAssets.map((asset) => {
                 const isPreAllocating = preAllocatingAssetId === asset.id;
+                const structuredDetails = getStructuredAssetDetails(asset);
                 return (
                   <div key={asset.id} className="list-item-card" data-testid={`asset-card-${asset.id}`}>
                     <div className="list-item-thumb">
@@ -2618,6 +2649,9 @@ export default function AdminInventoryDashboard({
                         </span>
                         {asset.valuation_min != null && asset.valuation_max != null && (
                           <span>${asset.valuation_min.toLocaleString()} – ${asset.valuation_max.toLocaleString()}</span>
+                        )}
+                        {structuredDetails.dimensions && (
+                          <span>{structuredDetails.dimensions.split('\n')[0]}</span>
                         )}
                         {asset.audio_uri && <span>🎤 Audio Story</span>}
                         {asset._similarity !== undefined && (
@@ -2860,22 +2894,201 @@ export default function AdminInventoryDashboard({
               <h3>Edit Keepsake Details</h3>
               <button type="button" className="close-btn" onClick={cancelEditing} aria-label="Close drawer">✕</button>
             </div>
-            
-            <div className="drawer-body">
-              {/* ✨ Generate with AI button */}
-              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 'var(--space-xs)' }}>
-                <button
-                  type="button"
-                  className="btn btn-secondary btn-sm"
-                  onClick={() => handleGenerateDetails(editingAssetId)}
-                  disabled={generatingDetails[editingAssetId]}
-                  data-testid={`generate-ai-btn-${editingAssetId}`}
-                  style={{ display: 'flex', alignItems: 'center', gap: '4px' }}
-                >
-                  {generatingDetails[editingAssetId] ? 'Analyzing image...' : '✨ Generate with AI'}
-                </button>
+
+            <div className="drawer-toolbar">
+              {/* AI status banner + Generate button row */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-xs)', gap: 'var(--space-sm)', flexWrap: 'wrap' }}>
+                {/* Left: status banner */}
+                <div style={{ fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  {(() => {
+                    const asset = assets.find((a) => a.id === editingAssetId);
+                    let isVerified = false;
+                    try { isVerified = JSON.parse(asset?.ai_feedback)?.rating === 'thumbs_up'; } catch { /* not JSON */ }
+                    const justGenerated = aiGeneratedAssets[editingAssetId];
+                    if (isVerified) {
+                      return (
+                        <span style={{ color: 'var(--color-success, #22c55e)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                          ✓ Human Verified
+                          <span style={{ color: 'var(--color-text-muted)', fontWeight: 400 }}>— AI generated &amp; reviewed</span>
+                        </span>
+                      );
+                    }
+                    if (justGenerated) {
+                      return (
+                        <span style={{ color: 'var(--color-warning, #f59e0b)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                          ⚠ AI Generated — please review before verifying
+                        </span>
+                      );
+                    }
+                    if (asset?.valuation_source === 'AI Appraisal') {
+                      return (
+                        <span style={{ color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                          ✨ AI Generated — not yet verified
+                        </span>
+                      );
+                    }
+                    return null;
+                  })()}
+                </div>
+                {/* Right: buttons */}
+                <div style={{ display: 'flex', gap: 'var(--space-xs)', alignItems: 'center' }}>
+                  {(() => {
+                    const asset = assets.find((a) => a.id === editingAssetId);
+                    try { return JSON.parse(asset?.ai_feedback)?.rating === 'thumbs_up'; } catch { return false; }
+                  })() ? (
+                    <span style={{ fontSize: '0.78rem', fontWeight: 600, color: '#22c55e', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      ✓ Verified
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => handleVerifyAsset(editingAssetId)}
+                      disabled={verifyingAssets[editingAssetId]}
+                      style={{ background: '#22c55e', color: '#fff', border: 'none', fontWeight: 600 }}
+                    >
+                      {verifyingAssets[editingAssetId] ? 'Saving...' : '✓ Mark as Verified'}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => handleGenerateDetails(editingAssetId)}
+                    disabled={generatingDetails[editingAssetId]}
+                    data-testid={`generate-ai-btn-${editingAssetId}`}
+                    style={{ display: 'flex', alignItems: 'center', gap: '4px' }}
+                  >
+                    {generatingDetails[editingAssetId] ? 'Analyzing image...' : '✨ Generate with AI'}
+                  </button>
+                </div>
               </div>
 
+              {error && (
+                <div className="banner banner-error" style={{ marginBottom: 'var(--space-xs)', padding: 'var(--space-xs)', fontSize: '0.78rem' }}>
+                  {error}
+                </div>
+              )}
+
+              <div className="edit-detail-tabs" role="tablist" aria-label="Keepsake detail sections">
+                {EDIT_DETAIL_TABS.map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={activeEditTab === tab.id}
+                    className={`edit-detail-tab ${activeEditTab === tab.id ? 'active' : ''}`}
+                    onClick={() => setActiveEditTab(tab.id)}
+                    data-testid={`edit-tab-${tab.id}`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="drawer-body">
+              {activeEditTab === 'dimensions' && (
+              <div style={{ padding: 'var(--space-sm)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', background: 'var(--color-bg)' }}>
+                <h5 style={{ fontFamily: 'var(--font-serif)', marginBottom: 'var(--space-xs)', fontSize: '0.9rem' }}>
+                  Logistics Dimensions
+                </h5>
+                <div className="admin-form-grid">
+                  <div>
+                    <label className="form-label">Length (in)</label>
+                    <input
+                      className="form-input"
+                      type="number"
+                      min={0}
+                      step="0.1"
+                      value={editForm.length_in ?? ''}
+                      onChange={(e) => handleEditFieldChange('length_in', e.target.value)}
+                      placeholder="Optional"
+                      data-testid={`edit-length-${editingAssetId}`}
+                    />
+                  </div>
+                  <div>
+                    <label className="form-label">Width (in)</label>
+                    <input
+                      className="form-input"
+                      type="number"
+                      min={0}
+                      step="0.1"
+                      value={editForm.width_in ?? ''}
+                      onChange={(e) => handleEditFieldChange('width_in', e.target.value)}
+                      placeholder="Optional"
+                      data-testid={`edit-width-${editingAssetId}`}
+                    />
+                  </div>
+                  <div>
+                    <label className="form-label">Height (in)</label>
+                    <input
+                      className="form-input"
+                      type="number"
+                      min={0}
+                      step="0.1"
+                      value={editForm.height_in ?? ''}
+                      onChange={(e) => handleEditFieldChange('height_in', e.target.value)}
+                      placeholder="Optional"
+                      data-testid={`edit-height-${editingAssetId}`}
+                    />
+                  </div>
+                  <div>
+                    <label className="form-label">Weight (lb)</label>
+                    <input
+                      className="form-input"
+                      type="number"
+                      min={0}
+                      step="0.1"
+                      value={editForm.weight_lb ?? ''}
+                      onChange={(e) => handleEditFieldChange('weight_lb', e.target.value)}
+                      placeholder="Optional"
+                      data-testid={`edit-weight-${editingAssetId}`}
+                    />
+                  </div>
+                </div>
+                <div className="admin-form-grid" style={{ marginTop: 'var(--space-xs)' }}>
+                  <div>
+                    <label className="form-label">Dimension Source</label>
+                    <input
+                      className="form-input"
+                      value={editForm.dimension_source || ''}
+                      onChange={(e) => handleEditFieldChange('dimension_source', e.target.value)}
+                      placeholder="Measured, AI Estimate, label..."
+                      data-testid={`edit-dimension-source-${editingAssetId}`}
+                    />
+                  </div>
+                  <div>
+                    <label className="form-label">Confidence</label>
+                    <select
+                      className="form-input"
+                      value={editForm.dimension_confidence || ''}
+                      onChange={(e) => handleEditFieldChange('dimension_confidence', e.target.value)}
+                      data-testid={`edit-dimension-confidence-${editingAssetId}`}
+                    >
+                      {DIMENSION_CONFIDENCE_OPTIONS.map((option) => (
+                        <option key={option || 'blank'} value={option}>
+                          {option || 'Not specified'}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <div style={{ marginTop: 'var(--space-xs)' }}>
+                  <label className="form-label">Logistics Notes</label>
+                  <textarea
+                    className="form-input"
+                    value={editForm.dimension_notes || ''}
+                    onChange={(e) => handleEditFieldChange('dimension_notes', e.target.value)}
+                    rows={2}
+                    placeholder="Estimated from image, needs measuring, fragile, awkward to carry..."
+                    data-testid={`edit-dimension-notes-${editingAssetId}`}
+                  />
+                </div>
+              </div>
+              )}
+
+              {activeEditTab === 'basics' && (
+              <>
               <div>
                 <label className="form-label">Title</label>
                 <input
@@ -2898,42 +3111,6 @@ export default function AdminInventoryDashboard({
                   data-testid={`edit-description-${editingAssetId}`}
                 />
               </div>
-
-              <div>
-                <label className="form-label">Specifications</label>
-                <textarea
-                  className="form-input"
-                  value={editForm.specifications || ''}
-                  onChange={(e) => handleEditFieldChange('specifications', e.target.value)}
-                  rows={3}
-                  placeholder="Bullet points: materials, dimensions, hardware..."
-                  data-testid={`edit-specifications-${editingAssetId}`}
-                />
-              </div>
-
-              <div>
-                <label className="form-label">Condition Report</label>
-                <textarea
-                  className="form-input"
-                  value={editForm.condition_report || ''}
-                  onChange={(e) => handleEditFieldChange('condition_report', e.target.value)}
-                  rows={2}
-                  placeholder="Visible wear, scratches, damage..."
-                  data-testid={`edit-condition-report-${editingAssetId}`}
-                />
-              </div>
-
-              <div>
-                <label className="form-label">Search Keywords</label>
-                <input
-                  className="form-input"
-                  value={editForm.keywords || ''}
-                  onChange={(e) => handleEditFieldChange('keywords', e.target.value)}
-                  placeholder="Comma-separated tags for search optimization..."
-                  data-testid={`edit-keywords-${editingAssetId}`}
-                />
-              </div>
-
               <div>
                 <label className="form-label">Category</label>
                 <select
@@ -2947,7 +3124,52 @@ export default function AdminInventoryDashboard({
                   ))}
                 </select>
               </div>
+              </>
+              )}
 
+              {activeEditTab === 'specifications' && (
+              <div>
+                <label className="form-label">Specifications</label>
+                <textarea
+                  className="form-input"
+                  value={editForm.specifications || ''}
+                  onChange={(e) => handleEditFieldChange('specifications', e.target.value)}
+                  rows={3}
+                  placeholder="Bullet points: materials, dimensions, hardware..."
+                  data-testid={`edit-specifications-${editingAssetId}`}
+                />
+              </div>
+              )}
+
+              {activeEditTab === 'condition' && (
+              <div>
+                <label className="form-label">Condition Report</label>
+                <textarea
+                  className="form-input"
+                  value={editForm.condition_report || ''}
+                  onChange={(e) => handleEditFieldChange('condition_report', e.target.value)}
+                  rows={2}
+                  placeholder="Visible wear, scratches, damage..."
+                  data-testid={`edit-condition-report-${editingAssetId}`}
+                />
+              </div>
+              )}
+
+              {activeEditTab === 'search' && (
+              <div>
+                <label className="form-label">Search Keywords</label>
+                <input
+                  className="form-input"
+                  value={editForm.keywords || ''}
+                  onChange={(e) => handleEditFieldChange('keywords', e.target.value)}
+                  placeholder="Comma-separated tags for search optimization..."
+                  data-testid={`edit-keywords-${editingAssetId}`}
+                />
+              </div>
+              )}
+
+              {activeEditTab === 'estimate' && (
+              <>
               <div className="admin-form-grid">
                 <div>
                   <label className="form-label">Min Value ($)</label>
@@ -3085,8 +3307,12 @@ export default function AdminInventoryDashboard({
                   })}
                 </div>
               </div>
+              </>
+              )}
 
               {/* Keepsake Photo Angles & Views */}
+              {activeEditTab === 'images' && (
+              <>
               <div style={{ marginTop: 'var(--space-sm)', padding: 'var(--space-sm)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', background: 'var(--color-primary-light)' }}>
                 <h5 style={{ fontFamily: 'var(--font-serif)', marginBottom: 'var(--space-xs)', fontSize: '0.85rem' }}>
                   Keepsake Photo Angles & Views
@@ -3223,6 +3449,8 @@ export default function AdminInventoryDashboard({
                   );
                 })()}
               </div>
+              </>
+              )}
 
             </div>
 
@@ -3337,6 +3565,58 @@ export default function AdminInventoryDashboard({
                 data-testid="confirm-delete-asset"
               >
                 {deletingAsset ? 'Deleting...' : 'Permanently Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {aiGenerationError && (
+        <div
+          className="drawer-overlay"
+          role="presentation"
+          onClick={() => setAiGenerationError(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 1300,
+            display: 'grid',
+            placeItems: 'center',
+            padding: 'var(--space-md)',
+            background: 'rgba(15, 23, 42, 0.55)',
+          }}
+        >
+          <div
+            className="archival-card"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="ai-generation-error-title"
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              width: 'min(480px, calc(100vw - 32px))',
+              padding: 'var(--space-lg)',
+              boxShadow: '0 24px 70px rgba(15, 23, 42, 0.3)',
+            }}
+            data-testid="ai-generation-error-dialog"
+          >
+            <h3
+              id="ai-generation-error-title"
+              style={{ fontFamily: 'var(--font-serif)', marginBottom: 'var(--space-sm)', color: 'var(--color-alert, #dc2626)' }}
+            >
+              ⚠ AI Generation Failed
+            </h3>
+            <p style={{ marginBottom: 'var(--space-md)' }}>{aiGenerationError}</p>
+            <p className="text-sm text-muted" style={{ marginBottom: 'var(--space-md)' }}>
+              No fields were changed. You can try again or fill in details manually.
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => setAiGenerationError(null)}
+                data-testid="dismiss-ai-generation-error"
+              >
+                OK
               </button>
             </div>
           </div>

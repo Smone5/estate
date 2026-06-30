@@ -195,6 +195,8 @@ We implement a **Mobile-First CSS Grid and Flexbox** layout system.
     *   **Asset Detail Pane**: High-fidelity previews use `object-fit: contain` inside a solid boxed frame, rendering the full, original photograph.
 *   **Metadata Badges**: Flat, border-only categorization pills with no backgrounds:
     *   `Jewelry` (Gold border `#C29F53`), `Furniture` (Warm brown border `#8E7558`), `Art` (Muted violet border `#7E6C84`), `Other` (Cool grey border `#64748B`).
+*   **Card Interaction (Required)**: Every gallery grid card must be clickable (and keyboard-activatable via `Enter`/`Space`) to open the **Asset Detail Pane** as a modal. The modal must render the full image gallery (all angles, not just the primary thumbnail), category badge, description, structured details (specifications, condition report, search keywords), valuation range, sentiment tags, and the spoken-story audio player when present — i.e. every field the Executor entered for that asset.
+*   **Availability Invariant**: This click-to-detail interaction is independent of slider/chat lock state and must remain functional in **every** `sessionStatus` value (`SETUP`, `ACTIVE`, `LOCKED`, `FINALIZED`) and every `userStatus` lock (`PROFILE_HOLD`, paused, submitted, HITL-suspended). Disabling allocation controls must never disable or unmount the detail view. This explicitly includes the **Keepsake Memory Book** (`FINALIZED`) view — heirs must be able to open full item details for their finalized allocations, not just a name/points summary.
 
 ### 3.2 Semantic Vector Search & Filter Controls
 *   **The Search Bar**: A prominent search input at the top of the gallery with a filter menu toggle.
@@ -296,7 +298,7 @@ To capture the Admin's actual spoken voice telling the story of an heirloom, the
 | **User Submitted** | Sliders disabled and replaced with flat point badges. Chat input disabled. | *"Valuations Submitted. Your selections are now locked. Waiting for other family members to submit."* |
 | **Grief Pause / Locked** | Sliders disabled. Chat input disabled. | *"Session Paused. The mediation space has been temporarily paused by the Executor. You can browse assets but allocations are frozen."* |
 | **Deadlocked** | Sliders disabled. Chat input disabled. | *"Conflict Review. The session is temporarily under review by the Executor to resolve conflicting allocations."* |
-| **Finalized** | Swaps Dashboard view to the **Keepsake Memory Book** view. Renders "Download PDF" and "Email Keepsake" buttons. | *"Mediation Finalized. Below is your keepsake ledger. You can save this report locally, print a copy, or email it to your registered address."* |
+| **Finalized** | Swaps Dashboard view to the **Keepsake Memory Book** view. Renders "Download PDF" and "Email Keepsake" buttons. Asset cards remain clickable and open the same Asset Detail Pane (full photos, description, structured details, audio) used pre-finalization — see §3.1 Card Interaction. | *"Mediation Finalized. Below is your keepsake ledger. You can save this report locally, print a copy, or email it to your registered address."* |
 
 ### 6.2 Admin Dashboard State Matrices
 

@@ -16,9 +16,9 @@ import ollama
 logger = logging.getLogger(__name__)
 
 # ---- configurable model names (defaults from .env.example) ----------
-_FAST_MODEL = os.environ.get("FAST_THINKER_MODEL", "qwen2.5:latest")
-_SLOW_MODEL = os.environ.get("SLOW_THINKER_MODEL", "qwen2.5:14b")
-_VISION_MODEL = os.environ.get("VISION_MODEL", "llava:latest")
+_FAST_MODEL = os.environ.get("FAST_THINKER_MODEL", "qwen3:8b")
+_SLOW_MODEL = os.environ.get("SLOW_THINKER_MODEL", "qwen3:14b")
+_VISION_MODEL = os.environ.get("VISION_MODEL", "qwen3-vl:8b")
 _EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "nomic-embed-text")
 
 _OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")

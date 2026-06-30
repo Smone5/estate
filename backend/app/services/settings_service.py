@@ -31,13 +31,32 @@ _PROVIDER_CHOICES = ["ollama", "openai", "anthropic", "google", "openrouter", "n
 
 SETTINGS_REGISTRY: Dict[str, Dict[str, Any]] = {
     # --- LLM ---
+    # Each purpose (fast, slow, vision, embedding, pricing) has its own independent
+    # provider so admins can mix freely — e.g. local Ollama for fast, Anthropic for
+    # slow, Google for vision, OpenAI for pricing.
+    # LLM_PROVIDER is the legacy fallback: if FAST_PROVIDER / SLOW_PROVIDER are left
+    # blank, both fall back to LLM_PROVIDER, so existing installs keep working.
     "LLM_PROVIDER": {"section": "llm", "secret": False, "choices": _PROVIDER_CHOICES},
-    "EMBEDDING_PROVIDER": {"section": "llm", "secret": False, "choices": _PROVIDER_CHOICES},
+    "FAST_PROVIDER": {"section": "llm", "secret": False, "choices": _PROVIDER_CHOICES},
+    "SLOW_PROVIDER": {"section": "llm", "secret": False, "choices": _PROVIDER_CHOICES},
     "VISION_PROVIDER": {"section": "llm", "secret": False, "choices": _PROVIDER_CHOICES},
+    "EMBEDDING_PROVIDER": {"section": "llm", "secret": False, "choices": _PROVIDER_CHOICES},
+    "PRICING_PROVIDER": {"section": "llm", "secret": False, "choices": _PROVIDER_CHOICES},
     "FAST_THINKER_MODEL": {"section": "llm", "secret": False},
+    "FAST_API_KEY": {"section": "llm", "secret": True},
+    "FAST_BASE_URL": {"section": "llm", "secret": False},
     "SLOW_THINKER_MODEL": {"section": "llm", "secret": False},
+    "SLOW_API_KEY": {"section": "llm", "secret": True},
+    "SLOW_BASE_URL": {"section": "llm", "secret": False},
     "VISION_MODEL": {"section": "llm", "secret": False},
+    "VISION_API_KEY": {"section": "llm", "secret": True},
+    "VISION_BASE_URL": {"section": "llm", "secret": False},
     "EMBEDDING_MODEL": {"section": "llm", "secret": False},
+    "EMBEDDING_API_KEY": {"section": "llm", "secret": True},
+    "EMBEDDING_BASE_URL": {"section": "llm", "secret": False},
+    "PRICING_MODEL": {"section": "llm", "secret": False},
+    "PRICING_API_KEY": {"section": "llm", "secret": True},
+    "PRICING_BASE_URL": {"section": "llm", "secret": False},
     "OLLAMA_BASE_URL": {"section": "llm", "secret": False},
     "OPENAI_API_KEY": {"section": "llm", "secret": True},
     "ANTHROPIC_API_KEY": {"section": "llm", "secret": True},
@@ -66,7 +85,8 @@ SETTINGS_REGISTRY: Dict[str, Dict[str, Any]] = {
 # so the next call picks up new config (it caches model/provider env reads
 # per-instance — see llm_provider.LLMProvider.__init__ / _resolve_model).
 _LLM_RELOAD_PREFIXES = (
-    "LLM_", "EMBEDDING_", "VISION_", "FAST_THINKER", "SLOW_THINKER",
+    "LLM_", "FAST_PROVIDER", "FAST_THINKER", "SLOW_PROVIDER", "SLOW_THINKER",
+    "VISION_", "EMBEDDING_", "PRICING_",
     "OLLAMA_", "OPENAI_", "ANTHROPIC_", "GEMINI_", "OPENROUTER_", "NVIDIA_",
 )
 

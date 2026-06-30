@@ -609,6 +609,13 @@ describe('AdminInventoryDashboard Component', () => {
         valuation_min: 100,
         valuation_max: 300,
         valuation_source: 'Personal Estimate',
+        length_in: 12,
+        width_in: 8,
+        height_in: 16,
+        weight_lb: 4.5,
+        dimension_source: 'Measured',
+        dimension_confidence: 'High',
+        dimension_notes: 'Fits in a medium moving box.',
         status: 'STAGED',
         ocr_status: 'COMPLETED',
         image_uri: null,
@@ -643,6 +650,7 @@ describe('AdminInventoryDashboard Component', () => {
       expect(screen.getByTestId('edit-title-asset-edit')).toBeInTheDocument();
       expect(screen.getByTestId('edit-description-asset-edit')).toBeInTheDocument();
       expect(screen.getByTestId('edit-category-asset-edit')).toBeInTheDocument();
+      expect(screen.getByTestId('edit-tab-dimensions')).toBeInTheDocument();
       expect(screen.getByTestId('publish-btn-asset-edit')).toBeInTheDocument();
     });
 
@@ -651,6 +659,24 @@ describe('AdminInventoryDashboard Component', () => {
     expect(screen.getByTestId('edit-description-asset-edit').value).toBe(
       'A ceramic vase',
     );
+
+    fireEvent.click(screen.getByTestId('edit-tab-dimensions'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Logistics Dimensions')).toBeInTheDocument();
+      expect(screen.getByTestId('edit-length-asset-edit')).toBeInTheDocument();
+      expect(screen.getByTestId('edit-width-asset-edit')).toBeInTheDocument();
+      expect(screen.getByTestId('edit-height-asset-edit')).toBeInTheDocument();
+      expect(screen.getByTestId('edit-weight-asset-edit')).toBeInTheDocument();
+    });
+
+    expect(screen.getByTestId('edit-length-asset-edit').value).toBe('12');
+    expect(screen.getByTestId('edit-width-asset-edit').value).toBe('8');
+    expect(screen.getByTestId('edit-height-asset-edit').value).toBe('16');
+    expect(screen.getByTestId('edit-weight-asset-edit').value).toBe('4.5');
+    expect(screen.getByTestId('edit-dimension-source-asset-edit').value).toBe('Measured');
+    expect(screen.getByTestId('edit-dimension-confidence-asset-edit').value).toBe('High');
+    expect(screen.getByTestId('edit-dimension-notes-asset-edit').value).toBe('Fits in a medium moving box.');
   });
 
   it('validates required fields and shows error on empty publish attempt', async () => {
@@ -984,6 +1010,8 @@ describe('AdminInventoryDashboard Component', () => {
 
     fireEvent.click(screen.getByTestId('edit-btn-asset-audio'));
 
+    fireEvent.click(screen.getByTestId('edit-tab-images'));
+
     await waitFor(() => {
       expect(screen.getByTestId('voice-recorder-asset-audio')).toBeInTheDocument();
     });
@@ -1089,6 +1117,8 @@ describe('AdminInventoryDashboard Component', () => {
     });
 
     fireEvent.click(screen.getByTestId('edit-btn-asset-with-audio'));
+
+    fireEvent.click(screen.getByTestId('edit-tab-images'));
 
     await waitFor(() => {
       expect(screen.getByTestId('delete-audio-btn-asset-with-audio')).toBeInTheDocument();
@@ -1377,6 +1407,8 @@ describe('AdminInventoryDashboard Component', () => {
       });
 
       fireEvent.click(screen.getByTestId('edit-btn-asset-tag'));
+
+      fireEvent.click(screen.getByTestId('edit-tab-estimate'));
 
       await waitFor(() => {
         expect(screen.getByTestId('suggested-tag-Heirloom')).toBeInTheDocument();

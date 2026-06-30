@@ -79,7 +79,7 @@ This specification defines the test suites, verification assertions, and mock bo
     *   Verify that soft-anonymizing the actual `state_snapshot` column during GDPR deletion (which replaces PII with `"Anonymized"`) does not change the pre-computed `sha256_hash` value, leaving the chain integrity intact.
 *   **Test Dynamic AI Model Transparency**:
     *   Verify that `GET /api/system/models` returns model details dynamically based on the active `FAST_THINKER_MODEL`, `SLOW_THINKER_MODEL`, and `VISION_MODEL` environment variables.
-    *   Verify that changing the environment variable value (e.g. setting `FAST_THINKER_MODEL=qwen2.5:3b-instruct` for Raspberry Pi) dynamically alters the returned model name and parameters in the response payload.
+    *   Verify that changing the environment variable value (e.g. setting `FAST_THINKER_MODEL=qwen3:1.7b` for Raspberry Pi) dynamically alters the returned model name and parameters in the response payload.
 
 ### 1.3 Staging Pipeline & Inventory Lock
 *   **Test Image Upload Conversion**:
@@ -135,6 +135,13 @@ This specification defines the test suites, verification assertions, and mock bo
 *   **Test Admin Settings Management**:
     *   Verify `GET /api/admin/settings` returns allowed registry keys, masking secrets (`is_set: true/false`).
     *   Verify `POST /api/admin/settings` writes encrypted values to `app_settings` and mirrors them directly into `os.environ` to dynamically update LLM provider and SMTP settings without a restart.
+*   **Test LLM Connection Test Endpoint** (`POST /api/admin/settings/test-connection`):
+    *   Verify an unknown `purpose` (not `fast`/`vision`/`embedding`) is rejected with `400 Bad Request`.
+    *   Verify an `overrides` key outside the `llm` section of `SETTINGS_REGISTRY` (e.g. `JWT_SECRET`) is rejected with `400 Bad Request`.
+    *   Verify a successful `purpose: "fast"` call returns `200 OK` with `success: true`, the model's reply text in `detail`, and an `elapsed_ms` timing value.
+    *   Verify a successful `purpose: "embedding"` call returns `success: true` with the returned vector's dimensionality reported in `detail`.
+    *   Verify that a provider/connection failure (e.g. `RuntimeError` raised by the underlying `LLMProvider` call) is caught and returned as `200 OK` with `success: false` and an `error` message — never surfaced as an unhandled `500`.
+    *   Verify that any `os.environ` keys mutated by `overrides` during the request are restored to their prior value (or removed, if previously unset) after the request completes, regardless of success or failure.
 *   **Test WebSocket Connection Routing**:
     *   Verify that active WebSocket sessions receive broadcast notifications for pause states, and that disconnected sockets are cleanly discarded.
 
@@ -216,6 +223,15 @@ These tests verify the state transition path of the compiled state machine:
     *   Mock Zustand state with `userStatus: 'ABSTAINED'` or `userStatus: 'EXPIRED_NON_PARTICIPATING'`. Verify that the dashboard component is completely unmounted and the `AbstentionWaitScreen` component is rendered.
 *   **Test View Finalization Swap**:
     *   Mock Zustand state with `sessionStatus: 'FINALIZED'`. Verify that the dashboard component is completely unmounted and the `KeepsakeMemoryBook` component is rendered.
+*   **Test Admin Settings — LLM Connection Test Buttons** (`AdminSettingsPanel.jsx`):
+    *   Verify a "Test {Purpose} Connection" button renders for each purpose (`fast`/`vision`/`embedding`) only when that purpose's model field is present in the fetched settings.
+    *   Verify clicking a test button POSTs to `/api/admin/settings/test-connection` with the *current unsaved draft* provider/model/credential values for that purpose, not the last-saved server values.
+    *   Verify a successful response renders `✓ {detail} ({elapsed_ms}ms)` in the result text next to the button.
+    *   Verify a failed response renders `✗ {error}` in the result text, and that the button does not get stuck in a "Testing…" disabled state after the response resolves.
+*   **Test Asset Detail Pane Availability (Required, regression coverage for the missing-click-handler defect)**:
+    *   For each `sessionStatus` (`SETUP`, `ACTIVE`, `LOCKED`, `FINALIZED`) and each `userStatus` lock combination in §3.2's component-disabling matrix (`PROFILE_HOLD`, `isPaused`, `is_hitl_suspended`, `isSubmitted`), render the heir inventory grid and assert that clicking an asset card (and pressing `Enter`/`Space` on a focused card) opens the Asset Detail Pane modal.
+    *   Assert the opened modal renders the asset's full image gallery (all `images`, not just `image_uri`), description, structured details (specifications/condition report/keywords) when present, valuation range, sentiment tags, and audio player when `audio_uri` is present.
+    *   Specifically for `sessionStatus: 'FINALIZED'`: assert the click-to-detail path is present inside the rendered `KeepsakeMemoryBook`/finalized layout, not just in the pre-finalization gallery. This is the exact regression class to guard against: a new "swap the whole view" layout (like the Finalized layout) silently dropping an interaction that earlier layouts had, because the new layout was built without re-checking the Asset Detail Pane invariant in Frontend Spec §5.4.
 *   **Test Waiver Signature Middle Name Matching**:
     *   Mock user legal details with a null middle name (`legal_middle_name = null`). Verify that typing exactly `"legal_first_name legal_last_name"` (filtered and joined with a single space) enables the "Sign & Abstain" button in the waiver modal, while typing `"legal_first_name null legal_last_name"` or `"legal_first_name None legal_last_name"` does not enable the button.
 *   **Test Session Resumption Card Mount**:

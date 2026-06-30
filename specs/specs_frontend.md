@@ -402,6 +402,8 @@ When the WebSocket client receives a `chat_reply_chunk` frame from the server co
 ### 5.4 Client-Side View Rendering Guards & Logic
 To prevent inconsistent user states (e.g. heirs editing points after submitting or during a pause), the React router and component tree must enforce the following conditional rendering guards:
 
+> **Invariant — Asset Detail View is never gated.** All of the guards below govern *editing* controls (sliders, chat, justification text, memory sharing). None of them may gate the heir's ability to click an asset card and view its full detail (images, description, structured details, valuation, audio). When introducing a new `sessionStatus`/`userStatus` layout or replacing the dashboard body (as the Finalized layout does in item 6 below), explicitly verify the new layout still renders a working click-to-detail path for every asset card — don't assume it carries over from the previous layout.
+
 1.  **Authentication Guard**:
     *   If `isAuthenticated` is `false`, client-side router blocks access to `/dashboard` and redirects to `/`.
 2.  **Abstention / Expiration Gate**:
@@ -422,6 +424,7 @@ To prevent inconsistent user states (e.g. heirs editing points after submitting 
     *   If `isPaused` is `false` and `isDeadlocked` is `true`, renders the banner: *"Conflict Review. The session is temporarily under review by the Executor to resolve conflicting allocations."*
 6.  **Finalized Keepsake Layout (`sessionStatus == 'FINALIZED'`)**:
     *   The entire dashboard layout is replaced with the **Keepsake Memory Book** view. The chat panel and points sliders are hidden. The page displays the Heir's final allocated assets list and provides download triggers for the keepsake PDF.
+    *   Each asset in this list remains a clickable card that opens the same Asset Detail Pane modal used in all other layouts (full image gallery, description, structured details, valuation, sentiment tags, spoken-story audio). The finalized layout swaps out *editing* affordances (sliders, submission controls), not the detail-viewing affordance — see the invariant at the top of §5.4.
 7.  **Family Memories & Stories Layout**:
     *   On the asset details view, if the asset's `shared_memories` list is populated, it renders them in a read-only collapsible section. No comments, replies, likes, or delete controls (other than one's own) are shown.
     *   During active editing (`isPaused == false` and `isSubmitted == false`), the memory textbox and the *"Share this memory with my family"* checkbox are active.
@@ -488,6 +491,70 @@ Facilitates Executor announcements and direct assistance:
 Handles outputs and fiduciary accounting:
 *   **Probate Audit Ledger**: Fetches the encrypted JSON chain, verifies historical hashes, and triggers PDF rendering with page templates.
 *   **Keepsake Memory Books**: Triggers background tasks that generate custom keepsakes for each heir and emails them using the SMTP dispatch service.
+
+### 6.5 `AdminSettingsPanel` — Grouped Purpose Cards (LLM Section)
+
+The LLM configuration section of `AdminSettingsPanel.jsx` is organized as one card per AI purpose. Each purpose card is fully self-contained:
+
+*   **Card layout** (one card per purpose: Fast, Slow, Vision, Embedding, Pricing):
+    *   Provider dropdown (options: `ollama`, `openai`, `anthropic`, `google`, `openrouter`, `nvidia`).
+    *   Model name text input (auto-filled with a sane default when the provider dropdown changes; defaults sourced from `PROVIDER_DEFAULT_MODELS` constant in the component).
+    *   API Key password input (per-purpose; maps to e.g. `FAST_API_KEY`, `VISION_API_KEY`).
+    *   Base URL text input (per-purpose; maps to e.g. `FAST_BASE_URL`, `VISION_BASE_URL`). Enables any OpenAI-compatible endpoint.
+    *   "Test Connection" button inside the card — sends the card's current draft values as `overrides` to `POST /api/admin/settings/test-connection` with the matching `purpose` string. Shows `✓ {detail} ({elapsed_ms}ms)` or `✗ {error}` inline beneath the button.
+*   **No separate "Credentials" section**: Per-purpose API key and base URL live inside the purpose card, not in a shared section below.
+*   **"Shared Provider Credentials" card** at the bottom of the LLM section only — shows company-level fallback keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OLLAMA_BASE_URL`). These are used when a purpose card's per-purpose key is left blank.
+*   **`PURPOSE_CREDENTIAL_FIELDS`**: a constant mapping each purpose key (`fast`, `slow`, `vision`, `embedding`, `pricing`) to its `_API_KEY` and `_BASE_URL` field names, used to construct the `overrides` payload for test-connection calls.
+*   **Non-LLM tabs** (smtp, storage) keep the original flat field layout — the grouped card design applies only to the `llm` tab.
+
+### 6.6 Edit Keepsake Details Drawer — AI Generation Workflow
+
+The Edit Keepsake Details slide-out drawer (in `AdminInventoryDashboard.jsx`) supports a full AI-assisted listing workflow:
+
+#### AI Generation
+
+*   **"✨ Generate with AI" button** in the drawer toolbar (right side). Calls `POST /api/assets/{asset_id}/generate-details`.
+*   On success, populates all drawer form fields (title, category, item_overview/description, specifications, condition_report, keywords, sentiment_tags, dimensions).
+*   After generation the asset is tracked in `aiGeneratedAssets` state (a `Set` of asset IDs) for the current admin session — used to show the "please review" banner until verified.
+
+#### AI Generation Error Modal
+
+When the generate-details call fails, a dedicated modal dialog renders on top of the drawer (z-index 1300 — above the drawer overlay):
+*   Title: "⚠ AI Generation Failed" (red/destructive styling).
+*   Body: the actual `detail` error message from the backend response.
+*   Note: "No fields were changed."
+*   "OK" dismiss button.
+
+This is kept separate from the shared `error` state/banner so it cannot be hidden behind the drawer overlay.
+
+#### Human Verification Workflow
+
+After AI generates listing details, the Admin reviews and optionally edits them, then clicks "✓ Mark as Verified":
+*   Calls `POST /api/assets/{asset_id}/ai-feedback` with `{ "rating": "thumbs_up", "comment": "Human verified after AI generation" }`.
+*   While saving, the asset ID is added to `verifyingAssets` state (a `Set`) to show a spinner/disabled state on the button.
+*   On success, the asset's `ai_feedback` field in local state is updated to reflect the verified state.
+
+#### Drawer Toolbar Layout
+
+The toolbar inside the Edit drawer renders:
+*   **Left side — status banner** (one of):
+    *   `"✓ Human Verified"` (green) — if `asset.ai_feedback?.rating === 'thumbs_up'`.
+    *   `"⚠ AI Generated — please review"` (amber) — if the asset is in `aiGeneratedAssets` but not yet verified.
+    *   `"✨ AI Generated — not yet verified"` (neutral) — if `ai_feedback` exists but rating is not `thumbs_up`.
+    *   No banner if no AI generation has occurred for this asset.
+*   **Right side — action buttons**:
+    *   `"✓ Verified"` label (static, green) if already verified; otherwise `"✓ Mark as Verified"` button.
+    *   `"✨ Generate with AI"` button (always visible in drawer toolbar).
+*   **Error banner for verify failures** renders INSIDE the drawer toolbar (not at the top of the page behind the overlay).
+
+### 6.7 Asset Card AI Badges
+
+Asset cards in the `AdminInventoryDashboard` inventory list display a status badge based on the asset's `ai_feedback` field:
+*   `"✓ Human Verified"` — green badge — when `ai_feedback?.rating === 'thumbs_up'`.
+*   `"✨ AI Generated"` — amber badge — when `ai_feedback` exists but the rating is not `thumbs_up` (i.e. AI-generated but not yet human-verified).
+*   No badge if `ai_feedback` is null/absent.
+
+---
 
 ## 7. Mobile Distribution Strategy (Phone-Based Usage Without App Store Submission)
 

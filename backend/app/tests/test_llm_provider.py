@@ -540,9 +540,9 @@ def ollama_provider(monkeypatch, ollama_available):
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     monkeypatch.setenv("EMBEDDING_PROVIDER", "ollama")
     monkeypatch.setenv("VISION_PROVIDER", "ollama")
-    monkeypatch.setenv("FAST_THINKER_MODEL", "qwen2.5:latest")
-    monkeypatch.setenv("SLOW_THINKER_MODEL", "qwen2.5:14b")
-    monkeypatch.setenv("VISION_MODEL", "llava:latest")
+    monkeypatch.setenv("FAST_THINKER_MODEL", "qwen3:8b")
+    monkeypatch.setenv("SLOW_THINKER_MODEL", "qwen3:14b")
+    monkeypatch.setenv("VISION_MODEL", "qwen3-vl:8b")
     monkeypatch.setenv("EMBEDDING_MODEL", "nomic-embed-text")
     reset_provider()
     return get_provider()
@@ -558,7 +558,7 @@ def test_ollama_health_check_real():
     assert result is True
 
 
-# ---- Fast thinker: qwen2.5:latest (text) ----
+# ---- Fast thinker: qwen3:8b (text) ----
 
 @ollama_marker
 def test_ollama_generate_text_fast(ollama_provider):
@@ -573,7 +573,7 @@ def test_ollama_generate_text_fast(ollama_provider):
     assert "blue" in result.lower() or "Blue" in result
 
 
-# ---- Slow thinker: qwen2.5:14b (structured JSON) ----
+# ---- Slow thinker: qwen3:14b (structured JSON) ----
 
 @ollama_marker
 def test_ollama_generate_text_slow(ollama_provider):
@@ -608,11 +608,11 @@ def test_ollama_generate_structured_slow(ollama_provider):
     assert isinstance(result.violation, bool)
 
 
-# ---- Vision: llava:latest ----
+# ---- Vision: qwen3-vl:8b ----
 
 @ollama_marker
 def test_ollama_generate_vision(ollama_provider):
-    """Send a tiny 1x1 white JPEG to llava and verify it returns text."""
+    """Send a tiny 1x1 white JPEG to qwen3-vl and verify it returns text."""
     # Minimal valid JPEG (1x1 white pixel)
     tiny_jpeg = bytes([
         0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46,

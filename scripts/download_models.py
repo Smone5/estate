@@ -2,7 +2,7 @@
 """
 Model Provisioning & Weight Download Script
 ============================================
-Automates pulling Ollama model weights (~17GB) and downloading the Kokoro-82M
+Automates pulling Ollama model weights (~21GB) and downloading the Kokoro-82M
 ONNX speech model (~2.5GB) plus its voice mapping JSON.
 
 Usage:
@@ -25,9 +25,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = PROJECT_ROOT / "backend" / "app" / "models"
 
 OLLAMA_MODELS = {
-    "qwen2.5:latest":  {"size_gb": 4.7, "description": "Fast Mediator (System 1) — 8B instruct"},
-    "qwen2.5:14b":     {"size_gb": 9.0, "description": "Slow Critique (System 2) — 14B instruct"},
-    "llava:latest":     {"size_gb": 4.7, "description": "Vision OCR Engine — 7B multimodal"},
+    "qwen3:8b":         {"size_gb": 5.2, "description": "Fast Mediator (System 1) — 8B"},
+    "qwen3:14b":        {"size_gb": 9.3, "description": "Slow Critique (System 2) — 14B"},
+    "qwen3-vl:8b":      {"size_gb": 6.1, "description": "Vision OCR Engine — 8B multimodal"},
     "nomic-embed-text": {"size_gb": 0.27, "description": "Semantic Search Embeddings"},
 }
 

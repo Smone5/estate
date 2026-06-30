@@ -262,6 +262,8 @@ class TestAssetsModel:
         expected_cols = {
             "id", "session_id", "title", "description", "category",
             "valuation_min", "valuation_max", "valuation_source",
+            "length_in", "width_in", "height_in", "weight_lb",
+            "dimension_source", "dimension_confidence", "dimension_notes",
             "sentiment_tag", "description_json",
             "image_uri", "audio_uri", "ocr_status",
             "status", "allocated_to_id", "embedding", "ai_feedback",

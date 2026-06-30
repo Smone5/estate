@@ -122,9 +122,9 @@ class MockLLMProvider:
             import httpx
             raise httpx.ReadTimeout("Simulated timeout")
 
-        if model_key in ("fast", "FAST_THINKER_MODEL", "qwen2.5:8b-instruct"):
+        if model_key in ("fast", "FAST_THINKER_MODEL", "qwen3:8b"):
             return FAST_MEDIATOR_RESPONSE
-        if model_key in ("slow", "SLOW_THINKER_MODEL", "qwen2.5:14b-instruct"):
+        if model_key in ("slow", "SLOW_THINKER_MODEL", "qwen3:14b"):
             if self._scenario == "critique_fail":
                 return SLOW_CRITIQUE_FAIL
             return SLOW_CRITIQUE_PASS

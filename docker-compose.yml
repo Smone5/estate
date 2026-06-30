@@ -9,9 +9,9 @@ services:
       - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-ollama}
       - VISION_PROVIDER=${VISION_PROVIDER:-ollama}
-      - FAST_THINKER_MODEL=${FAST_THINKER_MODEL:-qwen2.5:8b-instruct}
-      - SLOW_THINKER_MODEL=${SLOW_THINKER_MODEL:-qwen2.5:14b-instruct}
-      - VISION_MODEL=${VISION_MODEL:-llava:7b}
+      - FAST_THINKER_MODEL=${FAST_THINKER_MODEL:-qwen3:8b}
+      - SLOW_THINKER_MODEL=${SLOW_THINKER_MODEL:-qwen3:14b}
+      - VISION_MODEL=${VISION_MODEL:-qwen3-vl:8b}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
       - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
       - NVIDIA_BASE_URL=${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}

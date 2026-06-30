@@ -9,7 +9,7 @@ This specification defines the manual User Acceptance Testing (UAT) protocols, s
 ### 1.1 Requirements
 To conduct these UAT runs, the environment must meet the following criteria:
 *   **Deployment**: Running locally via `docker-compose up` or on a local Raspberry Pi 5.
-*   **Workstation Gateway**: Ollama active on the host machine (`http://host.docker.internal:11434`) with `qwen2.5:8b` (or `14b`) and `llava:latest` pulled.
+*   **Workstation Gateway**: Ollama active on the host machine (`http://host.docker.internal:11434`) with `qwen3:8b` (or `14b`) and `qwen3-vl:latest` pulled.
 *   **Browser**: Modern desktop/mobile browsers (Chrome, Safari, Firefox) with Web Speech API and media permissions enabled (microphone/camera access).
 *   **Mail Console**: A local/SMTP mock server or terminal output configured to check transactional emails.
 
@@ -38,7 +38,7 @@ graph TD
 | :--- | :--- | :--- | :--- | :--- |
 | **UAT-01** | Initialization | Session Setup & Invite Generation | Admin | UUID tokens generated, secure links created. |
 | **UAT-01b**| Initialization | Admin Refresh & Re-Entry | Admin | Hard refresh preserves valid Admin cookie session; logout clears it. |
-| **UAT-02** | Asset Loading | Vision OCR & Staging | Admin | WebP image uploaded, `llava` metadata approved. |
+| **UAT-02** | Asset Loading | Vision OCR & Staging | Admin | WebP image uploaded, `qwen3-vl` metadata approved. |
 | **UAT-03** | Onboarding | Consent, Age-Gate, & Auth | Heir | Secure entrance with JWT cookie; declines blocked. |
 | **UAT-04** | Discovery | Semantic Search & Fallback | Heir | Speech search filters items; empty state asks mediator. |
 | **UAT-05** | Mediation | Active Listening Chat & PII | Heir | System 1/2 chat feedback; PII redacted to tokens. |
@@ -241,7 +241,7 @@ graph TD
     4. Click "Save Keepsake PDF".
     5. Click "Email Keepsake" and verify that a success notification displays.
     6. Initiate Bob's GDPR account deletion, and verify that performing this soft anonymization does not break the cryptographic seal validation check (the pre-computed block hashes in the database continue to match because the hash inputs used a PII-scrubbed JSON snapshot representation).
-    7. To test dynamic model transparency: query `GET /api/system/models` and verify the model name returned is the default `Qwen-2.5-8B-Instruct`. Now, modify the host environment variable `FAST_THINKER_MODEL` to `qwen2.5:3b-instruct` and restart the backend. Re-query `GET /api/system/models` and verify the output dynamically updates the System 1 name to `qwen2.5:3b-instruct`.
+    7. To test dynamic model transparency: query `GET /api/system/models` and verify the model name returned is the default `Qwen3-8B`. Now, modify the host environment variable `FAST_THINKER_MODEL` to `qwen3:1.7b` and restart the backend. Re-query `GET /api/system/models` and verify the output dynamically updates the System 1 name to `qwen3:1.7b`.
 *   **Verification Checkpoints**:
     *   [ ] Verify the downloaded Heir Keepsake contains: Allocated Assets, Sentiment Summaries, and a general Mediation Outcome Overview (excluding Bob's private points).
     *   [ ] Verify that the pages of the Keepsake PDF display a `"Page X of Y"` footer in the bottom right corner (from Page 2 onwards).
@@ -288,5 +288,5 @@ graph TD
 To declare the User Acceptance phase complete:
 1.  **Zero Loss of Data**: Cascade delete of user data works correctly on request, while active data remains permanently encrypted at rest.
 2.  **No Point Leakage**: Allocations must strictly sum to 1000 per user.
-3.  **Local Isolation**: All LLM processing (`qwen2.5` and `llava`) and voice audio (`kokoro`) must run locally with zero API key leaks.
+3.  **Local Isolation**: All LLM processing (`qwen3` and `qwen3-vl`) and voice audio (`kokoro`) must run locally with zero API key leaks.
 4.  **Audit Sealing**: The session cannot transition to `FINALIZED` without generating and persisting a complete SHA-256 block hash chain.

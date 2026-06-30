@@ -169,6 +169,13 @@ class Asset(Base):
     valuation_min = Column(Float, nullable=True)
     valuation_max = Column(Float, nullable=True)
     valuation_source = Column(String(150), nullable=True)
+    length_in = Column(Float, nullable=True)
+    width_in = Column(Float, nullable=True)
+    height_in = Column(Float, nullable=True)
+    weight_lb = Column(Float, nullable=True)
+    dimension_source = Column(String(30), nullable=True)
+    dimension_confidence = Column(String(20), nullable=True)
+    dimension_notes = Column(Text, nullable=True)
     sentiment_tag = Column(String(255), nullable=True)
     description_json = Column(Text, nullable=True)  # JSONB mapped via Text for portability
     image_uri = Column(String(255), nullable=False)
