@@ -91,7 +91,16 @@ If external API credentials are omitted or `LLM_PROVIDER=ollama`, the backend de
 
 The LLM and Vision purposes are decoupled settings even when a single multimodal model could serve both roles. An Executor who wants to use one multimodal model for everything simply sets `VISION_MODEL` to the same model string as `FAST_THINKER_MODEL`/`SLOW_THINKER_MODEL` — the architecture does not require a dedicated vision-only model.
 
-#### 2.1.6 Thinking-Token Stripping & JSON Robustness
+#### 2.1.6 LiteLLM Unicode / ASCII Environment Hardening
+
+To prevent crashes in ASCII-only execution environments (e.g. certain Docker base images where Python's default encoding is ASCII), the following measures are applied:
+
+*   **Callback suppression**: At module load time in `llm_provider.py`, `litellm.success_callback = []` and `litellm.failure_callback = []` are set explicitly. LiteLLM's built-in internal callbacks emit unicode success/failure symbols (✓ / ✗) to stdout, which crash when the process encoding is ASCII. Clearing them at startup suppresses this.
+*   **Python encoding env vars**: Both the `backend/Dockerfile` and `docker-compose.yml` (under the `app` service `environment` block) set `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8`. This forces Python's I/O streams to UTF-8 regardless of the OS locale, ensuring unicode logging output does not raise `UnicodeEncodeError`.
+*   **Pinned dependency versions**: `litellm>=1.90.1` is pinned in `requirements.txt` (previously `1.55.0`). `importlib-metadata>=4.0.0` is relaxed (previously pinned to an exact version) to avoid resolver conflicts introduced by the LiteLLM upgrade.
+*   **Error message sanitization**: In the test-connection endpoint, the exception message is sanitized before inclusion in the JSON response body: `str(exc).encode("ascii", errors="replace").decode("ascii")[:500]`. This replaces any non-ASCII characters (such as LiteLLM's ✗ symbol) with `?` and truncates to 500 characters, preventing JSON serialization failures in ASCII-only environments.
+
+#### 2.1.7 Thinking-Token Stripping & JSON Robustness
 
 Reasoning-capable model families (e.g. Qwen3, which emits `<think>...</think>` blocks, and Gemma-style models emitting `<|channel>thought...<channel|>` blocks) may prepend internal chain-of-thought text to their response before the final answer. `llm_provider.py` applies these helpers to the raw output of **every** generation path before returning to the caller:
 
@@ -698,9 +707,14 @@ All administrative, session management, and verification actions are executed vi
     *   **Description**: Two-step AI generation pipeline that analyzes the asset's photo(s) and returns structured listing details plus a pricing estimate. Designed to pre-fill the Edit Keepsake Details drawer in the Admin UI.
     *   **Step 1 — Listing Generation**:
         1.  Loads the asset's primary image bytes (and secondary images if present).
-        2.  Calls `generate_vision(MODEL_KEY_VISION, image_bytes, prompt, response_format=AssetListingResponse)` with `max_tokens=4096` to accommodate thinking-model reasoning token budgets.
-        3.  `AssetListingResponse` is a Pydantic model with fields: `title` (str), `category` (str), `item_overview` (str), `specifications` (str), `condition_report` (str), `keywords` (List[str]), `sentiment_tags` (List[str]), `dimensions` (nested object: `length_in`, `width_in`, `height_in`, `weight_lb`, `dimension_source`, `dimension_confidence`, `dimension_notes`).
-        4.  LiteLLM passes `response_format=AssetListingResponse` to Ollama's native `format` parameter for grammar-constrained decoding.
+        2.  **Category-aware prompt construction**: Before calling the vision model, the endpoint fetches all existing category names already used in the session from the database. If categories exist, the prompt instructs the model to pick from that list; if a new category is genuinely warranted (>90% confidence), it should propose a new name and set `category_is_new: true` in the response. If no categories exist yet, the model picks any sensible category name.
+        3.  Calls `generate_vision(MODEL_KEY_VISION, image_bytes, prompt, response_format=AssetListingResponse)` with `max_tokens=4096` to accommodate thinking-model reasoning token budgets.
+        4.  `AssetListingResponse` is a Pydantic model with fields: `title` (str), `category` (str), `category_is_new` (bool, default `False`), `item_overview` (str), `specifications` (str), `condition_report` (str), `keywords` (List[str]), `sentiment_tags` (List[str]), `dimensions` (nested object: `length_in`, `width_in`, `height_in`, `weight_lb`, `dimension_source`, `dimension_confidence`, `dimension_notes`).
+        5.  LiteLLM passes `response_format=AssetListingResponse` to Ollama's native `format` parameter for grammar-constrained decoding.
+        6.  **Post-parse category resolution**: After parsing the AI response:
+            *   If the AI proposed a category name that is NOT in the existing list AND `category_is_new=True`: the new category is auto-created in the `categories` table for the session.
+            *   If the AI returned a new name but `category_is_new=False` (model was not confident): falls back to the first existing category in the session list to avoid polluting the catalog with unconfident new names.
+            *   `category_is_new` is an internal processing flag and is NOT included in the API response returned to the frontend.
     *   **Step 2 — Pricing Generation** (non-fatal; runs after Step 1 regardless of Step 1 result):
         1.  Calls `generate_vision(MODEL_KEY_PRICING, image_bytes, pricing_prompt, response_format=ValuationEstimate)` using the `PRICING_PROVIDER`/`PRICING_MODEL` (falls back to `VISION_PROVIDER` if unset).
         2.  The pricing prompt grounds the estimate in the already-generated `title`, `category`, `condition_report`, and `specifications` from Step 1, plus the photo.

@@ -163,6 +163,7 @@ export default function AdminInventoryDashboard({
   const [searchQuery, setSearchQuery] = useState('');
   const [filterCategory, setFilterCategory] = useState('All');
   const [filterStatus, setFilterStatus] = useState('All');
+  const [filterVerified, setFilterVerified] = useState('All');
   const [sortOption, setSortOption] = useState('id_desc');
   const [searchResults, setSearchResults] = useState(null);
   const [searching, setSearching] = useState(false);
@@ -351,6 +352,9 @@ export default function AdminInventoryDashboard({
       const data = await res.json();
       setAiGeneratedAssets((prev) => ({ ...prev, [assetId]: true }));
       setAiGenerationError(null);
+      // Backend clears ai_feedback on regeneration — mirror that in local state so
+      // the grid card doesn't keep showing the stale "Needs Review" badge.
+      setInternalAssets((prev) => prev.map((a) => a.id === assetId ? { ...a, ai_feedback: null, category: data.category || a.category } : a));
       setEditForm((prev) => ({
         ...prev,
         title: data.title || prev.title,
@@ -394,7 +398,7 @@ export default function AdminInventoryDashboard({
       }
       // Mark as verified in local state and clear the "just generated" banner
       setAiGeneratedAssets((prev) => ({ ...prev, [assetId]: false }));
-      setAssets((prev) => prev.map((a) => a.id === assetId ? { ...a, ai_feedback: JSON.stringify({ rating: 'thumbs_up' }) } : a));
+      setInternalAssets((prev) => prev.map((a) => a.id === assetId ? { ...a, ai_feedback: JSON.stringify({ rating: 'thumbs_up' }) } : a));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -1425,6 +1429,14 @@ export default function AdminInventoryDashboard({
       list = list.filter((a) => a.category === filterCategory);
     }
 
+    if (filterVerified !== 'All') {
+      list = list.filter((a) => {
+        let verified = false;
+        try { verified = JSON.parse(a.ai_feedback)?.rating === 'thumbs_up'; } catch { /* not JSON */ }
+        return filterVerified === 'verified' ? verified : !verified;
+      });
+    }
+
     list.sort((a, b) => {
       const aValMin = a.valuation_min ?? 0;
       const bValMin = b.valuation_min ?? 0;
@@ -1455,7 +1467,7 @@ export default function AdminInventoryDashboard({
     });
 
     return list;
-  }, [displayAssets, filterStatus, filterCategory, sortOption, searchResults]);
+  }, [displayAssets, filterStatus, filterCategory, filterVerified, sortOption, searchResults]);
 
   // ── Recent Activity Reel (last 10 completed items) ──────────────────────
   const recentCompletedAssets = React.useMemo(() => {
@@ -2264,6 +2276,22 @@ export default function AdminInventoryDashboard({
               <option value="STAGED">Staged (Draft)</option>
               <option value="LIVE">Live Keepsakes</option>
               <option value="PRE_ALLOCATED">Pre-Allocated</option>
+            </select>
+          </div>
+
+          {/* Verified Filter */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <label className="form-label text-xs">Review</label>
+            <select
+              className="form-input"
+              value={filterVerified}
+              onChange={(e) => setFilterVerified(e.target.value)}
+              style={{ minWidth: '160px' }}
+              data-testid="admin-filter-verified"
+            >
+              <option value="All">All Items</option>
+              <option value="verified">Human Verified</option>
+              <option value="unverified">Needs Review</option>
             </select>
           </div>
 

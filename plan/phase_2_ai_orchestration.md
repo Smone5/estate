@@ -77,9 +77,29 @@ Build the dual-brain LangGraph state machine, Ollama system integrations, Micros
 * **Objective**: Refactor the LLM section of `AdminSettingsPanel.jsx` from a flat field list into one card per purpose (Fast, Slow, Vision, Embedding, Pricing). Each card contains: provider dropdown (with auto-fill of default model on change via `PROVIDER_DEFAULT_MODELS`), model input, API key password input, and base URL input — all in the same card. "Test Connection" button inside each card. "Shared Provider Credentials" card at the bottom for company-level fallback keys. Non-LLM tabs (smtp, storage) keep original layout. `PURPOSE_CREDENTIAL_FIELDS` maps each purpose to its per-purpose key/URL field names. Depends on T54, T50a, T50b.
 * **Verification**: Assert each purpose renders as a distinct card with all four fields. Assert provider dropdown change auto-fills model input. Assert "Test Connection" sends current draft values with the correct purpose string. Assert shared credentials card does not show per-purpose key fields.
 
+### [x] Task T54c: AdminSettingsPanel Base URL Visibility & Test Connection Secret-Skipping
+* **Objective**: (1) Hide the Base URL input inside each LLM purpose card when the selected provider is `openai`, `anthropic`, or `google`. Only show it for `ollama`, `openrouter`, `nvidia` — providers that require a custom endpoint. (2) In `handleTestConnection`, skip any secret credential field (e.g. `FAST_API_KEY`, `OPENAI_API_KEY`) from the `overrides` payload when the admin has not typed a new value during the current session. Sending an empty string override would wipe the saved credential for the duration of the test call; omitting the field causes the backend to use the already-saved env value. Depends on T54a.
+* **Verification**: Assert Base URL field is absent when provider is `openai`/`anthropic`/`google` and present when provider is `ollama`. Assert test-connection payload does not include credential fields that were not changed from their placeholder/empty state.
+
+### [x] Task T50e: LiteLLM Unicode/ASCII Environment Hardening
+* **Objective**: Prevent `UnicodeEncodeError` crashes in ASCII-only Docker environments. Set `litellm.success_callback = []` and `litellm.failure_callback = []` at module load in `llm_provider.py` to suppress LiteLLM's internal unicode-symbol (✗/✓) callbacks. Add `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8` to both `backend/Dockerfile` (as `ENV` directives) and `docker-compose.yml` (under the `app` service `environment` block). Pin `litellm>=1.90.1` in `requirements.txt` (up from 1.55.0); relax `importlib-metadata>=4.0.0` to resolve the resulting resolver conflict. In the test-connection endpoint, sanitize the exception message before JSON serialization: `str(exc).encode("ascii", errors="replace").decode("ascii")[:500]`. Depends on T50a.
+* **Verification**: Start the backend container without `PYTHONUTF8` and assert no `UnicodeEncodeError` in logs. Assert test-connection error response body contains only ASCII characters when the provider returns a unicode-symbol error message. Assert `litellm.success_callback` and `litellm.failure_callback` are empty lists after module import.
+
+### [x] Task T50f: AI Category Assignment in generate-details
+* **Objective**: Make the `generate-details` endpoint category-aware. Before the vision call, fetch all existing category names used in the session from the DB. If categories exist, embed them in the vision prompt instructing the AI to pick from the list; if a truly new category is warranted (>90% confidence) the AI may propose a new name and set `category_is_new: true`. Add `category_is_new: bool = False` to `AssetListingResponse`. Post-parse logic: if AI proposed a new name not in the list AND `category_is_new=True`, auto-create the category in the `categories` table; if `category_is_new=False` (not confident), fall back to the first existing category. Do not include `category_is_new` in the API response to the frontend. Depends on T50c.
+* **Verification**: Assert that when existing categories are present, the prompt includes them. Assert that a new category name with `category_is_new=True` creates a row in the `categories` table. Assert that a new category name with `category_is_new=False` does NOT create a new category row and the returned category matches the first existing one. Assert `category_is_new` is absent from the API response JSON.
+
 ### [x] Task T52a: Admin Inventory Dashboard — AI Workflow UI
 * **Objective**: Add AI generation and human verification workflow to the Edit Keepsake Details drawer in `AdminInventoryDashboard.jsx`. "✨ Generate with AI" button calls generate-details endpoint and populates form fields. `aiGeneratedAssets` Set tracks just-generated assets this session. "✓ Mark as Verified" button calls ai-feedback endpoint; `verifyingAssets` Set tracks in-progress saves. Drawer toolbar left side shows verification status banner; right side shows verify and generate buttons. AI generation failures show a dedicated modal (z-index 1300, above drawer overlay) with error detail and "No fields were changed" note — NOT the shared error state. Verify failures use an error banner rendered INSIDE the drawer toolbar. Asset cards show "✓ Human Verified" (green) or "✨ AI Generated" (amber) badges based on `ai_feedback`. Depends on T52, T50c, T50d.
 * **Verification**: Assert AI error modal renders when generate-details returns a non-2xx response. Assert modal does not appear when no error occurs. Assert "✓ Human Verified" badge appears after successful ai-feedback call. Assert verify button shows spinner while verifyingAssets contains the asset ID.
+
+### [x] Task T52b: Admin Inventory Dashboard — Local State Sync & Review Filter
+* **Objective**: (1) After `handleGenerateDetails` succeeds, call `setInternalAssets` to clear `ai_feedback: null` and update `category` for the affected asset in local state, mirroring the backend behavior (`asset.ai_feedback = None` on regeneration). This eliminates the need for a page refresh to see the correct "Needs Review" badge and category. (2) Add a "Review" filter dropdown to the inventory filter bar with three options: "All Items" (default), "Human Verified" (shows assets where `JSON.parse(asset.ai_feedback)?.rating === 'thumbs_up'`), and "Needs Review" (shows assets where `ai_feedback` is null or its parsed rating is not `thumbs_up`). The filter composes with existing search, category, and status filters. Depends on T52a.
+* **Verification**: Assert that after AI generation succeeds, the asset in the list immediately loses the "Needs Review" badge without requiring a reload. Assert "Human Verified" filter shows only verified assets. Assert "Needs Review" filter shows only unverified/ungenerated assets. Assert the review filter correctly combines with a category filter.
+
+### [x] Task T54b: Admin Tab Persistence Across Refresh
+* **Objective**: Prevent the admin from always landing on the "inventory" tab after a hard browser refresh. Initialize `activeTab` in `AdminDashboard.jsx` (or the component managing top-level admin routing) from `localStorage.getItem('admin_active_tab')` on mount. Wrap all `setActiveTab` calls in a `setActiveTabPersisted` function that writes to `localStorage` on every change. Depends on T54.
+* **Verification**: Navigate to the "settings" tab, trigger a hard browser refresh, and assert the settings tab is still active. Assert the localStorage key `admin_active_tab` is updated on every tab change.
 
 ### [x] Task T73: Rate Limiting Middleware
 * **Objective**: Implement FastAPI rate limiting middleware (using slowapi or similar) and configure Nginx `limit_req` zones to protect all public endpoints against abuse. Required by T72 (unauthenticated restore gate) in Phase 7 and Backend Spec §12.1.
@@ -134,6 +154,11 @@ graph TD
     T50a --> T54a[T54a: AdminSettingsPanel Grouped Purpose Cards]
     T50c --> T52a[T52a: Admin Inventory Dashboard AI Workflow UI]
     T50d --> T52a
+    T52a --> T52b[T52b: Local State Sync & Review Filter]
+    T54a --> T54b[T54b: Admin Tab Persistence]
+    T54a --> T54c[T54c: Base URL Visibility & Test Connection Secret-Skipping]
+    T50a --> T50e[T50e: LiteLLM Unicode/ASCII Hardening]
+    T50c --> T50f[T50f: AI Category Assignment]
 
     T03 --> T28a-2[T28a-2: Backend Tests — Phase 2 Scope]
     T04 --> T28a-2

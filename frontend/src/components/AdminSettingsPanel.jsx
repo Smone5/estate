@@ -53,6 +53,10 @@ const PROVIDER_CREDENTIAL_FIELDS = {
   nvidia: ['NVIDIA_API_KEY', 'NVIDIA_BASE_URL'],
 };
 
+// Providers where a Base URL is meaningful (self-hosted or non-standard endpoint).
+// For all other providers LiteLLM knows the endpoint — only the API key is needed.
+const PROVIDERS_WITH_BASE_URL = new Set(['ollama', 'openrouter', 'nvidia']);
+
 // Per-purpose API key + base URL, shown in the credentials section whenever
 // that purpose slot has a provider selected. These let each purpose use a
 // completely different account or OpenAI-compatible endpoint, fully independent
@@ -268,7 +272,19 @@ export default function AdminSettingsPanel() {
     if (fields[providerKey]) overrides[providerKey] = provider;
     if (fields[modelKey]) overrides[modelKey] = fieldValue(fields, modelKey);
     for (const credKey of PROVIDER_CREDENTIAL_FIELDS[provider] || []) {
-      if (fields[credKey]) overrides[credKey] = fieldValue(fields, credKey);
+      if (!fields[credKey]) continue;
+      // Only send secret fields if the admin has typed a new value this session —
+      // otherwise the backend already has the saved value in os.environ and sending
+      // an empty string would wipe it out for this test call.
+      if (fields[credKey].secret && !drafts[credKey]) continue;
+      overrides[credKey] = fieldValue(fields, credKey);
+    }
+    // Per-purpose key (e.g. FAST_API_KEY) — same rule: skip if secret and not drafted
+    const [purposeApiKeyField] = PURPOSE_CREDENTIAL_FIELDS[providerKey] || [];
+    if (purposeApiKeyField && fields[purposeApiKeyField]) {
+      if (!fields[purposeApiKeyField].secret || drafts[purposeApiKeyField]) {
+        overrides[purposeApiKeyField] = fieldValue(fields, purposeApiKeyField);
+      }
     }
 
     setTestStatus((s) => ({ ...s, [purpose]: { testing: true } }));
@@ -376,6 +392,8 @@ export default function AdminSettingsPanel() {
             const purposeCards = Object.entries(PURPOSE_TO_KEYS).map(([purpose, { label, providerKey, modelKey }]) => {
               if (!fields[modelKey]) return null;
               const [apiKeyField, baseUrlField] = PURPOSE_CREDENTIAL_FIELDS[providerKey] || [];
+              const selectedProvider = fieldValue(fields, providerKey);
+              const showBaseUrl = baseUrlField && PROVIDERS_WITH_BASE_URL.has(selectedProvider);
               const status = testStatus[purpose];
               return (
                 <div
@@ -395,7 +413,7 @@ export default function AdminSettingsPanel() {
                   </div>
                   <div className="admin-form-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
                     {apiKeyField && fields[apiKeyField] && renderField(apiKeyField, fields[apiKeyField])}
-                    {baseUrlField && fields[baseUrlField] && renderField(baseUrlField, fields[baseUrlField])}
+                    {showBaseUrl && fields[baseUrlField] && renderField(baseUrlField, fields[baseUrlField])}
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-sm)', marginTop: 'var(--space-xs)' }}>
                     <button

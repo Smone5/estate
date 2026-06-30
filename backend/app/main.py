@@ -939,8 +939,9 @@ async def admin_test_connection(
         elapsed_ms = int((_time.monotonic() - start) * 1000)
         return JSONResponse(content={"success": True, "detail": detail, "elapsed_ms": elapsed_ms})
     except Exception as exc:
+        err_msg = str(exc).encode("ascii", errors="replace").decode("ascii")[:500]
         logger.warning("[AdminSettings] test-connection (%s) failed: %s", body.purpose, exc)
-        return JSONResponse(content={"success": False, "error": str(exc)[:500]})
+        return JSONResponse(content={"success": False, "error": err_msg})
     finally:
         for key, prior_value in saved_env.items():
             if prior_value is None:
@@ -2622,6 +2623,7 @@ from pydantic import BaseModel as PydanticBaseModel_
 class AssetListingResponse(PydanticBaseModel_):
     title: str = ""
     category: str = ""
+    category_is_new: bool = False
     item_overview: str = ""
     specifications: str = ""
     condition_report: str = ""
@@ -2737,6 +2739,23 @@ async def generate_asset_details(
 
     import json as json_mod
 
+    # Fetch existing categories for this session so the AI can pick from them
+    existing_categories = [
+        c.name for c in db.query(Category).filter(Category.session_id == asset.session_id).all()
+    ]
+    if existing_categories:
+        category_instruction = (
+            f'  "category": "Pick the best match from this list: {", ".join(existing_categories)}. '
+            f'Only propose a NEW category name (not in the list) if you are very confident (>90%) it is distinct and useful — '
+            f'otherwise always prefer an existing one. If proposing a new category, also set category_is_new to true.",\n'
+            f'  "category_is_new": false,\n'
+        )
+    else:
+        category_instruction = (
+            '  "category": "broad category name such as Jewelry, Furniture, Art, Clothing, Electronics, Collectibles, Books, Kitchen, Tools, or Other",\n'
+            '  "category_is_new": true,\n'
+        )
+
     # Single vision call: model sees the image and outputs the structured JSON directly.
     # This works because the vision model CAN produce content; the text-only path fails
     # with qwen3-style thinking models that return empty message.content.
@@ -2746,7 +2765,7 @@ async def generate_asset_details(
         "Fill in every field with real values based on what you see in the image:\n\n"
         '{\n'
         '  "title": "concise searchable title with brand/material/era if visible",\n'
-        '  "category": "one of: Jewelry, Furniture, Art, Clothing, Electronics, Collectibles, Books, Kitchen, Tools, Other",\n'
+        + category_instruction +
         '  "item_overview": "2-3 factual sentences describing what the item is and its style",\n'
         '  "specifications": "- bullet points covering material, color, hardware (one per line)",\n'
         '  "condition_report": "honest description of visible wear, scratches, damage",\n'
@@ -2852,6 +2871,25 @@ async def generate_asset_details(
         # Non-fatal: keep the rest of the listing even if pricing fails.
         print(f"[generate-details] VALUATION FAILED (non-fatal, pricing_provider={provider.pricing_provider}): {exc}", flush=True)
 
+    # Auto-create a new category if the AI proposed one that doesn't exist yet
+    if listing.category:
+        cat_name = listing.category.strip()
+        cat_lower = cat_name.lower()
+        if cat_lower not in {c.lower() for c in existing_categories}:
+            # AI proposed a new category — only accept it if category_is_new is True
+            # (meaning the AI was confident) or there were no existing categories
+            if listing.category_is_new or not existing_categories:
+                exists = db.query(Category).filter(
+                    Category.session_id == asset.session_id,
+                    Category.name.ilike(cat_name),
+                ).first()
+                if not exists:
+                    db.add(Category(session_id=asset.session_id, name=cat_name))
+                    logger.info("AI created new category %r for session %s", cat_name, asset.session_id)
+            else:
+                # AI returned a new name but wasn't confident — fall back to closest existing
+                listing.category = existing_categories[0] if existing_categories else cat_name
+
     # Save to asset fields
     asset.title = listing.title or asset.title
     if listing.category:
@@ -2904,7 +2942,7 @@ async def generate_asset_details(
     return JSONResponse(
         content={
             "title": listing.title or "Suggested Keepsake",
-            "category": listing.category or "",
+            "category": listing.category.strip() or "",
             "item_overview": listing.item_overview or "",
             "specifications": listing.specifications or "",
             "condition_report": listing.condition_report or "",

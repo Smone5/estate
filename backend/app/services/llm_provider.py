@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 
 # Let callers control verbosity via standard logging; don't let litellm spam stdout.
 litellm.suppress_debug_info = True
+# LiteLLM uses ✓/✗ unicode symbols in its internal callbacks which can crash
+# when Python's stdout/stderr is ASCII-only (common in Docker containers).
+litellm.success_callback = []
+litellm.failure_callback = []
 # Not every provider supports every kwarg (e.g. response_format on ollama_chat) —
 # drop unsupported ones instead of raising, since generate_structured() always
 # embeds the JSON schema directly in the prompt as a provider-agnostic fallback.

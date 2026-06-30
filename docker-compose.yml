@@ -21,6 +21,8 @@ services:
       - STORAGE_DRIVER=LOCAL
       - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PYTHONIOENCODING=utf-8
+      - PYTHONUTF8=1
       - DB_ECHO=${DB_ECHO:-false}
       - SMTP_HOST=${SMTP_HOST:-mailpit}
       - SMTP_PORT=${SMTP_PORT:-1025}

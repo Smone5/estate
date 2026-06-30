@@ -41,7 +41,13 @@ export default function AdminDashboard() {
   const [restoringAuth, setRestoringAuth] = useState(true);
   const [checkingSetupStatus, setCheckingSetupStatus] = useState(true);
   const [viewingSession, setViewingSession] = useState(Boolean(sessionId));
-  const [activeTab, setActiveTab] = useState('inventory');
+  const [activeTab, setActiveTab] = useState(
+    () => localStorage.getItem('admin_active_tab') || 'inventory'
+  );
+  function setActiveTabPersisted(tab) {
+    localStorage.setItem('admin_active_tab', tab);
+    setActiveTab(tab);
+  }
   const [sessionSubTab, setSessionSubTab] = useState('register');
   const [newSessionTitle, setNewSessionTitle] = useState('');
   const [creatingSession, setCreatingSession] = useState(false);
@@ -207,7 +213,7 @@ export default function AdminDashboard() {
       is_paused: activeSess.is_paused,
       assets: [],
     });
-    setActiveTab('inventory');
+    setActiveTabPersisted('inventory');
     setSessionSubTab(activeSess.status === 'SETUP' ? 'register' : 'monitor');
     setViewingSession(true);
   }
@@ -726,7 +732,7 @@ export default function AdminDashboard() {
               <button
                 key={tab.id}
                 className={`btn btn-tab${activeTab === tab.id ? ' active' : ''}`}
-                onClick={() => setActiveTab(tab.id)}
+                onClick={() => setActiveTabPersisted(tab.id)}
                 data-testid={`admin-tab-${tab.id}`}
               >
                 {tab.label}

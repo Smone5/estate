@@ -1,5 +1,8 @@
 FROM python:3.11-slim
 
+ENV PYTHONUTF8=1 \
+    PYTHONIOENCODING=utf-8
+
 WORKDIR /app
 
 # Install system dependencies

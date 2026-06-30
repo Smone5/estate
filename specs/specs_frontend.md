@@ -500,8 +500,9 @@ The LLM configuration section of `AdminSettingsPanel.jsx` is organized as one ca
     *   Provider dropdown (options: `ollama`, `openai`, `anthropic`, `google`, `openrouter`, `nvidia`).
     *   Model name text input (auto-filled with a sane default when the provider dropdown changes; defaults sourced from `PROVIDER_DEFAULT_MODELS` constant in the component).
     *   API Key password input (per-purpose; maps to e.g. `FAST_API_KEY`, `VISION_API_KEY`).
-    *   Base URL text input (per-purpose; maps to e.g. `FAST_BASE_URL`, `VISION_BASE_URL`). Enables any OpenAI-compatible endpoint.
+    *   Base URL text input (per-purpose; maps to e.g. `FAST_BASE_URL`, `VISION_BASE_URL`). **Only shown when the selected provider is `ollama`, `openrouter`, or `nvidia`.** Cloud providers (`openai`, `anthropic`, `google`) do not show this field — LiteLLM knows their endpoints natively and does not require a Base URL.
     *   "Test Connection" button inside the card — sends the card's current draft values as `overrides` to `POST /api/admin/settings/test-connection` with the matching `purpose` string. Shows `✓ {detail} ({elapsed_ms}ms)` or `✗ {error}` inline beneath the button.
+*   **Test Connection secret-skipping**: The `handleTestConnection` function skips any secret credential field (e.g. `FAST_API_KEY`, `OPENAI_API_KEY`) from the `overrides` payload if the admin has not typed a new value during the current session. Sending an empty string override would wipe the saved key for that test call; by omitting the field, the backend uses the already-saved environment value.
 *   **No separate "Credentials" section**: Per-purpose API key and base URL live inside the purpose card, not in a shared section below.
 *   **"Shared Provider Credentials" card** at the bottom of the LLM section only — shows company-level fallback keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OLLAMA_BASE_URL`). These are used when a purpose card's per-purpose key is left blank.
 *   **`PURPOSE_CREDENTIAL_FIELDS`**: a constant mapping each purpose key (`fast`, `slow`, `vision`, `embedding`, `pricing`) to its `_API_KEY` and `_BASE_URL` field names, used to construct the `overrides` payload for test-connection calls.
@@ -553,6 +554,23 @@ Asset cards in the `AdminInventoryDashboard` inventory list display a status bad
 *   `"✓ Human Verified"` — green badge — when `ai_feedback?.rating === 'thumbs_up'`.
 *   `"✨ AI Generated"` — amber badge — when `ai_feedback` exists but the rating is not `thumbs_up` (i.e. AI-generated but not yet human-verified).
 *   No badge if `ai_feedback` is null/absent.
+
+### 6.8 Admin Inventory Dashboard — Local State Sync After AI Generation
+
+After `handleGenerateDetails` succeeds, `setInternalAssets` immediately clears `ai_feedback: null` and updates `category` for that asset in local component state, mirroring the backend behavior (which sets `asset.ai_feedback = None` on regeneration). This ensures the "Needs Review" badge and the category field reflect the correct post-generation state without requiring a page refresh.
+
+### 6.9 "Review" Filter in Admin Inventory Dashboard
+
+The filter bar in `AdminInventoryDashboard.jsx` includes a **Review** dropdown with three options:
+*   **All Items** (default) — no filtering by verification state.
+*   **Human Verified** — shows only assets where `JSON.parse(asset.ai_feedback)?.rating === 'thumbs_up'`.
+*   **Needs Review** — shows assets where `ai_feedback` is either null or its parsed rating is not `thumbs_up`.
+
+This filter composes with the existing search, category, and status filters.
+
+### 6.10 Admin Tab Persistence Across Refresh
+
+`activeTab` in `AdminDashboard.jsx` (or whichever component manages the admin top-level tab) is initialized from `localStorage.getItem('admin_active_tab')` on mount. A `setActiveTabPersisted` wrapper function saves to `localStorage` on every tab change. This ensures the admin lands back on the same tab (e.g. "settings", "heirs") after a hard browser refresh rather than always defaulting to "inventory".
 
 ---
 
