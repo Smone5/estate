@@ -314,7 +314,7 @@ class TestAdminLoginEndpoint:
             json={"username": "executor", "password": "adminpass123"},
         )
         assert "set-cookie" in resp.headers
-        assert "estate_session=" in resp.headers["set-cookie"]
+        assert "estate_admin_session=" in resp.headers["set-cookie"]
 
     def test_login_wrong_password_returns_401(self, client, mock_db_session, test_env):
         admin = _make_admin_user("adminpass123")
@@ -392,17 +392,18 @@ class TestAdminLoginEndpoint:
         assert resp.status_code == 401
 
     def test_auth_logout_clears_cookie(self, client, test_env):
-        # Set a dummy cookie
-        client.cookies.set("estate_session", "dummy_token")
-        
         resp = client.post("/api/auth/logout")
         assert resp.status_code == 200
         assert resp.json() == {"status": "success", "message": "Logged out successfully"}
-        
-        # Verify the cookie was cleared (has an empty value or is deleted)
-        # In httpx/test_client, the cookie will be deleted or set to empty
-        cookie = client.cookies.get("estate_session")
-        assert cookie is None or cookie == ""
+
+        # Without an X-Estate-Role header, logout defensively clears every
+        # known cookie (admin, heir, and the legacy shared name). Verify via
+        # the Set-Cookie response headers directly — httpx's TestClient
+        # cookie jar doesn't reliably reflect deletions for cookies that
+        # were never actually set through a prior request/response cycle.
+        cookie_header = resp.headers.get("set-cookie", "")
+        assert "estate_session=" in cookie_header
+        assert "max-age=0" in cookie_header.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -460,7 +461,7 @@ class TestInviteVerifyEndpoint:
             },
         )
         assert "set-cookie" in resp.headers
-        assert "estate_session=" in resp.headers["set-cookie"]
+        assert "estate_heir_session=" in resp.headers["set-cookie"]
 
     def test_verify_sets_httponly_cookie(self, client, mock_db_session, test_env):
         heir = _make_heir_user()
@@ -681,7 +682,7 @@ class TestInviteLoginEndpoint:
             json={"token": str(heir.invite_token)},
         )
         assert "set-cookie" in resp.headers
-        assert "estate_session=" in resp.headers["set-cookie"]
+        assert "estate_heir_session=" in resp.headers["set-cookie"]
 
     def test_login_unverified_heir_returns_400(self, client, mock_db_session, test_env):
         """Heir who hasn't completed onboarding (invite_token_used=False) cannot login."""
@@ -750,6 +751,9 @@ class TestHeirPasswordLoginEndpoint:
         mock_query = mock_db_session.query.return_value
         mock_filter = mock_query.filter.return_value
         mock_filter.first.return_value = heir
+        # Password login queries all matching records (a heir can belong to
+        # more than one estate session), not just the first match.
+        mock_filter.all.return_value = [heir]
 
     def test_password_login_success_after_invite_expires(self, client, mock_db_session, test_env):
         heir = _make_heir_user(invite_token_used=True)
@@ -768,7 +772,7 @@ class TestHeirPasswordLoginEndpoint:
         assert data["status"] == "success"
         assert data["role"] == "HEIR"
         assert data["heir_id"] == str(heir.id)
-        assert "estate_session=" in resp.headers.get("set-cookie", "")
+        assert "estate_heir_session=" in resp.headers.get("set-cookie", "")
 
     def test_password_login_accepts_username(self, client, mock_db_session, test_env):
         heir = _make_heir_user(invite_token_used=True)

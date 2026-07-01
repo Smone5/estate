@@ -46,7 +46,14 @@ def _make_admin_payload():
     }
 
 
-def _build_session(status="SETUP", is_paused=False, paused_at=None, deadline=None):
+def _build_session(
+    status="SETUP",
+    is_paused=False,
+    paused_at=None,
+    deadline=None,
+    practice_required=False,
+    simulation_published_at=None,
+):
     return SessionModel(
         id=SESSION_ID,
         title="Test Estate",
@@ -57,6 +64,8 @@ def _build_session(status="SETUP", is_paused=False, paused_at=None, deadline=Non
         deadline=deadline,
         announcement=None,
         announcement_updated_at=None,
+        practice_required=practice_required,
+        simulation_published_at=simulation_published_at,
     )
 
 
@@ -183,6 +192,51 @@ class TestSessionLaunch:
         mock_db.query.return_value.filter.return_value.count.return_value = 1
 
         resp = test_client.post(f"/api/sessions/{SESSION_ID}/launch")
+        assert resp.status_code == 200
+
+    def test_launch_requires_published_practice_for_new_sessions(self, client):
+        test_client, mock_db, _ = client
+        session = _build_session(status="SETUP", practice_required=True)
+        mock_db.query.return_value.filter.return_value.first.return_value = session
+        mock_db.query.return_value.filter.return_value.count.return_value = 1
+
+        resp = test_client.post(f"/api/sessions/{SESSION_ID}/launch")
+
+        assert resp.status_code == 400
+        assert "publish the practice simulation" in resp.json()["detail"].lower()
+
+    def test_launch_lists_registered_heirs_who_have_not_practiced(self, client):
+        test_client, mock_db, _ = client
+        session = _build_session(
+            status="SETUP",
+            practice_required=True,
+            simulation_published_at=datetime.now(timezone.utc),
+        )
+        heir = _build_heir()
+        heir.username = "Alex"
+        heir.practice_completed_at = None
+        mock_db.query.return_value.filter.return_value.first.return_value = session
+        mock_db.query.return_value.filter.return_value.count.return_value = 1
+        mock_db.query.return_value.filter.return_value.all.return_value = [heir]
+
+        resp = test_client.post(f"/api/sessions/{SESSION_ID}/launch")
+
+        assert resp.status_code == 400
+        assert "Alex" in resp.json()["detail"]
+
+    def test_launch_succeeds_after_registered_heirs_complete_practice(self, client):
+        test_client, mock_db, _ = client
+        session = _build_session(
+            status="SETUP",
+            practice_required=True,
+            simulation_published_at=datetime.now(timezone.utc),
+        )
+        mock_db.query.return_value.filter.return_value.first.return_value = session
+        mock_db.query.return_value.filter.return_value.count.return_value = 1
+        mock_db.query.return_value.filter.return_value.all.return_value = []
+
+        resp = test_client.post(f"/api/sessions/{SESSION_ID}/launch")
+
         assert resp.status_code == 200
 
 

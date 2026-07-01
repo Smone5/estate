@@ -130,9 +130,11 @@ class TestCreateHelpRequest:
         mock_filter = mock_query.filter.return_value
         mock_filter.first.return_value = session
 
+        # The endpoint now accepts multipart form data (message + optional
+        # image), not a JSON body — matches create_help_request's Form() params.
         resp = client.post(
             f"/api/sessions/{session.id}/help",
-            json={"message": "I need help with my points"},
+            data={"message": "I need help with my points"},
             cookies={"estate_session": heir_token},
         )
         assert resp.status_code == 201
@@ -141,20 +143,43 @@ class TestCreateHelpRequest:
         mock_db_session.commit.assert_called_once()
 
     def test_create_short_message_returns_422(self, client, mock_db_session, test_env):
-        heir_token = _make_heir_token()
+        from app.models import Session as SessionModel
+        session = SessionModel(
+            id=uuid.uuid4(),
+            title="Test",
+            status="ACTIVE",
+            is_paused=False,
+            is_deadlocked=False,
+        )
+        heir_token = _make_heir_token(session_id=str(session.id))
+        mock_query = mock_db_session.query.return_value
+        mock_filter = mock_query.filter.return_value
+        mock_filter.first.return_value = session
 
         resp = client.post(
-            f"/api/sessions/{uuid.uuid4()}/help",
-            json={"message": "hi"},
+            f"/api/sessions/{session.id}/help",
+            data={"message": "hi"},
             cookies={"estate_session": heir_token},
         )
         assert resp.status_code == 422
 
     def test_create_message_too_long_returns_422(self, client, mock_db_session, test_env):
-        heir_token = _make_heir_token()
+        from app.models import Session as SessionModel
+        session = SessionModel(
+            id=uuid.uuid4(),
+            title="Test",
+            status="ACTIVE",
+            is_paused=False,
+            is_deadlocked=False,
+        )
+        heir_token = _make_heir_token(session_id=str(session.id))
+        mock_query = mock_db_session.query.return_value
+        mock_filter = mock_query.filter.return_value
+        mock_filter.first.return_value = session
+
         resp = client.post(
-            f"/api/sessions/{uuid.uuid4()}/help",
-            json={"message": "x" * 1001},
+            f"/api/sessions/{session.id}/help",
+            data={"message": "x" * 1001},
             cookies={"estate_session": heir_token},
         )
         assert resp.status_code == 422
@@ -266,9 +291,11 @@ class TestReplyToHelpRequest:
         mock_filter = mock_query.filter.return_value
         mock_filter.first.return_value = ticket
 
+        # The endpoint now accepts multipart form data (response + optional
+        # image), not a JSON body.
         resp = client.post(
             f"/api/help/{ticket.id}/reply",
-            json={"response": "I adjusted the catalog note for that item."},
+            data={"response": "I adjusted the catalog note for that item."},
             cookies={"estate_session": token},
         )
         assert resp.status_code == 200
@@ -406,9 +433,11 @@ class TestCreateDirectHelpMessage:
 
         mock_db_session.query.side_effect = query_side_effect
 
+        # The endpoint now accepts multipart form data (heir_id + message +
+        # optional image), not a JSON body.
         resp = client.post(
             f"/api/sessions/{session_id}/help/direct",
-            json={"heir_id": str(heir_id), "message": "Please confirm details"},
+            data={"heir_id": str(heir_id), "message": "Please confirm details"},
             cookies={"estate_session": token},
         )
         assert resp.status_code == 201

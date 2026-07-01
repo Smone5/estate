@@ -116,6 +116,11 @@ def _query_mock_for_export(heir):
     ticket.id = uuid.uuid4()
     ticket.message = "Please confirm my export."
     ticket.status = "OPEN"
+    ticket.admin_response = None
+    ticket.initiator_role = "HEIR"
+    ticket.created_at = datetime.now(timezone.utc)
+    ticket.responded_at = None
+    ticket.resolved_at = None
 
     filter_mock = mock.MagicMock()
     filter_mock.first.return_value = heir

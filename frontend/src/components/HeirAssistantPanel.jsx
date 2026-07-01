@@ -8,19 +8,21 @@ import { useAudioPlayback } from '../hooks/useAudioPlayback';
  * HeirAssistantPanel — Chat surface for the AI Mediator with voice input/output.
  *
  * Wires the heir dashboard to the existing /ws chat_message <-> chat_reply_chunk
- * contract (see backend main.py T22 websocket endpoint). Voice is layered on
- * top of the Phase 1 text chat: useSpeech (T24) transcribes mic input into the
- * same input box, and useAudioPlayback (T25) plays back Kokoro-synthesized
- * audio chunks as they stream in. Both gracefully degrade to text-only when
- * unsupported (no SpeechRecognition, insecure origin, or Kokoro unavailable
- * server-side) — nothing here requires voice to function.
+ * contract (see backend main.py T22 websocket endpoint). Per Backend Spec
+ * §5 (Voice Transcription Ingestion), speech recognition runs entirely
+ * client-side via the Web Speech API (useSpeech/T24) to keep the Pi 5 host
+ * lightweight — transcribed text is sent as a normal chat_message with
+ * metadata.input_method: "voice", processed identically to typed text.
+ * useAudioPlayback (T25) plays back Kokoro-synthesized audio chunks as they
+ * stream in. Both gracefully degrade to text-only when unsupported (no
+ * SpeechRecognition, insecure origin, or Kokoro unavailable server-side) —
+ * nothing here requires voice to function.
  */
 export default function HeirAssistantPanel() {
   const [isOpen, setIsOpen] = useState(false);
   const [inputText, setInputText] = useState('');
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [voiceMuted, setVoiceMuted] = useState(false);
-  const [isTranscribing, setIsTranscribing] = useState(false);
 
   const sessionId = useMediationStore((s) => s.session_id);
   const messages = useMediationStore((s) => s.messages);
@@ -35,20 +37,25 @@ export default function HeirAssistantPanel() {
   const scrollRef = useRef(null);
 
   const {
-    isRecording,
+    transcript,
+    isListening,
     isSupported: isSpeechSupported,
+    isSecureContext,
     micError,
-    startRecording,
-    stopRecording,
+    startListening,
+    stopListening,
+    clearTranscript,
     showAudioContextButton,
     resumeAudioContext,
   } = useSpeech();
 
   const { isPlaying, isSyntheticPlaying } = useAudioPlayback(voiceMuted);
+  const wasListeningRef = useRef(false);
 
-  // Mirrors the disableChat gate computed in DashboardGuard (Frontend Spec §5.4)
+  // Mirrors the disableChat gate computed in DashboardGuard (Frontend Spec §5.4).
+  // Unlike sliders/justification inputs, chat stays open during SETUP so heirs
+  // can ask general/support questions before the session is launched.
   const chatDisabled =
-    sessionStatus === 'SETUP' ||
     sessionStatus === 'LOCKED' ||
     userStatus === 'PROFILE_HOLD' ||
     isPaused ||
@@ -73,44 +80,50 @@ export default function HeirAssistantPanel() {
     }
   }, [messages, isOpen]);
 
-  // Clear the "Transcribing..." state once a new message lands — subscribed
-  // (not selected) so setIsTranscribing runs inside the subscription
-  // callback rather than synchronously in the effect body.
+  // Mirror the live transcript into the input box while the mic is held,
+  // per specs_frontend.md hold-to-talk UX (same pattern as the gallery
+  // voice search bar).
   useEffect(() => {
-    let prevCount = useMediationStore.getState().messages.length;
-    const unsubscribe = useMediationStore.subscribe((state) => {
-      if (state.messages.length > prevCount) {
-        prevCount = state.messages.length;
-        setIsTranscribing(false);
-      }
-    });
-    return unsubscribe;
-  }, []);
-
-  // Mic toggle: start begins recording locally; stop sends the recorded
-  // clip to the backend for local Whisper transcription (T47) — the
-  // transcript + mediator reply both arrive over the WebSocket.
-  const handleMicToggle = useCallback(async () => {
-    if (isRecording) {
-      const blob = await stopRecording();
-      if (!blob || blob.size === 0 || chatDisabled) return;
-
-      setIsTranscribing(true);
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const base64 = reader.result.split(',')[1] || '';
-        if (base64) {
-          send({ type: 'voice_message', audio: base64 });
-        } else {
-          setIsTranscribing(false);
-        }
-      };
-      reader.onerror = () => setIsTranscribing(false);
-      reader.readAsDataURL(blob);
-    } else {
-      startRecording();
+    if (isListening) {
+      setInputText(transcript);
     }
-  }, [isRecording, stopRecording, startRecording, send, chatDisabled]);
+  }, [transcript, isListening]);
+
+  // On mic release (isListening true -> false), send the finalized
+  // transcript as a normal chat_message per Backend Spec §5 (Voice
+  // Transcription Ingestion): recognition is entirely client-side, and the
+  // transcribed text is packaged with metadata.input_method: "voice" and
+  // processed identically to typed chat by the existing /ws pipeline.
+  useEffect(() => {
+    if (wasListeningRef.current && !isListening) {
+      const text = transcript.trim();
+      if (text && !chatDisabled) {
+        send({ type: 'chat_message', text, metadata: { input_method: 'voice' } });
+        addMessage({ sender: 'HEIR', text });
+      }
+      setInputText('');
+      clearTranscript();
+    }
+    wasListeningRef.current = isListening;
+  }, [isListening, transcript, chatDisabled, send, addMessage, clearTranscript]);
+
+  // Hold-to-talk: press starts client-side transcription, release stops it
+  // and (via the effect above) sends the transcript. Mirrors AdminVoiceRecorder's
+  // secure-context guard — startListening itself also refuses on insecure origins.
+  const handleMicDown = useCallback(
+    (e) => {
+      if (e.cancelable) e.preventDefault();
+      if (chatDisabled || !isSecureContext) return;
+      clearTranscript();
+      setInputText('');
+      startListening();
+    },
+    [chatDisabled, isSecureContext, clearTranscript, startListening],
+  );
+
+  const handleMicUp = useCallback(() => {
+    stopListening();
+  }, [stopListening]);
 
   const handleSend = useCallback(() => {
     const text = inputText.trim();
@@ -215,14 +228,19 @@ export default function HeirAssistantPanel() {
                   {isSpeechSupported && (
                     <button
                       type="button"
-                      className={`assistant-mic-btn ${isRecording ? 'assistant-mic-btn-active' : ''}`}
-                      onClick={handleMicToggle}
-                      disabled={isTranscribing}
-                      aria-label={isRecording ? 'Stop voice input' : 'Start voice input'}
-                      aria-pressed={isRecording}
+                      className={`assistant-mic-btn ${isListening ? 'assistant-mic-btn-active' : ''}`}
+                      onMouseDown={handleMicDown}
+                      onMouseUp={handleMicUp}
+                      onMouseLeave={() => isListening && handleMicUp()}
+                      onTouchStart={handleMicDown}
+                      onTouchEnd={handleMicUp}
+                      onTouchCancel={handleMicUp}
+                      disabled={!isSecureContext}
+                      aria-label={isListening ? 'Release to send voice message' : 'Hold to speak'}
+                      aria-pressed={isListening}
                       data-testid="assistant-mic-btn"
                     >
-                      {isRecording ? '⏹' : '🎤'}
+                      {isListening ? '⏹' : '🎤'}
                     </button>
                   )}
 
@@ -231,21 +249,15 @@ export default function HeirAssistantPanel() {
                     value={inputText}
                     onChange={(e) => setInputText(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder={
-                      isRecording
-                        ? 'Recording... tap stop when done'
-                        : isTranscribing
-                        ? 'Transcribing...'
-                        : 'Type a message...'
-                    }
+                    placeholder={isListening ? 'Listening... release to send' : 'Type a message...'}
                     rows={1}
-                    readOnly={isRecording || isTranscribing}
+                    readOnly={isListening}
                     data-testid="assistant-input"
                   />
                   <button
                     className="btn btn-primary btn-sm"
                     onClick={handleSend}
-                    disabled={isRecording || isTranscribing || !inputText.trim()}
+                    disabled={isListening || !inputText.trim()}
                     data-testid="assistant-send-btn"
                   >
                     Send

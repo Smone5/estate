@@ -251,34 +251,28 @@ def test_restore_gate_rate_limited(client, mock_db):
 # T28c — Positive backup tests (Testing Spec §1.6)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _fake_sql_backup_dump(engine):
+    """Stand-in for app.main._build_sql_backup_dump — the endpoint now
+    generates dumps via pure-Python SQLAlchemy introspection rather than
+    shelling out to pg_dump, so tests bypass the introspection internals
+    (covered elsewhere) and just supply canned dump content + manifest."""
+    return "-- test backup dump\nSELECT 1;\n", {"format": "test", "tables": {}}
+
+
 def test_backup_returns_octet_stream_with_admin_jwt(client, mock_db, monkeypatch):
     """GET /api/system/backup returns 200 + application/octet-stream for Admin."""
-    import subprocess
     aid = str(uuid.uuid4())
     mock_db.query.return_value.filter.return_value.first.return_value = mock.MagicMock(
         id=aid, role="ADMIN"
     )
-    # Ensure DATABASE_URL is set so the backup handler can parse it
     monkeypatch.setenv("DATABASE_URL", "postgresql://user:pass@localhost:5432/estate")
 
     jwt = _admin_jwt(aid)
     tc = TestClient(client.app, raise_server_exceptions=False)
     tc.cookies = {"estate_session": jwt}
 
-    # Mock pg_dump to succeed by writing a minimal dump file
-    def _fake_pg_dump(*args, **kwargs):
-        cmd_list = args[0] if args else kwargs.get("args", [])
-        out_path = None
-        for i, a in enumerate(cmd_list):
-            if a == "-f" and i + 1 < len(cmd_list):
-                out_path = cmd_list[i + 1]
-                break
-        if out_path:
-            from pathlib import Path
-            Path(out_path).write_text("-- test backup dump\nSELECT 1;\n")
-        return subprocess.CompletedProcess(cmd_list, 0, stdout="", stderr="")
-
-    with mock.patch("subprocess.run", side_effect=_fake_pg_dump):
+    with mock.patch("app.database.engine", mock.MagicMock()), \
+         mock.patch("app.main._build_sql_backup_dump", side_effect=_fake_sql_backup_dump):
         r = tc.get("/api/system/backup")
     assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.content[:200] if r.content else 'empty'}"
     assert r.headers.get("content-type") == "application/octet-stream"
@@ -287,7 +281,6 @@ def test_backup_returns_octet_stream_with_admin_jwt(client, mock_db, monkeypatch
 
 def test_backup_archive_decryptable(client, mock_db, monkeypatch):
     """The backup archive can be decrypted with ENCRYPTION_KEY."""
-    import subprocess
     aid = str(uuid.uuid4())
     mock_db.query.return_value.filter.return_value.first.return_value = mock.MagicMock(
         id=aid, role="ADMIN"
@@ -298,19 +291,8 @@ def test_backup_archive_decryptable(client, mock_db, monkeypatch):
     tc = TestClient(client.app, raise_server_exceptions=False)
     tc.cookies = {"estate_session": jwt}
 
-    def _fake_pg_dump(*args, **kwargs):
-        cmd_list = args[0] if args else kwargs.get("args", [])
-        out_path = None
-        for i, a in enumerate(cmd_list):
-            if a == "-f" and i + 1 < len(cmd_list):
-                out_path = cmd_list[i + 1]
-                break
-        if out_path:
-            from pathlib import Path
-            Path(out_path).write_text("-- test backup dump\nSELECT 1;\n")
-        return subprocess.CompletedProcess(cmd_list, 0, stdout="", stderr="")
-
-    with mock.patch("subprocess.run", side_effect=_fake_pg_dump):
+    with mock.patch("app.database.engine", mock.MagicMock()), \
+         mock.patch("app.main._build_sql_backup_dump", side_effect=_fake_sql_backup_dump):
         r = tc.get("/api/system/backup")
     assert r.status_code == 200
 
@@ -322,7 +304,7 @@ def test_backup_archive_decryptable(client, mock_db, monkeypatch):
 
 def test_backup_archive_contains_dump_sql_and_uploads(client, mock_db, monkeypatch):
     """Decrypted tar.gz contains dump.sql and uploads/ directory."""
-    import subprocess, tarfile
+    import tarfile
     aid = str(uuid.uuid4())
     mock_db.query.return_value.filter.return_value.first.return_value = mock.MagicMock(
         id=aid, role="ADMIN"
@@ -333,19 +315,8 @@ def test_backup_archive_contains_dump_sql_and_uploads(client, mock_db, monkeypat
     tc = TestClient(client.app, raise_server_exceptions=False)
     tc.cookies = {"estate_session": jwt}
 
-    def _fake_pg_dump(*args, **kwargs):
-        cmd_list = args[0] if args else kwargs.get("args", [])
-        out_path = None
-        for i, a in enumerate(cmd_list):
-            if a == "-f" and i + 1 < len(cmd_list):
-                out_path = cmd_list[i + 1]
-                break
-        if out_path:
-            from pathlib import Path
-            Path(out_path).write_text("-- test backup dump\nSELECT 1;\n")
-        return subprocess.CompletedProcess(cmd_list, 0, stdout="", stderr="")
-
-    with mock.patch("subprocess.run", side_effect=_fake_pg_dump):
+    with mock.patch("app.database.engine", mock.MagicMock()), \
+         mock.patch("app.main._build_sql_backup_dump", side_effect=_fake_sql_backup_dump):
         r = tc.get("/api/system/backup")
     assert r.status_code == 200
 
@@ -374,8 +345,16 @@ def test_restore_rolls_back_on_sql_failure(client, mock_db):
     tx.__exit__ = mock.MagicMock(return_value=None)
     engine.begin.return_value = tx
 
+    # The restore endpoint introspects the engine for table names to TRUNCATE
+    # before importing the dump. A bare MagicMock auto-iterates as empty, so
+    # the TRUNCATE loop (and therefore sqlalchemy.text()) would never run —
+    # give it a fake inspector reporting one table so that loop body executes.
+    fake_inspector = mock.MagicMock()
+    fake_inspector.get_table_names.return_value = ["users"]
+
     # Mock sqlalchemy.text(...).execution_options(...) call to raise
     with mock.patch("app.database.engine", engine), \
+         mock.patch("sqlalchemy.inspect", return_value=fake_inspector), \
          mock.patch("sqlalchemy.text", side_effect=Exception("SQL import failure")):
         r = tc.post("/api/system/restore",
             files={"backup_file": ("fail.bak", io.BytesIO(backup), "application/octet-stream")})

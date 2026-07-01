@@ -10,6 +10,9 @@ export default function HeirValuationPanel() {
   const sessionStatus = useMediationStore((s) => s.sessionStatus);
   const submitValuations = useMediationStore((s) => s.submitValuations);
   const inventoryUpdatedNotice = useMediationStore((s) => s.inventoryUpdatedNotice);
+  const practiceCompletedAt = useMediationStore((s) => s.practiceCompletedAt);
+  const practiceRequired = useMediationStore((s) => s.practiceRequired);
+  const simulationPublishedAt = useMediationStore((s) => s.simulationPublishedAt);
 
   const [isWaiverOpen, setIsWaiverOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -39,7 +42,28 @@ export default function HeirValuationPanel() {
     if (!isHeir) return null;
     return (
       <div className="archival-card" style={{ marginBottom: 'var(--space-md)', padding: 'var(--space-md)' }}>
-        <h3 style={{ fontFamily: 'var(--font-serif)', fontSize: '1.25rem', marginBottom: 'var(--space-sm)' }}>
+        {sessionStatus === 'SETUP' && (
+          <div className="heir-practice-step">
+            <span className={practiceCompletedAt ? 'is-complete' : ''}>{practiceCompletedAt ? '✓' : '1'}</span>
+            <div>
+              <h3>Practice the allocation process</h3>
+              <p>
+                {practiceCompletedAt
+                  ? 'Practice complete. The Executor can now see that you finished; your practice points remain private.'
+                  : simulationPublishedAt
+                    ? 'Use fictional items to experience the same catalog, 1,000-point review, submission, waiting, and result flow before the real allocation opens.'
+                    : 'The Executor is preparing your fictional practice allocation. It will appear here before the real session opens.'}
+              </p>
+              {practiceRequired && !practiceCompletedAt && <small>Required before the real allocation can launch</small>}
+            </div>
+            {simulationPublishedAt && (
+              <a className="btn btn-primary" href="/allocation-practice">
+                {practiceCompletedAt ? 'Practice again' : 'Start required practice'}
+              </a>
+            )}
+          </div>
+        )}
+        <h3 style={{ fontFamily: 'var(--font-serif)', fontSize: '1.25rem', margin: 'var(--space-lg) 0 var(--space-sm)' }}>
           Data & Settings
         </h3>
         <GDPRDataExportButton />
@@ -137,6 +161,9 @@ export default function HeirValuationPanel() {
       )}
 
       <div style={{ marginTop: 'var(--space-lg)', paddingTop: 'var(--space-md)', borderTop: '1px solid var(--color-border)', display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)' }}>
+        <a className="btn btn-secondary" href="/allocation-practice">
+          Practice with sample items
+        </a>
         <GDPRDataExportButton />
         <GDPRDeleteAccountDrawer />
       </div>

@@ -45,6 +45,8 @@ class Session(Base):
     announcement = Column(Text, nullable=True)
     announcement_updated_at = Column(DateTime(timezone=True), nullable=True)
     deadline = Column(DateTime(timezone=True), nullable=True)
+    practice_required = Column(Boolean, nullable=False, default=False)
+    simulation_published_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(
         DateTime(timezone=True), nullable=False,
         server_default=sa_text("timezone('utc'::text, now())"),
@@ -110,6 +112,7 @@ class User(Base):
     consent_timestamp = Column(DateTime(timezone=True), nullable=True)
     is_submitted = Column(Boolean, nullable=False, default=False)
     submitted_at = Column(DateTime(timezone=True), nullable=True)
+    practice_completed_at = Column(DateTime(timezone=True), nullable=True)
     draft_version = Column(Integer, nullable=False, default=0)
     status = Column(
         String(30), nullable=False, default="PENDING",

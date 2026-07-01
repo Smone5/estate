@@ -33,6 +33,9 @@ export const useMediationStore = create((set, get) => ({
   legal_first_name: null,
   legal_middle_name: null,
   legal_last_name: null,
+  practiceCompletedAt: null,
+  practiceRequired: false,
+  simulationPublishedAt: null,
 
   // ── Invite Actions ───────────────────────────────────────────────────────
   checkInviteStatus: async (token) => {
@@ -50,6 +53,26 @@ export const useMediationStore = create((set, get) => ({
     if (!res.ok) throw new Error(`Session resumption failed: ${res.status}`);
     set({ isAuthenticated: true });
     await get().loadProfile();
+  },
+
+  // Re-hydrate a Heir's auth state from the estate_session cookie on a hard
+  // refresh (DashboardGuard calls this whenever a heir lands on /dashboard
+  // without isAuthenticated already set in memory). Mirrors the Admin
+  // restore pattern in AdminDashboard.jsx (GET /api/auth/me, then
+  // setSession) so the same cookie/JWT contract works for both roles —
+  // and for a future federated login, since /api/auth/me and the cookie
+  // it reads are already provider-agnostic.
+  restoreHeirSession: async () => {
+    const res = await fetch(`${API_BASE}/api/auth/me`, { credentials: 'same-origin' });
+    if (!res.ok) throw new Error(`Session restore failed: ${res.status}`);
+    const data = await res.json();
+    if (data.role !== 'HEIR') throw new Error('Not a heir session');
+    set({
+      isAuthenticated: true,
+      userRole: 'HEIR',
+      session_id: data.session_id,
+      heir_id: data.user_id,
+    });
   },
 
   // ── Auth Actions ─────────────────────────────────────────────────────────
@@ -124,6 +147,25 @@ export const useMediationStore = create((set, get) => ({
     return data;
   },
 
+  // Shared logout action for both Admin and Heir (role-agnostic: the
+  // backend cookie/session is not tied to how the user authenticated).
+  // Single choke point so that a future federated/SSO login (Google,
+  // Apple, generic OIDC — see user_journeys.md §0.5) only needs to teach
+  // *this* action about redirecting to the IdP's end-session endpoint,
+  // rather than every caller that currently hand-rolls a logout fetch.
+  logout: async () => {
+    try {
+      await fetch(`${API_BASE}/api/auth/logout`, {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
+    } catch (err) {
+      console.error('Failed to clear auth cookie', err);
+    } finally {
+      get().setSession({ isAuthenticated: false, user_role: null, session_id: null });
+    }
+  },
+
   // ── Session Actions ──────────────────────────────────────────────────────
   setSession: (sessionData) => set((state) => {
     const has = (key) => Object.prototype.hasOwnProperty.call(sessionData, key);
@@ -148,6 +190,9 @@ export const useMediationStore = create((set, get) => ({
       sessionStatus: isLoggingOut ? 'SETUP' : pick('status', state.sessionStatus),
       announcement: isLoggingOut ? null : pick('announcement', state.announcement),
       announcement_updated_at: isLoggingOut ? null : pick('announcement_updated_at', state.announcement_updated_at),
+      practiceCompletedAt: isLoggingOut ? null : pick('practice_completed_at', state.practiceCompletedAt),
+      practiceRequired: isLoggingOut ? false : pick('practice_required', state.practiceRequired),
+      simulationPublishedAt: isLoggingOut ? null : pick('simulation_published_at', state.simulationPublishedAt),
     };
   }),
 
@@ -374,6 +419,7 @@ export const useMediationStore = create((set, get) => ({
       isSubmitted: data.is_submitted || false,
       is_hitl_suspended: data.is_hitl_suspended || false,
       draft_version: data.draft_version || 0,
+      practiceCompletedAt: data.practice_completed_at || null,
     });
   },
 
@@ -389,6 +435,8 @@ export const useMediationStore = create((set, get) => ({
       isPaused: data.is_paused || false,
       isDeadlocked: data.is_deadlocked || false,
       sessionStatus: data.status,
+      practiceRequired: data.practice_required || false,
+      simulationPublishedAt: data.simulation_published_at || null,
     });
   },
 

@@ -141,9 +141,10 @@ class TestMultipleAssetImages:
             files={"file": ("test.webp", io.BytesIO(image_bytes), "image/webp")},
         )
         assert resp.status_code == 201
-        
-        # Verify that both the Asset and primary AssetImage were added to DB
-        assert mock_db.add.call_count == 2
+
+        # Verify that the Asset and primary AssetImage were added to DB
+        # (a third call adds the ASSET_CREATED AuditLog entry).
+        assert mock_db.add.call_count == 3
         calls = mock_db.add.call_args_list
         assert isinstance(calls[0][0][0], Asset)
         assert isinstance(calls[1][0][0], AssetImage)
@@ -348,10 +349,13 @@ class TestMultipleAssetImages:
             return first_results.pop(0) if first_results else None
 
         mock_db.query.return_value.filter.return_value.first.side_effect = _first_side_effect
+        # The endpoint re-fetches session then asset under a row lock
+        # (with_for_update) before deleting — return the same objects.
+        mock_db.query.return_value.filter.return_value.with_for_update.return_value.first.side_effect = [session, asset]
 
         resp = test_client.delete(f"/api/assets/{ASSET_ID}")
         assert resp.status_code == 200
-        
+
         # Verify both images were deleted from storage
         delete_calls = [c[0][0] for c in mock_storage.delete.call_args_list]
         assert "static/uploads/primary.webp" in delete_calls

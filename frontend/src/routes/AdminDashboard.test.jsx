@@ -97,6 +97,10 @@ describe('AdminDashboard', () => {
           mockStoreState.isDeadlocked = sessionData.is_deadlocked;
         }
       }),
+      logout: vi.fn(async () => {
+        await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+        mockStoreState.setSession({ isAuthenticated: false, user_role: null, session_id: null });
+      }),
     };
 
     useMediationStore.mockImplementation((selector) => {

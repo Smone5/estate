@@ -65,6 +65,14 @@ This specification defines the test suites, verification assertions, and mock bo
 *   **Test Auto-Lock Submission Verification**:
     *   Verify that `POST /api/sessions/{session_id}/valuations/submit` checks for any remaining unsubmitted heirs whose status is in `('PENDING', 'PROFILE_HOLD', 'ACTIVE')`.
     *   Verify that if there are still heirs in `'PENDING'` status (e.g. newly invited heirs who have not onboarded yet), the deadlock detection and auto-lock logic is **not** triggered.
+*   **Test Registered-Heir Practice Gate**:
+    *   Verify new sessions set `practice_required = true`, while migrated existing sessions remain optional.
+    *   Verify launch is rejected when required practice is unpublished.
+    *   Verify launch identifies registered participating Heirs with no `practice_completed_at`.
+    *   Verify `POST /api/heirs/me/simulation/complete` records only a completion timestamp and never accepts practice point values.
+    *   Verify `POST /api/heirs/me/simulation/solve` calls the production `solve_mnw` function and does not create `Valuation`, `AuditLog`, or settings rows.
+    *   Verify publishing a changed session simulation resets prior Heir completion timestamps.
+    *   Verify launch succeeds after all required registered Heirs complete practice or the Executor explicitly marks it optional.
 
 
 ### 1.2 Data Security & Privacy (PII Scrubbing & Encryption)

@@ -19,8 +19,6 @@ export default function IDScanner() {
   const fileInputRef = useRef(null);
   const streamRef = useRef(null);
 
-  // Only render when userStatus is PROFILE_HOLD
-  if (userStatus !== 'PROFILE_HOLD') return null;
   const isAwaitingReview = success || Boolean(idScanUri);
 
   // ── Camera controls ──────────────────────────────────────────────────
@@ -166,6 +164,11 @@ export default function IDScanner() {
   }, []);
 
   // ── Render ───────────────────────────────────────────────────────────
+
+  // Only render when userStatus is PROFILE_HOLD. This check must come
+  // after all hooks above (Rules of Hooks) so the hook count stays
+  // constant across renders as userStatus changes.
+  if (userStatus !== 'PROFILE_HOLD') return null;
 
   return (
     <div style={{ marginBottom: 'var(--space-lg)' }}>

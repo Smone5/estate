@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useMediationStore } from '../store/useMediationStore';
 import { customConfirm } from '../store/useDialogStore';
 
@@ -6,13 +6,29 @@ export default function AdminSessionLifecycleControls({ sessionId, onSessionChan
   const store = useMediationStore();
   const sessionStatus = useMediationStore((s) => s.sessionStatus);
   const isPaused = useMediationStore((s) => s.isPaused);
+  const practiceRequired = useMediationStore((s) => s.practiceRequired);
+  const simulationPublishedAt = useMediationStore((s) => s.simulationPublishedAt);
 
   const [actionError, setActionError] = useState(null);
   const [actionSuccess, setActionSuccess] = useState(null);
+  const [practiceStatus, setPracticeStatus] = useState(null);
 
   const isSetup = sessionStatus === 'SETUP';
   const isActive = sessionStatus === 'ACTIVE' || sessionStatus === 'LOCKED';
   const isFinalized = sessionStatus === 'FINALIZED';
+  const practiceReady = !practiceRequired || (
+    Boolean(simulationPublishedAt) &&
+    practiceStatus &&
+    practiceStatus.completed_heirs === practiceStatus.total_heirs
+  );
+
+  useEffect(() => {
+    if (!sessionId || !isSetup || !practiceRequired) return;
+    fetch(`/api/sessions/${sessionId}/simulation/status`, { credentials: 'same-origin' })
+      .then((response) => (response.ok ? response.json() : null))
+      .then(setPracticeStatus)
+      .catch(() => setPracticeStatus(null));
+  }, [sessionId, isSetup, simulationPublishedAt]);
 
   async function refreshSessionState() {
     if (store.loadSessionDetails) {
@@ -121,7 +137,11 @@ export default function AdminSessionLifecycleControls({ sessionId, onSessionChan
             {isPaused && sessionStatus !== 'SETUP' && ' (Paused)'}
           </h3>
           <p className="text-muted text-sm">
-            {isSetup && 'Setup Phase. Stage and publish assets, then launch the session.'}
+            {isSetup && (
+              practiceRequired
+                ? `Setup Phase. Publish practice, wait for registered heirs (${practiceStatus?.completed_heirs || 0}/${practiceStatus?.total_heirs || 0} complete), then launch the real allocation.`
+                : 'Setup Phase. Practice is optional. Stage and publish assets, then launch the real allocation.'
+            )}
             {isActive && !isPaused && 'Mediation active. Heirs are allocating points.'}
             {isActive && isPaused && 'Session paused. Heir access is frozen.'}
             {isFinalized && 'Mediation finalized. Distribution ledgers are sealed.'}
@@ -132,9 +152,10 @@ export default function AdminSessionLifecycleControls({ sessionId, onSessionChan
             <button
               className="btn btn-primary btn-sm"
               onClick={handleLaunch}
+              disabled={!practiceReady}
               data-testid="launch-session-btn"
             >
-              🚀 Launch Session
+              {practiceReady ? '🚀 Launch Real Allocation' : 'Practice Completion Required'}
             </button>
           )}
           {isActive && !isPaused && (

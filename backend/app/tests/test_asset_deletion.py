@@ -151,7 +151,8 @@ class TestAssetDeletion:
         assert resp.status_code == 404
 
     def test_delete_blocked_in_active(self, client, mock_db_session, test_env):
-        """Deletion returns 400 when session is ACTIVE."""
+        """Deleting a LIVE-classified asset in an ACTIVE session without a
+        reason is rejected (major deletions require justification)."""
         token = _make_admin_token()
         session = _make_session(status="ACTIVE")
         asset = _make_asset(session_id=session.id)
@@ -165,7 +166,7 @@ class TestAssetDeletion:
             cookies={"estate_session": token},
         )
         assert resp.status_code == 400
-        assert "SETUP" in resp.json()["detail"]
+        assert "reason" in resp.json()["detail"].lower()
 
     def test_delete_blocked_in_locked(self, client, mock_db_session, test_env):
         """Deletion returns 400 when session is LOCKED."""
@@ -208,6 +209,10 @@ class TestAssetDeletion:
         mock_query = mock_db_session.query.return_value
         mock_filter = mock_query.filter.return_value
         mock_filter.first.side_effect = [asset, session]
+        # The endpoint re-fetches session then asset under a row lock
+        # (with_for_update) before deleting — return the same objects so
+        # the locked references match what was already validated above.
+        mock_filter.with_for_update.return_value.first.side_effect = [session, asset]
 
         with mock.patch("app.main.get_storage_driver") as mock_storage:
             mock_driver = mock.MagicMock()

@@ -10,6 +10,9 @@
  *   - SB 942 synthetic voice label: "Synthesized AI Voice" shown when
  *     is_synthetic flag is true in the current frame
  *   - Null-audio guard: ignores chunks with audio: null (T21 degradation)
+ *   - Mute support: when `muted` is true, incoming chunks are drained from
+ *     the queue without ever calling Audio.play() (transcript text still
+ *     renders in chat; only the synthesized voice is silenced)
  *
  * Depends on T18 (Zustand), T23 (WebSocket hook).
  */
@@ -61,7 +64,7 @@ function playAudioBlob(base64Audio) {
   });
 }
 
-export function useAudioPlayback() {
+export function useAudioPlayback(muted = false) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isSyntheticPlaying, setIsSyntheticPlaying] = useState(false);
   const audioChunks = useMediationStore((s) => s.audioChunks);
@@ -70,14 +73,28 @@ export function useAudioPlayback() {
   const queueRef = useRef([]);
   const isPlayingRef = useRef(false);
   const cancelRef = useRef(false);
+  const mutedRef = useRef(muted);
   // Track all active Blob URLs for cleanup on unmount
   const activeUrlsRef = useRef(new Set());
+
+  useEffect(() => {
+    mutedRef.current = muted;
+  }, [muted]);
 
   /**
    * Process the next item in the queue.
    */
   const playNext = useCallback(async () => {
     if (cancelRef.current || queueRef.current.length === 0) {
+      setIsPlaying(false);
+      isPlayingRef.current = false;
+      setIsSyntheticPlaying(false);
+      return;
+    }
+
+    // Muted: drain the queue silently, never invoking Audio.play().
+    if (mutedRef.current) {
+      queueRef.current = [];
       setIsPlaying(false);
       isPlayingRef.current = false;
       setIsSyntheticPlaying(false);
@@ -104,6 +121,9 @@ export function useAudioPlayback() {
    *   Each frame: { type: 'chat_reply_chunk', text: string, audio: string|null, is_synthetic: boolean, is_final: boolean }
    */
   const enqueueChunks = useCallback((chunks) => {
+    // Muted: don't even queue — the reply text still renders in chat.
+    if (mutedRef.current) return;
+
     const items = Array.isArray(chunks) ? chunks : [chunks];
 
     for (const item of items) {

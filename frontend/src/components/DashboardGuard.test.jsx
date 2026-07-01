@@ -2,6 +2,7 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
+import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import '@testing-library/jest-dom';
 import DashboardGuard from './DashboardGuard';
 import { useMediationStore } from '../store/useMediationStore';
@@ -59,11 +60,19 @@ describe('DashboardGuard', () => {
   it('restores an heir dashboard from the secure cookie on hard refresh', async () => {
     mockStoreState.isAuthenticated = false;
     mockStoreState.session_id = null;
+    // Simulate the real restoreHeirSession flipping isAuthenticated once
+    // the cookie resolves, same as the store implementation does.
+    mockStoreState.restoreHeirSession = vi.fn().mockImplementation(async () => {
+      mockStoreState.isAuthenticated = true;
+      mockStoreState.session_id = 'session-1';
+    });
 
     render(
-      <DashboardGuard variant="heir">
-        <div>Heir dashboard</div>
-      </DashboardGuard>,
+      <MemoryRouter initialEntries={['/dashboard']}>
+        <DashboardGuard variant="heir">
+          <div>Heir dashboard</div>
+        </DashboardGuard>
+      </MemoryRouter>,
     );
 
     expect(screen.getByText('Restoring Dashboard')).toBeInTheDocument();
@@ -73,13 +82,45 @@ describe('DashboardGuard', () => {
     });
   });
 
+  it('redirects to /login when the cookie does not resolve to a valid Heir session', async () => {
+    mockStoreState.isAuthenticated = false;
+    mockStoreState.session_id = null;
+    // Simulate an expired/missing cookie: restoreHeirSession resolves
+    // without ever setting isAuthenticated.
+    mockStoreState.restoreHeirSession = vi.fn().mockResolvedValue();
+
+    render(
+      <MemoryRouter initialEntries={['/dashboard']}>
+        <Routes>
+          <Route
+            path="/dashboard"
+            element={(
+              <DashboardGuard variant="heir">
+                <div>Heir dashboard</div>
+              </DashboardGuard>
+            )}
+          />
+          <Route path="/login" element={<div>Login Page</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText('Restoring Dashboard')).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.getByText('Login Page')).toBeInTheDocument();
+    });
+  });
+
   it('polls heir profile and session state while the dashboard is open', async () => {
     vi.useFakeTimers();
 
     render(
-      <DashboardGuard variant="heir">
-        <div>Heir dashboard</div>
-      </DashboardGuard>,
+      <MemoryRouter initialEntries={['/dashboard']}>
+        <DashboardGuard variant="heir">
+          <div>Heir dashboard</div>
+        </DashboardGuard>
+      </MemoryRouter>,
     );
 
     expect(mockStoreState.loadProfile).toHaveBeenCalledTimes(1);
@@ -104,9 +145,11 @@ describe('DashboardGuard', () => {
     };
 
     render(
-      <DashboardGuard variant="heir">
-        <div>Heir dashboard</div>
-      </DashboardGuard>,
+      <MemoryRouter initialEntries={['/dashboard']}>
+        <DashboardGuard variant="heir">
+          <div>Heir dashboard</div>
+        </DashboardGuard>
+      </MemoryRouter>,
     );
 
     expect(screen.getByTestId('support-notice-banner')).toHaveTextContent('The Executor replied');
@@ -120,9 +163,11 @@ describe('DashboardGuard', () => {
     mockStoreState.userStatus = 'PROFILE_HOLD';
 
     render(
-      <DashboardGuard variant="admin">
-        <div data-testid="admin-content">Admin console content</div>
-      </DashboardGuard>,
+      <MemoryRouter initialEntries={['/dashboard']}>
+        <DashboardGuard variant="admin">
+          <div data-testid="admin-content">Admin console content</div>
+        </DashboardGuard>
+      </MemoryRouter>,
     );
 
     expect(screen.getByTestId('admin-content')).toBeInTheDocument();

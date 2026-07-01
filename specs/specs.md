@@ -68,6 +68,11 @@ To help human developers, AI code agents, and testing pipelines, the system spec
     *   Executor Quick-Start onboarding steps (mnemonic setup, mobile staging, manual/voice desc uploads, will devises).
     *   UI drawer placement triggers and accordion layout definitions.
 
+*   ### [Full Allocation Rehearsal Specification](specs_allocation_simulator.md)
+    *   Complete fictional heir journey from photo catalog through allocation result.
+    *   Six-item practice estate, 1,000-point submission, waiting room, and Nash explanation.
+    *   Restart behavior, privacy boundaries, executor template management, and validation rules.
+
 ---
 
 ## 2. Interactive Workflows
@@ -85,3 +90,5 @@ To help human developers, AI code agents, and testing pipelines, the system spec
     *   Master technical architecture reference, system diagrams, and integration guide.
 *   ### [Implementation Plan](../plan/implementation_plan.md)
     *   Step-by-step checklists for the infrastructure deployment, logic bridge, frontend creation, and security audit phase.
+*   ### [Full Allocation Rehearsal Plan](../plan/allocation_simulator_plan.md)
+    *   Delivery and verification plan for the heir rehearsal and executor simulation manager.

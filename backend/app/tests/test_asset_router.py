@@ -188,8 +188,9 @@ class TestAssetStage:
         assert resp.status_code == 400
 
     def test_stage_not_setup_returns_400(self, client):
+        """Staging is allowed in SETUP or ACTIVE, but rejected once LOCKED."""
         test_client, mock_db, *_ = client
-        session = _build_session(status="ACTIVE")
+        session = _build_session(status="LOCKED")
         mock_db.query.return_value.filter.return_value.first.return_value = session
 
         image_bytes = _make_fake_webp_image()
@@ -356,6 +357,9 @@ class TestAssetPublish:
 
         mock_db.query.return_value.filter.return_value.first.side_effect = _first_side_effect
         mock_db.query.return_value.filter.return_value.all.return_value = []
+        # The endpoint re-fetches session then asset under a row lock
+        # (with_for_update) before applying edits — return the same objects.
+        mock_db.query.return_value.filter.return_value.with_for_update.return_value.first.side_effect = [session, asset]
 
         resp = test_client.post(
             f"/api/assets/{ASSET_ID}/publish",
@@ -445,9 +449,10 @@ class TestAssetPublish:
         assert resp.status_code == 400
 
     def test_publish_session_not_setup_returns_400(self, client):
+        """Publishing is allowed in SETUP or ACTIVE, but rejected once LOCKED."""
         test_client, mock_db, *_ = client
         asset = _build_staged_asset()
-        session = _build_session(status="ACTIVE")
+        session = _build_session(status="LOCKED")
 
         first_results = [asset, session]
 
@@ -485,6 +490,9 @@ class TestAssetPublish:
         mock_db.query.return_value.filter.return_value.first.side_effect = _first_side_effect
         # Mock the active heirs query
         mock_db.query.return_value.filter.return_value.all.return_value = [heir]
+        # The endpoint re-fetches session then asset under a row lock
+        # (with_for_update) before applying edits — return the same objects.
+        mock_db.query.return_value.filter.return_value.with_for_update.return_value.first.side_effect = [session, asset]
         mock_db.add = mock.MagicMock()
 
         resp = test_client.post(
@@ -666,8 +674,17 @@ class TestAssetSave:
     def test_save_success_returns_200(self, client):
         test_client, mock_db, mock_mgr, mock_provider, mock_storage = client
         asset = _build_staged_asset()
+        session = _build_session(status="SETUP")
 
-        mock_db.query.return_value.filter.return_value.first.return_value = asset
+        first_results = [asset, session]
+
+        def _first_side_effect(*args, **kwargs):
+            return first_results.pop(0) if first_results else None
+
+        mock_db.query.return_value.filter.return_value.first.side_effect = _first_side_effect
+        # The endpoint re-fetches session then asset under a row lock
+        # (with_for_update) before applying edits — return the same objects.
+        mock_db.query.return_value.filter.return_value.with_for_update.return_value.first.side_effect = [session, asset]
 
         resp = test_client.post(
             f"/api/assets/{ASSET_ID}/save",

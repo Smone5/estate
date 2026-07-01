@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { Navigate } from 'react-router-dom';
 import { useMediationStore } from '../store/useMediationStore';
 import AnnouncementAlertBanner from './AnnouncementAlertBanner';
 import AnnouncementLoginModal from './AnnouncementLoginModal';
@@ -20,6 +21,8 @@ export default function DashboardGuard({ variant = 'heir', children }) {
   const is_hitl_suspended = useMediationStore((s) => s.is_hitl_suspended);
   const isSubmitted = useMediationStore((s) => s.isSubmitted);
   const isAuthenticated = useMediationStore((s) => s.isAuthenticated);
+  const practiceCompletedAt = useMediationStore((s) => s.practiceCompletedAt);
+  const simulationPublishedAt = useMediationStore((s) => s.simulationPublishedAt);
 
   const sessionId = useMediationStore((s) => s.session_id);
   const loadSessionDetails = useMediationStore((s) => s.loadSessionDetails);
@@ -47,18 +50,17 @@ export default function DashboardGuard({ variant = 'heir', children }) {
 
   useEffect(() => {
     if (isAuthenticated && sessionId && variant === 'heir') {
-      loadSessionDetails().catch((err) => console.error('Failed to load session details', err));
-      loadProfile?.().catch((err) => console.error('Failed to load heir profile', err));
+      Promise.resolve(loadSessionDetails()).catch((err) => console.error('Failed to load session details', err));
+      Promise.resolve(loadProfile?.()).catch((err) => console.error('Failed to load heir profile', err));
       const interval = window.setInterval(() => {
-        loadSessionDetails().catch((err) => console.error('Failed to load session details', err));
-        loadProfile?.().catch((err) => console.error('Failed to load heir profile', err));
+        Promise.resolve(loadSessionDetails()).catch((err) => console.error('Failed to load session details', err));
+        Promise.resolve(loadProfile?.()).catch((err) => console.error('Failed to load heir profile', err));
       }, 5000);
       return () => window.clearInterval(interval);
     }
     return undefined;
   }, [isAuthenticated, sessionId, variant, loadSessionDetails, loadProfile]);
 
-  // Redirect is handled by the router, but double-check here
   if (!isAuthenticated && variant !== 'placeholder') {
     if (variant === 'heir' && restoring) {
       return (
@@ -66,6 +68,12 @@ export default function DashboardGuard({ variant = 'heir', children }) {
           <p className="text-muted">Restoring Dashboard</p>
         </div>
       );
+    }
+    // No cookie, or it didn't resolve to a valid Heir session (expired,
+    // logged out elsewhere, etc.) — send them to the return-visit login
+    // page rather than a permanently blank dashboard.
+    if (variant === 'heir') {
+      return <Navigate to="/login" replace />;
     }
     return null;
   }
@@ -112,10 +120,14 @@ export default function DashboardGuard({ variant = 'heir', children }) {
   if (sessionStatus === 'SETUP') {
     banner = {
       type: 'info',
-      text: 'Welcome! The Executor is currently setting up the estate catalog. Sliders and mediation chat will unlock once the session is launched.',
+      text: practiceCompletedAt
+        ? 'Practice complete. The real catalog and point controls will unlock when the Executor launches the allocation. You can still chat with the AI Mediator for questions in the meantime.'
+        : simulationPublishedAt
+          ? 'Your practice allocation is ready below. Complete it before the real catalog and point controls unlock. You can still chat with the AI Mediator for questions in the meantime.'
+          : 'The Executor is preparing your practice allocation and real estate catalog. Point controls remain locked until launch, but you can still chat with the AI Mediator for questions.',
     };
     disableControls = true;
-    disableChat = true;
+    disableChat = false;
   } else if (userStatus === 'PROFILE_HOLD') {
     banner = {
       type: 'warning',

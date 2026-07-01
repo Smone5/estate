@@ -892,7 +892,7 @@ export default function AdminSessionControl({
                         </button>
                         {heir.invite_token && (
                           <button
-                            className="btn btn-secondary btn-sm heir-secondary-action"
+                            className="btn btn-secondary btn-sm"
                             onClick={() => handleCopyInvite(heir)}
                             data-testid={`copy-invite-${heir.id}`}
                           >

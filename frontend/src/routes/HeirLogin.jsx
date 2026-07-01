@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useMediationStore } from '../store/useMediationStore';
 
 export default function HeirLoginPage() {
@@ -152,6 +152,11 @@ export default function HeirLoginPage() {
         >
           {submitting ? 'Signing In...' : 'Sign In'}
         </button>
+
+        <div className="login-practice-link">
+          <span>Want to understand the point system first?</span>
+          <Link to="/allocation-practice">Try the allocation practice room</Link>
+        </div>
       </form>
     </div>
   );

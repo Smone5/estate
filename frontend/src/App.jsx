@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useLocation, useSearchParams } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useSearchParams, useNavigate, useParams } from 'react-router-dom';
 import InvitePage from './routes/Invite';
 import HeirLoginPage from './routes/HeirLogin';
 import OptOutPage from './routes/OptOut';
@@ -9,12 +9,14 @@ import SemanticSearch from './components/SemanticSearch';
 import AdminDashboard from './routes/AdminDashboard';
 import FAQDrawer from './components/FAQDrawer';
 import HeirValuationPanel from './components/HeirValuationPanel';
+import HeirAssistantPanel from './components/HeirAssistantPanel';
 import SwitchEstateModal from './components/SwitchEstateModal';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useMediationStore } from './store/useMediationStore';
 import CustomDialogOverlay from './components/CustomDialogOverlay';
+import AllocationPracticeRoom from './components/AllocationPracticeRoom';
 
-const PUBLIC_PATHS = ['/invite', '/login', '/opt-out'];
+const PUBLIC_PATHS = ['/invite', '/login', '/opt-out', '/allocation-practice'];
 
 function DashboardPlaceholder() {
   // Enable real-time WebSocket push for heir (support_reply, support_resolution,
@@ -26,8 +28,14 @@ function DashboardPlaceholder() {
       <IDScanner />
       <HeirValuationPanel />
       <SemanticSearch />
+      <HeirAssistantPanel />
     </DashboardGuard>
   );
+}
+
+function AdminPracticePreview() {
+  const { sessionId } = useParams();
+  return <AllocationPracticeRoom previewSessionId={sessionId} />;
 }
 
 function LegalFooter() {
@@ -48,10 +56,12 @@ function LegalFooter() {
 
 function AppShell() {
   const location = useLocation();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const isHelpOpen = searchParams.get('help') === 'true';
   const isDashboard = location.pathname.startsWith('/dashboard');
   const userRole = useMediationStore((s) => s.userRole);
+  const logout = useMediationStore((s) => s.logout);
   const [isSwitchEstateOpen, setIsSwitchEstateOpen] = useState(false);
 
   const toggleHelp = () => {
@@ -60,6 +70,15 @@ function AppShell() {
     } else {
       setSearchParams({ help: 'true' });
     }
+  };
+
+  // Role-agnostic: the same /api/auth/logout cookie-clear works regardless
+  // of how the heir authenticated (invite token today; Google/Apple/OIDC
+  // in the future — see user_journeys.md §0.5). Heirs land back on /login
+  // since DashboardGuard renders nothing for an unauthenticated heir.
+  const handleHeirLogout = async () => {
+    await logout();
+    navigate('/login');
   };
 
   return (
@@ -84,6 +103,25 @@ function AppShell() {
               data-testid="switch-estate-btn"
             >
               Switch Estate
+            </button>
+          )}
+          {isDashboard && userRole === 'HEIR' && (
+            <button
+              onClick={handleHeirLogout}
+              className="close-btn"
+              style={{
+                color: 'var(--color-text-muted)',
+                fontSize: '0.875rem',
+                padding: 'var(--space-xs) var(--space-sm)',
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--radius-sm)',
+                background: 'none',
+                cursor: 'pointer'
+              }}
+              aria-label="Log Out"
+              data-testid="heir-logout-btn"
+            >
+              Log Out
             </button>
           )}
           {isDashboard && (
@@ -113,6 +151,8 @@ function AppShell() {
       <Routes>
         <Route path="/invite/:token" element={<InvitePage />} />
         <Route path="/login" element={<HeirLoginPage />} />
+        <Route path="/allocation-practice" element={<AllocationPracticeRoom />} />
+        <Route path="/admin/practice-preview/:sessionId" element={<AdminPracticePreview />} />
         <Route path="/dashboard" element={<DashboardPlaceholder />} />
         <Route path="/admin" element={<AdminDashboard />} />
         <Route path="/opt-out" element={<OptOutPage />} />

@@ -84,6 +84,11 @@ def _build_ticket(ticket_id, message, status):
     t.id = ticket_id
     t.message = message
     t.status = status
+    t.admin_response = None
+    t.initiator_role = "HEIR"
+    t.created_at = NOW - timedelta(hours=3)
+    t.responded_at = None
+    t.resolved_at = None
     return t
 
 

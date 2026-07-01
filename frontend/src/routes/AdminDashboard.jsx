@@ -11,6 +11,7 @@ import AdminAnnouncementConsole from '../components/AdminAnnouncementConsole';
 import AdminSettingsPanel from '../components/AdminSettingsPanel';
 import AdminSessionLifecycleControls from '../components/AdminSessionLifecycleControls';
 import AdminFinalDocumentsPanel from '../components/AdminFinalDocumentsPanel';
+import AdminSimulationManager from '../components/AdminSimulationManager';
 
 const SESSION_PAGE_SIZE = 8;
 
@@ -63,6 +64,7 @@ export default function AdminDashboard() {
   const TABS = [
     { id: 'inventory', label: 'Inventory' },
     { id: 'session', label: 'Session' },
+    { id: 'practice', label: 'Practice Simulation' },
     { id: 'backup', label: 'Backup' },
     { id: 'settings', label: 'Settings' },
   ];
@@ -345,23 +347,10 @@ export default function AdminDashboard() {
   }
 
   async function handleLogout() {
-    try {
-      await fetch('/api/auth/logout', {
-        method: 'POST',
-        credentials: 'same-origin',
-      });
-    } catch (err) {
-      console.error('Failed to clear auth cookie', err);
-    } finally {
-      localStorage.removeItem('admin_selected_session_id');
-      setViewingSession(false);
-      setSessions([]);
-      store.setSession({
-        isAuthenticated: false,
-        user_role: null,
-        session_id: null,
-      });
-    }
+    await store.logout();
+    localStorage.removeItem('admin_selected_session_id');
+    setViewingSession(false);
+    setSessions([]);
   }
 
   // ── First-Boot Setup Wizard (Gate) ──────────────────────────────────────
@@ -805,6 +794,8 @@ export default function AdminDashboard() {
               )}
 
               {activeTab === 'backup' && <BIP39RestorePanel />}
+
+              {activeTab === 'practice' && <AdminSimulationManager sessionId={sessionId} />}
 
               {activeTab === 'settings' && <AdminSettingsPanel />}
             </>

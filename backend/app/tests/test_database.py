@@ -198,7 +198,8 @@ class TestSessionsModel:
         expected_cols = {
             "id", "title", "status", "is_paused", "paused_at",
             "is_deadlocked", "announcement", "announcement_updated_at",
-            "deadline", "created_at",
+            "deadline", "practice_required", "simulation_published_at",
+            "created_at",
         }
         assert set(table.columns.keys()) == expected_cols
 
@@ -224,9 +225,9 @@ class TestUsersModel:
             "address_region", "address_postal_code", "address_country",
             "invite_token", "invite_token_expires_at", "invite_token_used",
             "consent_accepted", "age_verified", "consent_timestamp",
-            "is_submitted", "submitted_at", "draft_version",
-            "status", "created_at", "invitation_dispatched_at",
-            "waiver_email_failed",
+            "is_submitted", "submitted_at", "practice_completed_at",
+            "draft_version", "status", "created_at",
+            "invitation_dispatched_at", "waiver_email_failed",
         }
         assert set(table.columns.keys()) == expected_cols
 
@@ -358,7 +359,8 @@ class TestSupportRequestsModel:
         table = Base.metadata.tables["support_requests"]
         expected_cols = {
             "id", "session_id", "heir_id", "responded_by_id",
-            "message", "admin_response", "initiator_role", "status",
+            "message", "admin_response", "heir_image_uri", "admin_image_uri",
+            "initiator_role", "status",
             "responded_at", "resolved_at", "created_at",
         }
         assert set(table.columns.keys()) == expected_cols

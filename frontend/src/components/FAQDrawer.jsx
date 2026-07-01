@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { useMediationStore } from '../store/useMediationStore';
 import ModelTransparencyModal from './ModelTransparencyModal';
 
@@ -180,6 +181,16 @@ export default function FAQDrawer({ isOpen, onClose }) {
                 {openItem === faq.id && (
                   <div className="accordion-content">
                     {faq.answer}
+                    {faq.id === 's6' && (
+                      <Link
+                        className="btn btn-secondary btn-sm"
+                        to="/allocation-practice"
+                        onClick={onClose}
+                        style={{ marginTop: 'var(--space-sm)' }}
+                      >
+                        Try a private practice example
+                      </Link>
+                    )}
                   </div>
                 )}
               </div>

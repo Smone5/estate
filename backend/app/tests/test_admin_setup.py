@@ -141,7 +141,7 @@ class TestAdminSetup:
         # May be 201 or 429 if rate-limited by prior tests
         if resp.status_code == 201:
             assert "set-cookie" in resp.headers
-            assert "estate_session=" in resp.headers["set-cookie"]
+            assert "estate_admin_session=" in resp.headers["set-cookie"]
         else:
             assert resp.status_code == 429
 

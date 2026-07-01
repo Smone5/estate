@@ -15,8 +15,9 @@ import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Annotated
+from uuid import UUID
 
-from fastapi import FastAPI, Depends, HTTPException, Response, Request, UploadFile, File, Form, Query, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi import FastAPI, Depends, Header, HTTPException, Response, Request, UploadFile, File, Form, Query, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_
@@ -35,7 +36,7 @@ from .auth import (
     get_current_user,
     get_current_admin,
 )
-from .models import User, Session as SessionModel, Asset, Valuation, AuditLog, SupportRequest, CustomFAQ, ChatMessage, AssetImage, Category
+from .models import User, Session as SessionModel, Asset, Valuation, AuditLog, SupportRequest, CustomFAQ, ChatMessage, AssetImage, Category, AppSetting
 from .websocket_manager import manager
 from .kokoro_tts import get_kokoro_tts, _KOKORO_AVAILABLE as TTS_AVAILABLE
 from .services.storage import get_storage_driver, preprocess_image
@@ -51,6 +52,7 @@ from .services.llm_provider import (
 from .services.smtp_service import send_email, send_email_background, Attachment
 from .services.settings_service import get_settings_for_admin, update_settings, load_settings_into_env, SETTINGS_REGISTRY
 from .notice_log import build_notice_log
+from .practice_workflow import practice_launch_blocker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -390,7 +392,7 @@ async def auth_login(
         session_id=None,
     )
 
-    set_auth_cookie(response, token)
+    set_auth_cookie(response, token, role="ADMIN")
     return {"status": "authenticated", "role": "ADMIN"}
 
 
@@ -411,7 +413,7 @@ async def auth_me(
         role=current_user["role"],
         session_id=current_user.get("session_id"),
     )
-    set_auth_cookie(response, token)
+    set_auth_cookie(response, token, role=current_user["role"])
     return {
         "status": "authenticated",
         "user_id": current_user.get("user_id"),
@@ -422,9 +424,23 @@ async def auth_me(
 
 
 @app.post("/api/auth/logout")
-async def auth_logout(response: Response):
-    """Clear the session cookie (logout)."""
-    clear_auth_cookie(response)
+async def auth_logout(
+    response: Response,
+    x_estate_role: Optional[str] = Header(None, alias="X-Estate-Role"),
+):
+    """Clear the session cookie (logout).
+
+    Clears only the role indicated by the X-Estate-Role header (set by the
+    frontend based on which console is logging out), so an Admin logout
+    doesn't evict an unrelated Heir session in the same browser (and vice
+    versa). Without the header, clears every known cookie defensively.
+    """
+    if x_estate_role in ("ADMIN", "HEIR"):
+        clear_auth_cookie(response, role=x_estate_role)
+    else:
+        clear_auth_cookie(response, role="ADMIN")
+        clear_auth_cookie(response, role="HEIR")
+        clear_auth_cookie(response)
     return {"status": "success", "message": "Logged out successfully"}
 
 
@@ -519,7 +535,7 @@ async def invite_verify(
         session_id=str(user.session_id) if user.session_id else None,
     )
 
-    set_auth_cookie(response, jwt_token)
+    set_auth_cookie(response, jwt_token, role="HEIR")
     return {
         "status": "success",
         "session_id": str(user.session_id) if user.session_id else None,
@@ -636,7 +652,7 @@ async def heir_password_login(
         session_id=str(user.session_id) if user.session_id else None,
     )
 
-    set_auth_cookie(response, jwt_token)
+    set_auth_cookie(response, jwt_token, role="HEIR")
     return {
         "status": "success",
         "role": "HEIR",
@@ -650,6 +666,7 @@ async def heir_password_login(
 @limiter.limit("30/minute")
 async def list_heir_sessions(
     request: Request,
+    response: Response,
     db: DBSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
@@ -751,7 +768,7 @@ async def switch_heir_session(
         session_id=str(target.session_id),
     )
 
-    set_auth_cookie(response, jwt_token)
+    set_auth_cookie(response, jwt_token, role="HEIR")
     return {
         "status": "success",
         "role": "HEIR",
@@ -810,7 +827,7 @@ async def invite_login(
         session_id=str(user.session_id) if user.session_id else None,
     )
 
-    set_auth_cookie(response, jwt_token)
+    set_auth_cookie(response, jwt_token, role="HEIR")
     return {
         "status": "success",
         "session_id": str(user.session_id) if user.session_id else None,
@@ -837,10 +854,468 @@ class AdminSettingsTestConnectionRequest(BaseModel):
     overrides: dict[str, str] = {}
 
 
+SIMULATION_CONFIG_KEY = "__ALLOCATION_SIMULATION_CONFIG__"  # legacy guest-template key
+SESSION_SIMULATION_CONFIG_PREFIX = "__SESSION_SIM_CONFIG__:"
+
+
+def _simulation_config_key(session_id: str) -> str:
+    return f"{SESSION_SIMULATION_CONFIG_PREFIX}{session_id}"
+
+
+def _default_simulation_config() -> dict:
+    """Return the editable fictional estate used by the public rehearsal."""
+    return {
+        "version": 1,
+        "required_for_launch": True,
+        "title": "The Hartwell Family Practice Estate",
+        "welcome_message": (
+            "This fictional household lets you rehearse the complete allocation "
+            "process before your family session begins."
+        ),
+        "items": [
+            {
+                "id": "mantel-clock",
+                "title": "Walnut Mantel Clock",
+                "category": "Furniture",
+                "description": "A 1940s walnut clock that sat above the family-room fireplace.",
+                "story": "The clock was wound every Sunday evening before supper.",
+                "value_range": "$180–$320",
+                "image": "/simulation/mantel-clock.webp",
+                "enabled": True,
+                "companion_points": {"jordan": 260, "casey": 80},
+            },
+            {
+                "id": "recipe-box",
+                "title": "Handwritten Recipe Box",
+                "category": "Family History",
+                "description": "An oak box containing several decades of handwritten recipe cards.",
+                "story": "Many cards include notes added after large family meals.",
+                "value_range": "$30–$60",
+                "image": "/simulation/recipe-box.webp",
+                "enabled": True,
+                "companion_points": {"jordan": 80, "casey": 430},
+            },
+            {
+                "id": "film-camera",
+                "title": "35mm Family Camera",
+                "category": "Collectibles",
+                "description": "A well-used 1960s film camera with its original leather strap.",
+                "story": "Most childhood vacation photographs were taken with this camera.",
+                "value_range": "$120–$220",
+                "image": "/simulation/film-camera.webp",
+                "enabled": True,
+                "companion_points": {"jordan": 340, "casey": 110},
+            },
+            {
+                "id": "pearl-necklace",
+                "title": "Pearl Necklace",
+                "category": "Jewelry",
+                "description": "A single strand of cream pearls with a small vintage silver clasp.",
+                "story": "It was worn for anniversaries, graduations, and family weddings.",
+                "value_range": "$250–$450",
+                "image": "/simulation/pearl-necklace.webp",
+                "enabled": True,
+                "companion_points": {"jordan": 60, "casey": 250},
+            },
+            {
+                "id": "rocking-chair",
+                "title": "Oak Rocking Chair",
+                "category": "Furniture",
+                "description": "A handmade oak rocker with a woven cane seat and visible patina.",
+                "story": "Three generations of children were rocked to sleep in this chair.",
+                "value_range": "$140–$260",
+                "image": "/simulation/rocking-chair.webp",
+                "enabled": True,
+                "companion_points": {"jordan": 180, "casey": 90},
+            },
+            {
+                "id": "harbor-watercolor",
+                "title": "Harbor Watercolor",
+                "category": "Art",
+                "description": "A modest original watercolor of a New England harbor in an oak frame.",
+                "story": "Painted during the family’s first summer by the coast.",
+                "value_range": "$75–$150",
+                "image": "/simulation/harbor-watercolor.webp",
+                "enabled": True,
+                "companion_points": {"jordan": 80, "casey": 40},
+            },
+        ],
+    }
+
+
+class SimulationItemConfig(BaseModel):
+    id: str = Field(..., min_length=1, max_length=80)
+    title: str = Field(..., min_length=1, max_length=120)
+    category: str = Field(..., min_length=1, max_length=60)
+    description: str = Field(..., min_length=1, max_length=500)
+    story: str = Field(default="", max_length=500)
+    value_range: str = Field(default="", max_length=60)
+    image: str = Field(..., pattern=r"^/simulation/[a-z0-9-]+\.webp$")
+    enabled: bool = True
+    companion_points: dict[str, int]
+
+
+class SimulationConfigRequest(BaseModel):
+    version: int = 1
+    required_for_launch: bool = True
+    title: str = Field(..., min_length=1, max_length=140)
+    welcome_message: str = Field(..., min_length=1, max_length=600)
+    items: list[SimulationItemConfig]
+
+
+class SimulationSolveRequest(BaseModel):
+    points: dict[str, int]
+
+
+def _validate_simulation_config(config: SimulationConfigRequest) -> dict:
+    enabled = [item for item in config.items if item.enabled]
+    if not 5 <= len(enabled) <= 10:
+        raise HTTPException(
+            status_code=400,
+            detail="The practice estate must contain between 5 and 10 enabled items.",
+        )
+    if len({item.id for item in config.items}) != len(config.items):
+        raise HTTPException(status_code=400, detail="Practice item IDs must be unique.")
+    for participant in ("jordan", "casey"):
+        total = sum(item.companion_points.get(participant, 0) for item in enabled)
+        if total != 1000:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{participant.title()}'s sample points must total exactly 1,000 (currently {total}).",
+            )
+        if any(item.companion_points.get(participant, 0) < 0 for item in enabled):
+            raise HTTPException(status_code=400, detail="Sample points cannot be negative.")
+    return config.model_dump()
+
+
+@app.get("/api/simulation/config")
+@limiter.limit("60/minute")
+async def get_simulation_config(request: Request, response: Response, db: DBSession = Depends(get_db)):
+    """Public, PII-free teaching template. Never contains a real estate session."""
+    row = db.query(AppSetting).filter(AppSetting.key == SIMULATION_CONFIG_KEY).one_or_none()
+    return JSONResponse(content=row.value if row and row.value else _default_simulation_config())
+
+
+def _simulation_context_payload(
+    session: SessionModel,
+    row: AppSetting | None,
+    heir: User | None = None,
+) -> dict:
+    config = dict(row.value if row and row.value else _default_simulation_config())
+    config["required_for_launch"] = bool(session.practice_required)
+    return {
+        "config": config,
+        "session_id": str(session.id),
+        "session_title": session.title,
+        "registered": heir is not None,
+        "published": session.simulation_published_at is not None,
+        "published_at": (
+            session.simulation_published_at.isoformat()
+            if session.simulation_published_at
+            else None
+        ),
+        "required_for_launch": bool(session.practice_required),
+        "completed_at": (
+            heir.practice_completed_at.isoformat()
+            if heir and heir.practice_completed_at
+            else None
+        ),
+    }
+
+
+@app.get("/api/sessions/{session_id}/simulation/config")
+@limiter.limit("60/minute")
+async def get_session_simulation_config(
+    request: Request,
+    response: Response,
+    session_id: str,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    role = current_user.get("role")
+    if role != "ADMIN" and str(current_user.get("session_id")) != str(session.id):
+        raise HTTPException(status_code=403, detail="This practice estate belongs to another session.")
+    heir = None
+    if role == "HEIR":
+        heir = db.query(User).filter(
+            User.id == current_user.get("user_id"),
+            User.session_id == session.id,
+            User.role == "HEIR",
+        ).first()
+    row = db.query(AppSetting).filter(
+        AppSetting.key == _simulation_config_key(session_id)
+    ).one_or_none()
+    return JSONResponse(content=_simulation_context_payload(session, row, heir))
+
+
+@app.get("/api/heirs/me/simulation")
+@limiter.limit("60/minute")
+async def get_my_simulation(
+    request: Request,
+    response: Response,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    if current_user.get("role") != "HEIR":
+        raise HTTPException(status_code=403, detail="Heir access required")
+    heir = db.query(User).filter(User.id == current_user.get("user_id")).first()
+    if not heir or not heir.session_id:
+        raise HTTPException(status_code=404, detail="Registered heir session not found")
+    session = db.query(SessionModel).filter(SessionModel.id == heir.session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    row = db.query(AppSetting).filter(
+        AppSetting.key == _simulation_config_key(str(session.id))
+    ).one_or_none()
+    return JSONResponse(content=_simulation_context_payload(session, row, heir))
+
+
+@app.post("/api/heirs/me/simulation/complete")
+@limiter.limit("20/minute")
+async def complete_my_simulation(
+    request: Request,
+    response: Response,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    if current_user.get("role") != "HEIR":
+        raise HTTPException(status_code=403, detail="Heir access required")
+    heir = db.query(User).filter(User.id == current_user.get("user_id")).first()
+    if not heir or not heir.session_id:
+        raise HTTPException(status_code=404, detail="Registered heir session not found")
+    session = db.query(SessionModel).filter(SessionModel.id == heir.session_id).first()
+    if not session or not session.simulation_published_at:
+        raise HTTPException(status_code=409, detail="The Executor has not published this practice allocation yet.")
+    heir.practice_completed_at = datetime.now(timezone.utc)
+    db.commit()
+    return {
+        "status": "completed",
+        "session_id": str(session.id),
+        "completed_at": heir.practice_completed_at.isoformat(),
+    }
+
+
+@app.post("/api/heirs/me/simulation/solve")
+@limiter.limit("20/minute")
+async def solve_my_simulation(
+    request: Request,
+    response: Response,
+    body: SimulationSolveRequest,
+    db: DBSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Run fictional points through the same solver used at finalization.
+
+    Practice points are validated in memory and are never written to a table,
+    audit log, application setting, or analytics record.
+    """
+    if current_user.get("role") != "HEIR":
+        raise HTTPException(status_code=403, detail="Heir access required")
+    heir = db.query(User).filter(User.id == current_user.get("user_id")).first()
+    if not heir or not heir.session_id:
+        raise HTTPException(status_code=404, detail="Registered heir session not found")
+    session = db.query(SessionModel).filter(SessionModel.id == heir.session_id).first()
+    if not session or not session.simulation_published_at:
+        raise HTTPException(status_code=409, detail="The practice allocation is not published.")
+    row = db.query(AppSetting).filter(
+        AppSetting.key == _simulation_config_key(str(session.id))
+    ).one_or_none()
+    config = row.value if row and row.value else _default_simulation_config()
+    items = [item for item in config["items"] if item.get("enabled", True)]
+    item_ids = [item["id"] for item in items]
+    if set(body.points) != set(item_ids):
+        raise HTTPException(status_code=400, detail="Practice points must include every enabled fictional item.")
+    if any(value < 0 or value > 1000 for value in body.points.values()):
+        raise HTTPException(status_code=400, detail="Practice points must be between 0 and 1,000.")
+    if sum(body.points.values()) != 1000:
+        raise HTTPException(status_code=400, detail="Practice points must total exactly 1,000.")
+
+    participant_ids = ["practice-you", "practice-jordan", "practice-casey"]
+    valuations = {
+        "practice-you": body.points,
+        "practice-jordan": {
+            item["id"]: int(item.get("companion_points", {}).get("jordan", 0))
+            for item in items
+        },
+        "practice-casey": {
+            item["id"]: int(item.get("companion_points", {}).get("casey", 0))
+            for item in items
+        },
+    }
+    now = datetime.now(timezone.utc)
+    from .solver import solve_mnw
+
+    result = solve_mnw(
+        heir_ids=participant_ids,
+        asset_ids=item_ids,
+        valuations=valuations,
+        submission_times={
+            "practice-you": now,
+            "practice-jordan": now + timedelta(seconds=1),
+            "practice-casey": now + timedelta(seconds=2),
+        },
+    )
+    participant_names = {
+        "practice-you": "you",
+        "practice-jordan": "jordan",
+        "practice-casey": "casey",
+    }
+    assignment = {
+        item_id: participant_names[participant_id]
+        for participant_id, allocated_items in result.allocation.items()
+        for item_id in allocated_items
+    }
+    utility = {
+        participant_names[participant_id]: sum(
+            valuations[participant_id].get(item_id, 0)
+            for item_id in allocated_items
+        )
+        for participant_id, allocated_items in result.allocation.items()
+    }
+    tie_events = [
+        {
+            "item": next((item for item in items if item["id"] == event.asset_id), {"id": event.asset_id, "title": event.asset_id}),
+            "tied": [participant_names.get(pid, pid) for pid in event.tied_heir_ids],
+            "winner": participant_names.get(event.winner_heir_id, event.winner_heir_id),
+            "points": event.points,
+            "reason": event.reason,
+        }
+        for event in result.tie_breaker_events
+    ]
+    return {
+        "engine": "production",
+        "assignment": assignment,
+        "utility": utility,
+        "product": result.mnw_product_value,
+        "tieEvents": tie_events,
+        "valuations": {
+            "you": valuations["practice-you"],
+            "jordan": valuations["practice-jordan"],
+            "casey": valuations["practice-casey"],
+        },
+    }
+
+
+@app.put("/api/sessions/{session_id}/simulation/config")
+@limiter.limit("20/minute")
+async def update_simulation_config(
+    request: Request,
+    response: Response,
+    session_id: str,
+    body: SimulationConfigRequest,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    config = _validate_simulation_config(body)
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.status != "SETUP":
+        raise HTTPException(
+            status_code=409,
+            detail="Practice configuration is locked after the real allocation has launched.",
+        )
+    row = db.query(AppSetting).filter(
+        AppSetting.key == _simulation_config_key(session_id)
+    ).one_or_none()
+    if row is None:
+        row = AppSetting(key=_simulation_config_key(session_id))
+        db.add(row)
+    row.value = config
+    try:
+        row.updated_by_id = UUID(str(current_admin.get("user_id")))
+    except (TypeError, ValueError):
+        row.updated_by_id = None
+    session.practice_required = body.required_for_launch
+    session.simulation_published_at = datetime.now(timezone.utc)
+    # A changed rehearsal must be completed again so the launch gate reflects
+    # the exact version the registered heirs were shown.
+    db.query(User).filter(
+        User.session_id == session.id,
+        User.role == "HEIR",
+    ).update({User.practice_completed_at: None}, synchronize_session=False)
+    db.commit()
+    return JSONResponse(content=_simulation_context_payload(session, row))
+
+
+@app.post("/api/sessions/{session_id}/simulation/reset")
+@limiter.limit("10/minute")
+async def reset_simulation_config(
+    request: Request,
+    response: Response,
+    session_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    config = _default_simulation_config()
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.status != "SETUP":
+        raise HTTPException(status_code=409, detail="Practice configuration is locked after launch.")
+    row = db.query(AppSetting).filter(
+        AppSetting.key == _simulation_config_key(session_id)
+    ).one_or_none()
+    if row is None:
+        row = AppSetting(key=_simulation_config_key(session_id))
+        db.add(row)
+    row.value = config
+    session.practice_required = True
+    session.simulation_published_at = datetime.now(timezone.utc)
+    db.query(User).filter(
+        User.session_id == session.id,
+        User.role == "HEIR",
+    ).update({User.practice_completed_at: None}, synchronize_session=False)
+    db.commit()
+    return JSONResponse(content=_simulation_context_payload(session, row))
+
+
+@app.get("/api/sessions/{session_id}/simulation/status")
+@limiter.limit("60/minute")
+async def get_simulation_status(
+    request: Request,
+    response: Response,
+    session_id: str,
+    db: DBSession = Depends(get_db),
+    current_admin: dict = Depends(get_current_admin),
+):
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    heirs = db.query(User).filter(
+        User.session_id == session.id,
+        User.role == "HEIR",
+    ).order_by(User.created_at.asc()).all()
+    return {
+        "session_id": str(session.id),
+        "published": session.simulation_published_at is not None,
+        "required_for_launch": bool(session.practice_required),
+        "total_heirs": len(heirs),
+        "completed_heirs": sum(1 for heir in heirs if heir.practice_completed_at),
+        "heirs": [
+            {
+                "heir_id": str(heir.id),
+                "display_name": heir.username,
+                "status": heir.status,
+                "practice_completed_at": (
+                    heir.practice_completed_at.isoformat()
+                    if heir.practice_completed_at
+                    else None
+                ),
+            }
+            for heir in heirs
+        ],
+    }
+
+
 @app.get("/api/admin/settings")
 @limiter.limit("30/minute")
 async def admin_get_settings(
     request: Request,
+    response: Response,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
 ):
@@ -852,6 +1327,7 @@ async def admin_get_settings(
 @limiter.limit("30/minute")
 async def admin_update_settings(
     request: Request,
+    response: Response,
     body: AdminSettingsUpdateRequest,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
@@ -868,6 +1344,7 @@ async def admin_update_settings(
 @limiter.limit("10/minute")
 async def admin_test_connection(
     request: Request,
+    response: Response,
     body: AdminSettingsTestConnectionRequest,
     current_admin: dict = Depends(get_current_admin),
 ):
@@ -1091,6 +1568,7 @@ def _parse_ai_dimensions(payload: dict) -> dict:
 @limiter.limit("30/minute")
 async def session_launch(
     request: Request,
+    response: Response,
     session_id: str,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
@@ -1130,6 +1608,31 @@ async def session_launch(
             "Stage and publish at least one asset first.",
         )
 
+    if session.practice_required:
+        unpublished_blocker = practice_launch_blocker(
+            required=True,
+            published=session.simulation_published_at is not None,
+        )
+        if unpublished_blocker:
+            raise HTTPException(status_code=400, detail=unpublished_blocker)
+        incomplete_heirs = (
+            db.query(User)
+            .filter(
+                User.session_id == session.id,
+                User.role == "HEIR",
+                User.status.notin_(["ABSTAINED", "EXPIRED_NON_PARTICIPATING"]),
+                User.practice_completed_at.is_(None),
+            )
+            .all()
+        )
+        completion_blocker = practice_launch_blocker(
+            required=True,
+            published=True,
+            incomplete_heir_names=[heir.username for heir in incomplete_heirs],
+        )
+        if completion_blocker:
+            raise HTTPException(status_code=400, detail=completion_blocker)
+
     now_utc = datetime.now(timezone.utc)
     session.status = "ACTIVE"
     session.deadline = now_utc + timedelta(days=14)
@@ -1159,6 +1662,7 @@ async def session_launch(
 @limiter.limit("30/minute")
 async def session_pause(
     request: Request,
+    response: Response,
     session_id: str,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
@@ -1212,6 +1716,7 @@ async def session_pause(
 @limiter.limit("30/minute")
 async def session_unpause(
     request: Request,
+    response: Response,
     session_id: str,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
@@ -1292,6 +1797,7 @@ async def session_unpause(
 @limiter.limit("30/minute")
 async def session_announcement(
     request: Request,
+    response: Response,
     session_id: str,
     body: AnnouncementRequest,
     db: DBSession = Depends(get_db),
@@ -1684,6 +2190,7 @@ def _log_asset_audit_event(
 @limiter.limit("30/minute")
 async def asset_stage(
     request: Request,
+    response: Response,
     session_id: str,
     background_tasks: BackgroundTasks,
     location: Optional[str] = None,
@@ -1951,6 +2458,7 @@ def _build_asset_embedding_text(asset: Asset) -> str:
 @limiter.limit("30/minute")
 async def asset_publish(
     request: Request,
+    response: Response,
     asset_id: str,
     body: AssetPublishRequest,
     db: DBSession = Depends(get_db),
@@ -2133,6 +2641,7 @@ async def asset_publish(
 @limiter.limit("30/minute")
 async def save_asset(
     request: Request,
+    response: Response,
     asset_id: str,
     body: AssetSaveRequest,
     db: DBSession = Depends(get_db),
@@ -2304,6 +2813,7 @@ async def save_asset(
 @limiter.limit("30/minute")
 async def add_asset_image(
     request: Request,
+    response: Response,
     asset_id: str,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
@@ -2377,6 +2887,7 @@ async def add_asset_image(
 @limiter.limit("30/minute")
 async def delete_asset_image(
     request: Request,
+    response: Response,
     asset_id: str,
     image_id: str,
     db: DBSession = Depends(get_db),
@@ -2433,6 +2944,7 @@ async def delete_asset_image(
 @limiter.limit("30/minute")
 async def replace_asset_image(
     request: Request,
+    response: Response,
     asset_id: str,
     image_id: str,
     db: DBSession = Depends(get_db),
@@ -2536,6 +3048,7 @@ class CategoryCreateRequest(BaseModel):
 @limiter.limit("60/minute")
 async def get_session_categories(
     request: Request,
+    response: Response,
     session_id: str,
     db: DBSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
@@ -2556,6 +3069,7 @@ async def get_session_categories(
 @limiter.limit("30/minute")
 async def create_session_category(
     request: Request,
+    response: Response,
     session_id: str,
     body: CategoryCreateRequest,
     db: DBSession = Depends(get_db),
@@ -2584,6 +3098,7 @@ async def create_session_category(
 @limiter.limit("30/minute")
 async def delete_session_category(
     request: Request,
+    response: Response,
     session_id: str,
     name: str,
     db: DBSession = Depends(get_db),
@@ -2654,6 +3169,7 @@ class ValuationEstimate(PydanticBaseModel_):
 @limiter.limit("5/minute")
 async def generate_asset_details(
     request: Request,
+    response: Response,
     asset_id: str,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
@@ -2971,6 +3487,7 @@ class AIFeedbackRequest(PydanticBaseModel_):
 @limiter.limit("20/minute")
 async def save_ai_feedback(
     request: Request,
+    response: Response,
     asset_id: str,
     payload: AIFeedbackRequest,
     db: DBSession = Depends(get_db),
@@ -3013,6 +3530,7 @@ async def save_ai_feedback(
 @limiter.limit("60/minute")
 async def session_assets(
     request: Request,
+    response: Response,
     session_id: str,
     q: str | None = None,
     category: str | None = None,
@@ -3384,6 +3902,11 @@ def _heir_to_response(heir: User) -> dict:
         "submitted_at": (
             heir.submitted_at.isoformat() if heir.submitted_at else None
         ),
+        "practice_completed_at": (
+            heir.practice_completed_at.isoformat()
+            if heir.practice_completed_at
+            else None
+        ),
         "draft_version": heir.draft_version,
         "status": heir.status,
         "user_status": heir.status,
@@ -3400,6 +3923,7 @@ def _heir_to_response(heir: User) -> dict:
 @limiter.limit("60/minute")
 async def session_heirs(
     request: Request,
+    response: Response,
     session_id: str,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
@@ -3426,6 +3950,7 @@ async def session_heirs(
 @limiter.limit("30/minute")
 async def create_heir(
     request: Request,
+    response: Response,
     session_id: str,
     body: HeirCreateRequest,
     db: DBSession = Depends(get_db),
@@ -3520,6 +4045,7 @@ async def create_heir(
 @limiter.limit("30/minute")
 async def renew_invite_token(
     request: Request,
+    response: Response,
     heir_id: str,
     body: InviteTokenRenewRequest,
     db: DBSession = Depends(get_db),
@@ -3571,6 +4097,7 @@ async def renew_invite_token(
 @limiter.limit("30/minute")
 async def send_invite(
     request: Request,
+    response: Response,
     heir_id: str,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
@@ -3655,6 +4182,7 @@ async def send_invite(
 @limiter.limit("30/minute")
 async def delete_heir(
     request: Request,
+    response: Response,
     session_id: str,
     heir_id: str,
     db: DBSession = Depends(get_db),
@@ -3792,6 +4320,7 @@ async def delete_heir(
 @limiter.limit("30/minute")
 async def delete_asset(
     request: Request,
+    response: Response,
     asset_id: str,
     reason: Optional[str] = None,
     db: DBSession = Depends(get_db),
@@ -3894,6 +4423,7 @@ async def delete_asset(
 @limiter.limit("60/minute")
 async def get_pending_updates(
     request: Request,
+    response: Response,
     session_id: str,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
@@ -3921,6 +4451,7 @@ async def get_pending_updates(
 @limiter.limit("10/minute")
 async def publish_updates(
     request: Request,
+    response: Response,
     session_id: str,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
@@ -4119,6 +4650,7 @@ def _support_request_response(db: DBSession, ticket: SupportRequest) -> dict:
 @limiter.limit("30/minute")
 async def create_help_request(
     request: Request,
+    response: Response,
     session_id: str,
     message: Annotated[Optional[str], Form()] = None,
     file: Annotated[Optional[UploadFile], File()] = None,
@@ -4160,10 +4692,18 @@ async def create_help_request(
     if not message_str and not file:
         raise HTTPException(status_code=400, detail="Must provide message or image")
 
+    # Per Backend Spec §SupportRequestCreate: when a message is provided, it
+    # must be 5-1000 characters (image-only submissions skip this check).
+    if message_str and not (5 <= len(message_str) <= 1000):
+        raise HTTPException(
+            status_code=422,
+            detail="Message must be between 5 and 1000 characters.",
+        )
+
     heir_image_uri = None
     if file:
         import uuid as _uuid_mod
-        file_bytes = await file_upload.read()
+        file_bytes = await file.read()
         if file_bytes:
             try:
                 processed = preprocess_image(file_bytes)
@@ -4195,7 +4735,7 @@ async def create_help_request(
             "support_request_id": str(sr.id),
             "heir_id": str(heir_id),
             "heir_username": current_user.get("username", ""),
-            "message": body.message,
+            "message": message_str,
             "created_at": datetime.now(timezone.utc).isoformat(),
         },
     )
@@ -4206,7 +4746,7 @@ async def create_help_request(
         session_id,
         str(sr.id),
         current_user.get("username", ""),
-        body.message,
+        message_str,
     )
 
     return JSONResponse(
@@ -4222,6 +4762,7 @@ async def create_help_request(
 @limiter.limit("30/minute")
 async def create_direct_help_message(
     request: Request,
+    response: Response,
     session_id: str,
     heir_id: Annotated[str, Form()],
     message: Annotated[Optional[str], Form()] = None,
@@ -4334,6 +4875,7 @@ async def create_direct_help_message(
 @limiter.limit("60/minute")
 async def list_help_requests(
     request: Request,
+    response: Response,
     session_id: str,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
@@ -4365,6 +4907,7 @@ async def list_help_requests(
 @limiter.limit("60/minute")
 async def list_my_help_requests(
     request: Request,
+    response: Response,
     session_id: str,
     db: DBSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
@@ -4467,7 +5010,7 @@ async def reply_to_help_request(
         {
             "type": "support_reply",
             "ticket_id": str(ticket.id),
-            "message": body.response,
+            "message": response_str,
             "responded_at": now_utc.isoformat(),
             "initiator_role": getattr(ticket, "initiator_role", None) or "HEIR",
         },
@@ -4480,6 +5023,7 @@ async def reply_to_help_request(
 @limiter.limit("30/minute")
 async def resolve_help_request(
     request: Request,
+    response: Response,
     ticket_id: str,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
@@ -4543,6 +5087,7 @@ async def resolve_help_request(
 @limiter.limit("30/minute")
 async def upload_asset_audio(
     request: Request,
+    response: Response,
     asset_id: str,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
@@ -4623,6 +5168,7 @@ async def upload_asset_audio(
 @limiter.limit("30/minute")
 async def delete_asset_audio(
     request: Request,
+    response: Response,
     asset_id: str,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
@@ -4709,6 +5255,7 @@ class ValuationSubmitRequest(BaseModel):
 @limiter.limit("30/minute")
 async def save_valuation_draft(
     request: Request,
+    response: Response,
     session_id: str,
     body: ValuationDraftRequest,
     db: DBSession = Depends(get_db),
@@ -4825,6 +5372,7 @@ async def save_valuation_draft(
 @limiter.limit("20/minute")
 async def submit_valuations(
     request: Request,
+    response: Response,
     session_id: str,
     body: ValuationSubmitRequest,
     db: DBSession = Depends(get_db),
@@ -4997,6 +5545,7 @@ async def submit_valuations(
 @limiter.limit("60/minute")
 async def get_heir_valuations(
     request: Request,
+    response: Response,
     session_id: str,
     heir_id: str,
     db: DBSession = Depends(get_db),
@@ -5066,6 +5615,7 @@ def _identity_scan_media_type(raw_bytes: bytes) -> str:
 @limiter.limit("30/minute")
 async def preview_heir_id_scan(
     request: Request,
+    response: Response,
     heir_id: str,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
@@ -5107,6 +5657,7 @@ async def preview_heir_id_scan(
 @limiter.limit("10/minute")
 async def verify_heir_identity(
     request: Request,
+    response: Response,
     heir_id: str,
     body: VerifyIdentityRequest,
     db: DBSession = Depends(get_db),
@@ -5184,7 +5735,7 @@ async def verify_heir_identity(
                 "heir": _heir_to_response(heir),
             }
         )
-        set_auth_cookie(response, admin_token)
+        set_auth_cookie(response, admin_token, role="ADMIN")
         return response
 
     elif body.action == "reject":
@@ -5214,7 +5765,7 @@ async def verify_heir_identity(
                 "heir": _heir_to_response(heir),
             }
         )
-        set_auth_cookie(response, admin_token)
+        set_auth_cookie(response, admin_token, role="ADMIN")
         return response
 
 
@@ -5236,6 +5787,7 @@ class AssetPreAllocateRequest(BaseModel):
 @limiter.limit("30/minute")
 async def pre_allocate_asset(
     request: Request,
+    response: Response,
     asset_id: str,
     body: AssetPreAllocateRequest,
     db: DBSession = Depends(get_db),
@@ -5293,6 +5845,7 @@ async def pre_allocate_asset(
 @limiter.limit("30/minute")
 async def create_faq(
     request: Request,
+    response: Response,
     session_id: str,
     body: FAQCreate,
     db: DBSession = Depends(get_db),
@@ -5337,6 +5890,7 @@ async def create_faq(
 @limiter.limit("30/minute")
 async def update_faq(
     request: Request,
+    response: Response,
     session_id: str,
     faq_id: str,
     body: FAQCreate,
@@ -5378,6 +5932,7 @@ async def update_faq(
 @limiter.limit("30/minute")
 async def delete_faq(
     request: Request,
+    response: Response,
     session_id: str,
     faq_id: str,
     db: DBSession = Depends(get_db),
@@ -5416,6 +5971,7 @@ async def delete_faq(
 @limiter.limit("60/minute")
 async def list_faqs(
     request: Request,
+    response: Response,
     session_id: str,
     db: DBSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
@@ -5562,7 +6118,7 @@ async def setup_admin(
         role="ADMIN",
         session_id=None,
     )
-    set_auth_cookie(response, jwt_token)
+    set_auth_cookie(response, jwt_token, role="ADMIN")
 
     response.status_code = 201
     return {
@@ -5582,6 +6138,8 @@ class SessionResponse(BaseModel):
     announcement: str | None = None
     announcement_updated_at: str | None = None
     deadline: str | None = None
+    practice_required: bool = False
+    simulation_published_at: str | None = None
     created_at: str
 
 
@@ -5610,6 +6168,12 @@ async def get_session_details(
         announcement=session.announcement,
         announcement_updated_at=session.announcement_updated_at.isoformat() if session.announcement_updated_at else None,
         deadline=session.deadline.isoformat() if session.deadline else None,
+        practice_required=bool(session.practice_required),
+        simulation_published_at=(
+            session.simulation_published_at.isoformat()
+            if session.simulation_published_at
+            else None
+        ),
         created_at=session.created_at.isoformat() if session.created_at else "",
     )
 
@@ -5642,6 +6206,12 @@ async def list_sessions(
             announcement=s.announcement,
             announcement_updated_at=s.announcement_updated_at.isoformat() if s.announcement_updated_at else None,
             deadline=s.deadline.isoformat() if s.deadline else None,
+            practice_required=bool(s.practice_required),
+            simulation_published_at=(
+                s.simulation_published_at.isoformat()
+                if s.simulation_published_at
+                else None
+            ),
             created_at=s.created_at.isoformat() if s.created_at else "",
         )
         for s in sessions
@@ -5652,6 +6222,7 @@ async def list_sessions(
 @limiter.limit("30/minute")
 async def create_session(
     request: Request,
+    response: Response,
     body: SessionCreateRequest,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
@@ -5668,6 +6239,7 @@ async def create_session(
         status="SETUP",
         is_paused=False,
         is_deadlocked=False,
+        practice_required=True,
     )
     db.add(session)
     db.flush()
@@ -5689,6 +6261,8 @@ async def create_session(
             "deadline": (
                 session.deadline.isoformat() if session.deadline else None
             ),
+            "practice_required": True,
+            "simulation_published_at": None,
         },
         status_code=201,
     )
@@ -5725,6 +6299,12 @@ async def update_session(
         announcement=session.announcement,
         announcement_updated_at=session.announcement_updated_at.isoformat() if session.announcement_updated_at else None,
         deadline=session.deadline.isoformat() if session.deadline else None,
+        practice_required=bool(session.practice_required),
+        simulation_published_at=(
+            session.simulation_published_at.isoformat()
+            if session.simulation_published_at
+            else None
+        ),
         created_at=session.created_at.isoformat() if session.created_at else "",
     )
 
@@ -5736,6 +6316,7 @@ async def update_session(
 @limiter.limit("60/minute")
 async def get_my_heir_profile(
     request: Request,
+    response: Response,
     db: DBSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
@@ -5758,6 +6339,7 @@ async def get_my_heir_profile(
 @limiter.limit("30/minute")
 async def update_my_heir_profile(
     request: Request,
+    response: Response,
     body: HeirProfileUpdate,
     db: DBSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
@@ -5924,6 +6506,7 @@ async def update_my_heir_profile(
 @limiter.limit("10/minute")
 async def upload_id_scan(
     request: Request,
+    response: Response,
     db: DBSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
@@ -6164,7 +6747,7 @@ async def gdpr_erase_heir(
     db.commit()
 
     # Clear auth cookie
-    clear_auth_cookie(response)
+    clear_auth_cookie(response, role="HEIR")
 
     return JSONResponse(
         content={
@@ -6184,6 +6767,7 @@ async def gdpr_erase_heir(
 @limiter.limit("10/minute")
 async def gdpr_export_heir(
     request: Request,
+    response: Response,
     db: DBSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
@@ -6529,6 +7113,7 @@ async def abstain(
 @limiter.limit("20/minute")
 async def download_abstain_receipt(
     request: Request,
+    response: Response,
     db: DBSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
@@ -6629,6 +7214,7 @@ async def download_abstain_receipt(
 @limiter.limit("10/minute")
 async def session_override(
     request: Request,
+    response: Response,
     session_id: str,
     body: list[AdminOverrideRequest],
     db: DBSession = Depends(get_db),
@@ -6853,6 +7439,7 @@ async def session_override(
 @limiter.limit("10/minute")
 async def finalize_session(
     request: Request,
+    response: Response,
     session_id: str,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
@@ -7059,6 +7646,7 @@ async def finalize_session(
 @limiter.limit("30/minute")
 async def download_probate_ledger(
     request: Request,
+    response: Response,
     session_id: str,
     db: DBSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
@@ -7149,6 +7737,7 @@ async def download_probate_ledger(
 @limiter.limit("10/minute")
 async def download_all_keepsakes_zip(
     request: Request,
+    response: Response,
     session_id: str,
     db: DBSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
@@ -7257,6 +7846,7 @@ async def download_all_keepsakes_zip(
 @limiter.limit("30/minute")
 async def download_heir_keepsake(
     request: Request,
+    response: Response,
     session_id: str,
     heir_id: str,
     db: DBSession = Depends(get_db),
@@ -8014,6 +8604,7 @@ def _run_post_restore_migrations() -> None:
 @limiter.limit("5/minute")
 async def system_backup(
     request: Request,
+    response: Response,
     db: DBSession = Depends(get_db),
     current_admin: dict = Depends(get_current_admin),
 ):
@@ -8098,6 +8689,7 @@ async def system_backup(
 @limiter.limit("3/minute")
 async def system_restore(
     request: Request,
+    response: Response,
     db: DBSession = Depends(get_db),
 ):
     """
@@ -8129,7 +8721,7 @@ async def system_restore(
 
     if not is_fresh_system:
         # T72: Require admin JWT cookie authentication on initialized systems
-        auth_token = request.cookies.get("estate_session")
+        auth_token = request.cookies.get("estate_admin_session") or request.cookies.get("estate_session")
         if not auth_token:
             raise HTTPException(
                 status_code=401,
@@ -8312,6 +8904,7 @@ async def system_restore(
 @limiter.limit("3/minute")
 async def secure_session_purge(
     request: Request,
+    response: Response,
     session_id: str,
     confirm: bool = None,
     db: DBSession = Depends(get_db),
@@ -8453,8 +9046,16 @@ async def session_websocket(
       - All frames carry "is_synthetic": true per SB 942 (§2.5)
     """
     # ── Handshake authentication ──────────────────────────────────────────
+    # Browsers can't attach custom headers to a WebSocket handshake, so we
+    # can't use the X-Estate-Role disambiguation header here. In practice
+    # only the Heir dashboard opens this connection today, so prefer the
+    # Heir cookie, then Admin (future broadcast-only client), then legacy.
     try:
-        cookie_value = websocket.cookies.get("estate_session")
+        cookie_value = (
+            websocket.cookies.get("estate_heir_session")
+            or websocket.cookies.get("estate_admin_session")
+            or websocket.cookies.get("estate_session")
+        )
     except Exception:
         await websocket.close(code=4003, reason="No JWT cookie found")
         return

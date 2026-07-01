@@ -236,7 +236,8 @@ class TestMultiImageStaging:
         # - 1 Asset record
         # - 1 Primary AssetImage record
         # - 2 Secondary AssetImage records
-        assert mock_db.add.call_count == 4
+        # - 1 ASSET_CREATED AuditLog entry
+        assert mock_db.add.call_count == 5
         calls = [call[0][0] for call in mock_db.add.call_args_list]
         
         assets = [c for c in calls if isinstance(c, Asset)]
@@ -283,7 +284,9 @@ class TestAIDetailGeneration:
         assert data["keywords"] == "Victorian, Antique, Brass, Lamp, Green Glass"
         
         mock_storage.get.assert_called_once_with("static/uploads/lamp.webp")
-        mock_llm.generate_vision.assert_called_once()
+        # Called twice: once to generate the listing details (vision), once
+        # more to estimate a valuation range (pricing) from those details.
+        assert mock_llm.generate_vision.call_count == 2
         assert "appraiser" in mock_llm.generate_vision.call_args[1]["prompt"]
 
     def test_save_ai_feedback_success(self, client):

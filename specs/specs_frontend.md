@@ -478,9 +478,15 @@ Guarantees the estate catalog is fully prepared before launching. Renders:
 
 ### 6.2 `AdminSessionLifecycleControls`
 Orchestrates active mediation session states:
-*   **Launch Session**: Transitions the session status from `'SETUP'` to `'ACTIVE'`.
+*   **Launch Session**: Transitions the session status from `'SETUP'` to `'ACTIVE'`. For new sessions, the launch action stays disabled until the session-specific practice simulation is published and all required registered Heirs have completed it; the control shows the live completed/total count.
 *   **Grief Pause Control**: Toggles the `is_paused` flag, locking sliders and AI chats on the heir's client side during emotional halts.
 *   **Finalize / Lock Session**: Transitions the session status to `'LOCKED'` to calculate distribution matrices or `'FINALIZED'` to output documents.
+
+### 6.2a `AllocationPracticeRoom` and `AdminSimulationManager`
+*   **Registered-Heir Step**: During `'SETUP'`, the Heir dashboard presents the session-specific rehearsal as Step 1. Completion is recorded to the logged-in Heir while fictional point values remain transient.
+*   **Real-UI Parity**: The rehearsal mirrors the live photo catalog, item details, 1,000-point remaining meter, sliders/exact inputs, review-and-lock warning, progress-only waiting state, and final allocation explanation.
+*   **Algorithm Education**: Explains private preferences, complete-distribution enumeration, personal utility, Nash-product balancing, deterministic ties, and documented human-review deadlocks.
+*   **Executor Manager**: The selected session's Practice Simulation tab edits and publishes the fictional template, chooses whether completion is required, shows each registered Heir's completion, previews the exact template, and resets defaults.
 
 ### 6.3 `AdminCommunicationsPanel`
 Facilitates Executor announcements and direct assistance:

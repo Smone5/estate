@@ -641,7 +641,15 @@ All administrative, session management, and verification actions are executed vi
     *   **Access**: Admin credentials required.
     *   **Description**: Transitions the session status from `'SETUP'` to `'ACTIVE'`. This permanently locks the inventory catalog from further uploads/updates, unlocks points sliders and chat mediation interfaces for all heirs, sets the session `deadline` to 14 days from the launch timestamp (or the configured lifespan duration), and triggers a WebSocket broadcast of the updated status.
     *   **Constraint**: Returns `400 Bad Request` if there are no published assets (either `'LIVE'` or `'PRE_ALLOCATED'`) in the database for this session.
+    *   **Practice Gate**: New sessions default to `practice_required = true`. When required, launch also returns `400 Bad Request` until a session-specific fictional simulation has been published and every registered, participating Heir has a non-null `practice_completed_at`. The error identifies incomplete Heirs. The Executor may explicitly mark practice optional in the Simulation Manager; migrated existing sessions default to optional.
     *   **Response**: `{"session_id": "UUID", "status": "ACTIVE"}`
+*   **Practice Simulation Endpoints**
+    *   `GET /api/heirs/me/simulation`: Returns the current registered Heir's session-specific fictional configuration, publication state, and completion timestamp.
+    *   `POST /api/heirs/me/simulation/solve`: Validates the fictional 1,000-point sheet and runs it in memory through the same `solve_mnw` production solver used at finalization. The request is never persisted.
+    *   `POST /api/heirs/me/simulation/complete`: Records `users.practice_completed_at` after the Heir reaches the rehearsal result. Practice point values are never sent or stored.
+    *   `GET /api/sessions/{session_id}/simulation/status`: Admin-only completion list for registered Heirs.
+    *   `PUT /api/sessions/{session_id}/simulation/config`: Admin-only publish/update. Stores the encrypted fictional template and resets completion timestamps when the version changes.
+    *   `POST /api/sessions/{session_id}/simulation/reset`: Admin-only restore of the default fictional template.
 *   **`PUT /api/sessions/{session_id}/announcement`**
     *   **Access**: Admin credentials required.
     *   **Request Body**: `AnnouncementRequest`
